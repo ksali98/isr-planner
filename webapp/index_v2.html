@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ISR Web Editor + Planner v2</title>
+  <link rel="stylesheet" href="/static/isr.css" />
+  <style>
+    /* V2 Sidebar overrides - keep the clean sidebar style */
+    .right-panel {
+      background: #1e293b;
+      padding: 1rem;
+      border-left: 1px solid #334155;
+    }
+
+    .section {
+      margin-bottom: 1rem;
+      padding: 0.75rem;
+      background: #0f172a;
+      border-radius: 6px;
+    }
+
+    .section-title {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      margin-bottom: 0.5rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    /* Stats Grid */
+    .stats-grid-v2 {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0.5rem;
+      font-size: 0.7rem;
+    }
+
+    .stat-card-v2 {
+      padding: 0.4rem;
+      background: #1e293b;
+      border-radius: 4px;
+      text-align: center;
+    }
+
+    .stat-card-v2.d1 { border-top: 2px solid #ef4444; }
+    .stat-card-v2.d2 { border-top: 2px solid #3b82f6; }
+    .stat-card-v2.d3 { border-top: 2px solid #22c55e; }
+    .stat-card-v2.d4 { border-top: 2px solid #a855f7; }
+    .stat-card-v2.d5 { border-top: 2px solid #f97316; }
+
+    .stat-label { color: #94a3b8; font-size: 0.65rem; }
+    .stat-value { font-weight: 600; color: #e2e8f0; }
+
+    /* Config Table */
+    .config-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.3rem;
+      font-size: 0.75rem;
+    }
+
+    .config-row label { width: 30px; font-weight: 600; }
+
+    .config-row input[type="number"] {
+      width: 60px;
+      background: #1e293b;
+      border: 1px solid #475569;
+      border-radius: 4px;
+      padding: 0.25rem;
+      color: #e2e8f0;
+      font-size: 0.75rem;
+    }
+
+    .config-row input[type="checkbox"] { width: 16px; height: 16px; }
+
+    /* Trajectory Buttons */
+    .traj-buttons { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+
+    .traj-btn-v2 {
+      padding: 0.3rem 0.6rem;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      font-weight: 600;
+      opacity: 0.5;
+    }
+
+    .traj-btn-v2.active { opacity: 1; }
+    .traj-btn-v2.d1 { background: #ef4444; color: white; }
+    .traj-btn-v2.d2 { background: #3b82f6; color: white; }
+    .traj-btn-v2.d3 { background: #22c55e; color: white; }
+    .traj-btn-v2.d4 { background: #a855f7; color: white; }
+    .traj-btn-v2.d5 { background: #f97316; color: white; }
+    .traj-btn-v2.all { background: #64748b; color: white; }
+
+    /* Allocation Display */
+    #allocation-display {
+      font-family: monospace;
+      font-size: 0.7rem;
+      padding: 0.5rem;
+      background: #1e293b;
+      border-radius: 4px;
+      max-height: 100px;
+      overflow-y: auto;
+    }
+
+    /* Strategy Select */
+    .strategy-select {
+      width: 100%;
+      background: #1e293b;
+      border: 1px solid #475569;
+      border-radius: 4px;
+      padding: 0.4rem;
+      color: #e2e8f0;
+      font-size: 0.8rem;
+    }
+
+    /* IO Buttons */
+    .io-buttons { display: flex; gap: 0.5rem; }
+    .io-buttons button { flex: 1; }
+
+    .btn-secondary {
+      background: #475569;
+      color: white;
+      border: none;
+      padding: 0.4rem 0.8rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .btn-secondary:hover { background: #64748b; }
+
+    .btn-export { background: #22c55e; }
+    .btn-export:hover { background: #16a34a; }
+  </style>
+</head>
+<body>
+  <div id="app-root">
+    <!-- Top bar -->
+    <header class="top-bar">
+      <div class="top-title">ISR Mission Editor &amp; Planner v2</div>
+      <div class="top-env">
+        Env file:
+        <span id="env-filename" class="env-filename">[unsaved]</span>
+      </div>
+    </header>
+
+    <!-- Main 2-column layout -->
+    <main class="main-layout">
+      <!-- LEFT COLUMN: Canvas + toolbar -->
+      <section class="left-panel">
+        <!-- Canvas / environment -->
+        <div class="canvas-card">
+          <div class="card-header">
+            <span>Mission Map</span>
+            <button id="btn-solve" class="primary-btn">Solve</button>
+          </div>
+          <canvas id="env-canvas" width="800" height="800"></canvas>
+        </div>
+
+        <!-- Toolbar -->
+        <div class="unified-toolbar-card">
+          <div class="unified-toolbar">
+            <button id="sequence-apply-btn" class="small-btn secondary-btn">Apply</button>
+            <select id="sequence-drone-select" class="compact-select">
+              <option value="1">D1</option>
+              <option value="2">D2</option>
+              <option value="3">D3</option>
+              <option value="4">D4</option>
+              <option value="5">D5</option>
+            </select>
+            <input id="sequence-input" type="text" placeholder="A1,T1,T2,A1" spellcheck="false" />
+            <span class="toolbar-divider">|</span>
+            <button id="btn-toggle-edit" class="small-btn edit-toggle">Edit</button>
+            <select id="new-target-priority" class="compact-select">
+              <option value="5" selected>5</option>
+            </select>
+            <select id="new-target-type" class="compact-select">
+              <option value="a">A</option>
+              <option value="b">B</option>
+              <option value="c">C</option>
+              <option value="d">D</option>
+            </select>
+            <button id="btn-add-target" class="small-btn add-btn">Target</button>
+            <button id="btn-add-airport" class="small-btn add-btn">Airport</button>
+            <button id="btn-add-sam" class="small-btn add-btn">SAM</button>
+            <select id="new-sam-range" class="compact-select">
+              <option value="15" selected>15</option>
+            </select>
+            <button id="btn-delete-selected" class="small-btn danger">Del</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT COLUMN: Clean sidebar -->
+      <aside class="right-panel">
+        <!-- Stats -->
+        <div class="section">
+          <div class="section-title">Drone Stats</div>
+          <div class="stats-grid-v2">
+            <div class="stat-card-v2 d1">
+              <div class="stat-label">D1</div>
+              <div class="stat-value"><span id="stat-d1-dist">0</span></div>
+              <div class="stat-label">dist</div>
+              <div class="stat-value"><span id="stat-d1-pts">0</span></div>
+              <div class="stat-label">pts</div>
+              <div class="stat-value"><span id="stat-d1-pf">0.00</span></div>
+              <div class="stat-label">P/F</div>
+            </div>
+            <div class="stat-card-v2 d2">
+              <div class="stat-label">D2</div>
+              <div class="stat-value"><span id="stat-d2-dist">0</span></div>
+              <div class="stat-label">dist</div>
+              <div class="stat-value"><span id="stat-d2-pts">0</span></div>
+              <div class="stat-label">pts</div>
+              <div class="stat-value"><span id="stat-d2-pf">0.00</span></div>
+              <div class="stat-label">P/F</div>
+            </div>
+            <div class="stat-card-v2 d3">
+              <div class="stat-label">D3</div>
+              <div class="stat-value"><span id="stat-d3-dist">0</span></div>
+              <div class="stat-label">dist</div>
+              <div class="stat-value"><span id="stat-d3-pts">0</span></div>
+              <div class="stat-label">pts</div>
+              <div class="stat-value"><span id="stat-d3-pf">0.00</span></div>
+              <div class="stat-label">P/F</div>
+            </div>
+            <div class="stat-card-v2 d4">
+              <div class="stat-label">D4</div>
+              <div class="stat-value"><span id="stat-d4-dist">0</span></div>
+              <div class="stat-label">dist</div>
+              <div class="stat-value"><span id="stat-d4-pts">0</span></div>
+              <div class="stat-label">pts</div>
+              <div class="stat-value"><span id="stat-d4-pf">0.00</span></div>
+              <div class="stat-label">P/F</div>
+            </div>
+            <div class="stat-card-v2 d5">
+              <div class="stat-label">D5</div>
+              <div class="stat-value"><span id="stat-d5-dist">0</span></div>
+              <div class="stat-label">dist</div>
+              <div class="stat-value"><span id="stat-d5-pts">0</span></div>
+              <div class="stat-label">pts</div>
+              <div class="stat-value"><span id="stat-d5-pf">0.00</span></div>
+              <div class="stat-label">P/F</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Drone Config -->
+        <div class="section">
+          <div class="section-title">Drone Configuration</div>
+          <div class="config-table">
+            <div class="config-row">
+              <label>D1</label>
+              <input type="checkbox" id="enabled-d1" checked />
+              <input type="number" id="fuel-d1" value="300" min="0" />
+            </div>
+            <div class="config-row">
+              <label>D2</label>
+              <input type="checkbox" id="enabled-d2" checked />
+              <input type="number" id="fuel-d2" value="300" min="0" />
+            </div>
+            <div class="config-row">
+              <label>D3</label>
+              <input type="checkbox" id="enabled-d3" checked />
+              <input type="number" id="fuel-d3" value="300" min="0" />
+            </div>
+            <div class="config-row">
+              <label>D4</label>
+              <input type="checkbox" id="enabled-d4" checked />
+              <input type="number" id="fuel-d4" value="300" min="0" />
+            </div>
+            <div class="config-row">
+              <label>D5</label>
+              <input type="checkbox" id="enabled-d5" checked />
+              <input type="number" id="fuel-d5" value="300" min="0" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Allocation Strategy -->
+        <div class="section">
+          <div class="section-title">Allocation Strategy</div>
+          <select id="allocation-strategy" class="strategy-select">
+            <option value="efficient" selected>Efficient (Auction)</option>
+            <option value="greedy">Greedy (Fast)</option>
+            <option value="balanced">Balanced (Equal Load)</option>
+            <option value="geographic">Geographic (Corridor)</option>
+            <option value="exclusive">Exclusive (Unique First)</option>
+          </select>
+        </div>
+
+        <!-- Target Allocation -->
+        <div class="section">
+          <div class="section-title">Target Allocation</div>
+          <div id="allocation-display">
+            <div style="color: #64748b;">Import environment and solve to see allocations</div>
+          </div>
+        </div>
+
+        <!-- Trajectory Buttons -->
+        <div class="section">
+          <div class="section-title">Show Trajectories</div>
+          <div class="traj-buttons">
+            <button id="traj-d1" class="traj-btn-v2 d1">D1</button>
+            <button id="traj-d2" class="traj-btn-v2 d2">D2</button>
+            <button id="traj-d3" class="traj-btn-v2 d3">D3</button>
+            <button id="traj-d4" class="traj-btn-v2 d4">D4</button>
+            <button id="traj-d5" class="traj-btn-v2 d5">D5</button>
+            <button id="traj-all" class="traj-btn-v2 all">All</button>
+          </div>
+        </div>
+
+        <!-- Import/Export -->
+        <div class="section">
+          <div class="section-title">Import / Export</div>
+          <div class="io-buttons">
+            <button id="btn-import" class="btn-secondary">Import JSON</button>
+            <button id="btn-export" class="btn-secondary btn-export">Export JSON</button>
+            <input type="file" id="file-input" accept=".json" style="display: none;" />
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="/static/isr_v2.js"></script>
+</body>
+</html>

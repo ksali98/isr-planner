@@ -1,0 +1,136 @@
+{
+  "airports": [
+    {
+      "id": "A1",
+      "x": 10,
+      "y": 10
+    }
+  ],
+  "targets": [
+    {
+      "id": "T1",
+      "x": 39,
+      "y": 28,
+      "priority": 9,
+      "type": "a"
+    },
+    {
+      "id": "T4",
+      "x": 9.627777777777773,
+      "y": 27.03333333333334,
+      "priority": 5,
+      "type": "a"
+    },
+    {
+      "id": "T5",
+      "x": 18.51111111111109,
+      "y": 37.43333333333333,
+      "priority": 5,
+      "type": "a"
+    },
+    {
+      "id": "T6",
+      "x": 48.844444444444434,
+      "y": 15.550000000000004,
+      "priority": 10,
+      "type": "a"
+    },
+    {
+      "id": "T7",
+      "x": 14.899999999999991,
+      "y": 81.1277777777778,
+      "priority": 5,
+      "type": "e"
+    },
+    {
+      "id": "T8",
+      "x": 10.638888888888879,
+      "y": 45.233333333333334,
+      "priority": 5,
+      "type": "e"
+    },
+    {
+      "id": "T9",
+      "x": 40.03333333333333,
+      "y": 11.722222222222221,
+      "priority": 5,
+      "type": "e"
+    },
+    {
+      "id": "T12",
+      "x": 4.716666666666654,
+      "y": 46.74999999999999,
+      "priority": 10,
+      "type": "c"
+    }
+  ],
+  "sams": [
+    {
+      "pos": [
+        56.355555555555554,
+        76.72222222222223
+      ],
+      "range": 15
+    },
+    {
+      "pos": [
+        26.888888888888886,
+        55.70555555555556
+      ],
+      "range": 15
+    },
+    {
+      "pos": [
+        50,
+        50
+      ],
+      "range": 15
+    }
+  ],
+  "sequence": "A1,T4,T12,T7,T8,T5,T1,T6,T9,A1",
+  "fuel_budget": 409,
+  "drone_states": {
+    "1": {
+      "fuel_counter": 0,
+      "start_airport": "A1",
+      "end_airport": "A1",
+      "fuel_budget": 409
+    },
+    "2": {
+      "fuel_counter": 0,
+      "start_airport": "A1",
+      "end_airport": "A1",
+      "fuel_budget": 409
+    },
+    "3": {
+      "fuel_counter": 0,
+      "start_airport": "A1",
+      "end_airport": "A1",
+      "fuel_budget": 409
+    },
+    "4": {
+      "fuel_counter": 0,
+      "start_airport": "A1",
+      "end_airport": "A1",
+      "fuel_budget": 409
+    }
+  },
+  "selected_drone": 1,
+  "selected_target_type": "a",
+  "metadata": {
+    "export_timestamp": "2025-10-25T03:05:06.539220",
+    "version": "2.0",
+    "mission_type": "Drone 1 - Mission Control Export",
+    "source": "Mission Control Console",
+    "conversation_id": "6eff50b8",
+    "total_points": 54,
+    "total_fuel": 198.55671941585453,
+    "optimization_method": "orienteering_optimal",
+    "features": {
+      "multi_drone": true,
+      "target_types": true,
+      "sam_aware_distances": true,
+      "ai_optimized": true
+    }
+  }
+}
