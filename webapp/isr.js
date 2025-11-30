@@ -1137,6 +1137,9 @@ function attachSequenceBar() {
 // Stats update
 // ----------------------------------------------------
 function updateStatsFromRoutes() {
+  console.log("📊 updateStatsFromRoutes called");
+  console.log("📊 state.routes:", state.routes);
+
   const envTargets = (state.env && state.env.targets) || [];
   const totalTargets = envTargets.length; // reserved if you need it
 
@@ -1152,6 +1155,7 @@ function updateStatsFromRoutes() {
     const route = routeInfo.route || [];
     const points = Number(routeInfo.points || 0);
     const distance = Number(routeInfo.distance || 0);
+    console.log(`📊 Drone ${did}: points=${points}, distance=${distance}, route=`, route);
 
     // Use fuel budget from droneConfigs (Config tab) as the source of truth
     // Fall back to route info if config not available
@@ -1297,6 +1301,7 @@ function attachIOHandlers() {
 function attachOptimizationHandlers() {
   const btnInsert = $("btn-optimize-insert");
   const btnSwap = $("btn-optimize-swap");
+  const btnCrossRemove = $("btn-optimize-cross");
 
   if (btnInsert) {
     btnInsert.addEventListener("click", async () => {
@@ -1366,7 +1371,7 @@ function attachOptimizationHandlers() {
 
             // Recalculate trajectories for modified routes
             await regenerateTrajectories();
-            updateStats();
+            updateStatsFromRoutes();
             drawEnvironment();
           } else {
             appendDebugLine("Swap optimization: No beneficial swaps found.");
@@ -1379,6 +1384,67 @@ function attachOptimizationHandlers() {
       } finally {
         btnSwap.disabled = false;
         btnSwap.textContent = "Swap Closer";
+      }
+    });
+  }
+
+  if (btnCrossRemove) {
+    console.log("Cross Remove button handler attached");
+    btnCrossRemove.addEventListener("click", async () => {
+      console.log("Cross Remove button clicked!", state.routes);
+      if (!state.routes || Object.keys(state.routes).length === 0) {
+        appendDebugLine("No routes to optimize. Run planner first.");
+        return;
+      }
+      appendDebugLine("Running Crossing Removal optimization...");
+      btnCrossRemove.disabled = true;
+      btnCrossRemove.textContent = "Working...";
+
+      try {
+        const droneConfigs = state.droneConfigs;
+        const resp = await fetch("/api/crossing_removal_optimize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            solution: { routes: state.routes },
+            env: state.env,
+            drone_configs: droneConfigs
+          })
+        });
+        const data = await resp.json();
+
+        if (data.success) {
+          const fixes = data.fixes_made || [];
+          if (fixes.length > 0) {
+            // Update routes with optimized solution
+            state.routes = data.routes;
+            state.sequences = data.sequences;
+
+            // Update sequence display
+            for (const [did, seq] of Object.entries(data.sequences)) {
+              state.sequences[did] = seq;
+            }
+
+            appendDebugLine(`Crossing removal: ${fixes.length} crossings fixed.`);
+            fixes.forEach(fix => {
+              appendDebugLine(`  Drone ${fix.drone}: reversed segment ${fix.segment_i}-${fix.segment_j}`);
+            });
+
+            // Recalculate trajectories for modified routes
+            await regenerateTrajectories();
+            updateStatsFromRoutes();
+            drawEnvironment();
+          } else {
+            appendDebugLine("Crossing removal: No crossings found.");
+          }
+        } else {
+          appendDebugLine("Crossing removal error: " + (data.error || "Unknown error"));
+        }
+      } catch (err) {
+        appendDebugLine("Crossing removal error: " + err.message);
+      } finally {
+        btnCrossRemove.disabled = false;
+        btnCrossRemove.textContent = "Cross Remove";
       }
     });
   }

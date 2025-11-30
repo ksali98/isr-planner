@@ -186,9 +186,11 @@ function updateUI() {
 }
 
 function updateStats() {
+  console.log("updateStats called, state.routes:", state.routes);
   for (let i = 1; i <= 5; i++) {
     const did = String(i);
     const route = state.routes[did];
+    console.log(`  Drone ${did}: route=`, route);
 
     const distEl = document.getElementById(`stat-d${i}-dist`);
     const ptsEl = document.getElementById(`stat-d${i}-pts`);

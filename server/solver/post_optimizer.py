@@ -444,8 +444,9 @@ class TrajectorySwapOptimizer:
         for a in env.get("airports", []):
             waypoint_positions[str(a["id"])] = (float(a["x"]), float(a["y"]))
 
-        # Copy routes for modification
+        # Copy routes for modification, including trajectories
         optimized_routes = {}
+        drone_trajectories = {}  # Store the actual SAM-avoiding trajectories
         for did, route_data in solution.get("routes", {}).items():
             optimized_routes[did] = {
                 "route": list(route_data.get("route", [])),
@@ -454,6 +455,12 @@ class TrajectorySwapOptimizer:
                 "distance": route_data.get("distance", 0),
                 "fuel_budget": route_data.get("fuel_budget", 0),
             }
+            # Extract trajectory as list of (x, y) tuples
+            traj = route_data.get("trajectory", [])
+            if traj:
+                drone_trajectories[did] = [(float(p[0]), float(p[1])) for p in traj]
+            else:
+                drone_trajectories[did] = []
 
         # Build capability map: which target types each drone can carry
         drone_capabilities = {}
@@ -469,68 +476,109 @@ class TrajectorySwapOptimizer:
             else:
                 drone_capabilities[did] = {"a", "b", "c", "d"}
 
-        swap_occurred = True
-        iterations = 0
-        max_iterations = 10  # Prevent infinite loops
+        num_passes = 4  # Do 4 full passes through all targets
         all_swaps = []  # Track all swaps made
 
-        while swap_occurred and iterations < max_iterations:
-            swap_occurred = False
-            iterations += 1
-
-            # For each drone's route, check each target
-            for current_drone, route_data in list(optimized_routes.items()):
+        for pass_num in range(num_passes):
+            # Collect all targets to check in this pass
+            # We need a snapshot because routes will change during the pass
+            targets_to_check = []
+            for current_drone, route_data in optimized_routes.items():
                 route = route_data["route"]
-
-                # Find targets in this route (skip first/last which are airports)
                 for i, wp_id in enumerate(route):
-                    if not str(wp_id).startswith("T"):
+                    if str(wp_id).startswith("T"):
+                        targets_to_check.append((current_drone, wp_id))
+
+            # Check each target once in this pass
+            for original_drone, wp_id in targets_to_check:
+                # Find current location of this target (may have moved)
+                current_drone = None
+                current_idx = None
+                for did, route_data in optimized_routes.items():
+                    route = route_data["route"]
+                    if wp_id in route:
+                        current_drone = did
+                        current_idx = route.index(wp_id)
+                        break
+
+                if current_drone is None:
+                    continue  # Target no longer in any route
+
+                route = optimized_routes[current_drone]["route"]
+
+                target = target_by_id.get(str(wp_id))
+                if not target:
+                    continue
+
+                target_pos = waypoint_positions.get(str(wp_id))
+                if not target_pos:
+                    continue
+
+                target_type = str(target.get("type", "a")).lower()
+
+                # Get prev and next waypoints in current route
+                prev_wp = route[current_idx - 1] if current_idx > 0 else None
+                next_wp = route[current_idx + 1] if current_idx < len(route) - 1 else None
+
+                if not prev_wp or not next_wp:
+                    continue
+
+                prev_pos = waypoint_positions.get(str(prev_wp))
+                next_pos = waypoint_positions.get(str(next_wp))
+
+                if not prev_pos or not next_pos:
+                    continue
+
+                # Calculate distance from target to its current trajectory
+                current_dist = self._point_to_line_distance(
+                    target_pos, prev_pos, next_pos
+                )
+
+                # Check all other drones' trajectories
+                best_drone = None
+                best_segment = None
+                best_dist = current_dist
+
+                for other_drone, other_route_data in optimized_routes.items():
+                    if other_drone == current_drone:
                         continue
 
-                    target = target_by_id.get(str(wp_id))
-                    if not target:
+                    # Check if other drone can carry this target type
+                    if target_type not in drone_capabilities.get(other_drone, set()):
                         continue
 
-                    target_pos = waypoint_positions.get(str(wp_id))
-                    if not target_pos:
-                        continue
+                    other_route = other_route_data["route"]
 
-                    target_type = str(target.get("type", "a")).lower()
+                    # Use actual trajectory (SAM-avoiding polyline) if available
+                    other_trajectory = drone_trajectories.get(other_drone, [])
 
-                    # Get prev and next waypoints in current route
-                    prev_wp = route[i - 1] if i > 0 else None
-                    next_wp = route[i + 1] if i < len(route) - 1 else None
+                    if other_trajectory:
+                        # Measure distance to the actual bent trajectory polyline
+                        dist = self._point_to_polyline_distance(target_pos, other_trajectory)
 
-                    if not prev_wp or not next_wp:
-                        continue
+                        if dist < best_dist:
+                            # Find best insertion point based on route nodes
+                            # Insert at segment whose endpoints are closest to target
+                            best_insertion_idx = 1  # Default to after first waypoint
+                            best_insertion_dist = float('inf')
 
-                    prev_pos = waypoint_positions.get(str(prev_wp))
-                    next_pos = waypoint_positions.get(str(next_wp))
+                            for j in range(len(other_route) - 1):
+                                seg_start_pos = waypoint_positions.get(str(other_route[j]))
+                                seg_end_pos = waypoint_positions.get(str(other_route[j + 1]))
 
-                    if not prev_pos or not next_pos:
-                        continue
+                                if seg_start_pos and seg_end_pos:
+                                    seg_dist = self._point_to_line_distance(
+                                        target_pos, seg_start_pos, seg_end_pos
+                                    )
+                                    if seg_dist < best_insertion_dist:
+                                        best_insertion_dist = seg_dist
+                                        best_insertion_idx = j + 1
 
-                    # Calculate distance from target to its current trajectory
-                    current_dist = self._point_to_line_distance(
-                        target_pos, prev_pos, next_pos
-                    )
-
-                    # Check all other drones' trajectories
-                    best_drone = None
-                    best_segment = None
-                    best_dist = current_dist
-
-                    for other_drone, other_route_data in optimized_routes.items():
-                        if other_drone == current_drone:
-                            continue
-
-                        # Check if other drone can carry this target type
-                        if target_type not in drone_capabilities.get(other_drone, set()):
-                            continue
-
-                        other_route = other_route_data["route"]
-
-                        # Check each segment in other drone's route
+                            best_dist = dist
+                            best_drone = other_drone
+                            best_segment = best_insertion_idx
+                    else:
+                        # Fallback: no trajectory data, use straight-line route segments
                         for j in range(len(other_route) - 1):
                             seg_start = other_route[j]
                             seg_end = other_route[j + 1]
@@ -550,28 +598,23 @@ class TrajectorySwapOptimizer:
                                 best_drone = other_drone
                                 best_segment = j + 1  # Insert after seg_start
 
-                    # If found a closer trajectory, swap
-                    if best_drone and best_dist < current_dist:
-                        # Record the swap
-                        all_swaps.append({
-                            "target": wp_id,
-                            "from_drone": current_drone,
-                            "to_drone": best_drone,
-                            "old_distance": current_dist,
-                            "new_distance": best_dist
-                        })
+                # If found a closer trajectory, swap
+                if best_drone and best_dist < current_dist:
+                    # Record the swap
+                    all_swaps.append({
+                        "target": wp_id,
+                        "from_drone": current_drone,
+                        "to_drone": best_drone,
+                        "old_distance": current_dist,
+                        "new_distance": best_dist,
+                        "pass": pass_num + 1
+                    })
 
-                        # Remove from current route
-                        optimized_routes[current_drone]["route"].remove(wp_id)
+                    # Remove from current route
+                    optimized_routes[current_drone]["route"].remove(wp_id)
 
-                        # Insert into new route
-                        optimized_routes[best_drone]["route"].insert(best_segment, wp_id)
-
-                        swap_occurred = True
-                        break  # Restart checking after a swap
-
-                if swap_occurred:
-                    break
+                    # Insert into new route
+                    optimized_routes[best_drone]["route"].insert(best_segment, wp_id)
 
         # Recalculate metrics for all routes
         for did, route_data in optimized_routes.items():
@@ -586,7 +629,7 @@ class TrajectorySwapOptimizer:
             },
             "routes": optimized_routes,
             "swaps_made": all_swaps,
-            "iterations": iterations
+            "passes": num_passes
         }
 
     def _point_to_line_distance(
@@ -617,6 +660,45 @@ class TrajectorySwapOptimizer:
         closest_y = y1 + t * (y2 - y1)
 
         return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+
+    def _point_to_polyline_distance(
+        self,
+        point: Tuple[float, float],
+        polyline: List[Tuple[float, float]]
+    ) -> float:
+        """
+        Calculate minimum distance from a point to a polyline (multiple connected segments).
+
+        This is used to measure distance to actual SAM-avoiding trajectories,
+        which may have bends/waypoints to navigate around SAM zones.
+
+        Args:
+            point: The point (x, y) to measure from
+            polyline: List of (x, y) points forming the trajectory
+
+        Returns:
+            Minimum perpendicular distance to any segment of the polyline
+        """
+        if not polyline:
+            return float('inf')
+
+        if len(polyline) == 1:
+            # Single point, return distance to that point
+            px, py = point
+            qx, qy = polyline[0]
+            return math.sqrt((px - qx) ** 2 + (py - qy) ** 2)
+
+        min_dist = float('inf')
+
+        # Check distance to each segment in the polyline
+        for i in range(len(polyline) - 1):
+            seg_start = polyline[i]
+            seg_end = polyline[i + 1]
+            dist = self._point_to_line_distance(point, seg_start, seg_end)
+            if dist < min_dist:
+                min_dist = dist
+
+        return min_dist
 
     def _calculate_route_distance(self, route: List[str]) -> float:
         """Calculate total distance of a route."""
@@ -718,3 +800,213 @@ TRAJECTORY_SWAP_TOOL = {
     },
     "function": trajectory_swap_optimize
 }
+
+
+# ---------- Crossing Removal Optimizer (2-opt) ----------
+
+class CrossingRemovalOptimizer:
+    """
+    Remove self-crossings in drone trajectories using 2-opt.
+
+    When segment A→B crosses segment C→D, reverse the middle portion
+    to eliminate the crossing: A → B → C → D becomes A → C → B → D
+    """
+
+    def __init__(self):
+        self._distance_matrix: Optional[Dict[str, Any]] = None
+
+    def set_distance_matrix(self, matrix_data: Dict[str, Any]):
+        """Set the pre-calculated distance matrix."""
+        self._distance_matrix = matrix_data
+
+    def _segments_cross(
+        self,
+        p1: Tuple[float, float],
+        p2: Tuple[float, float],
+        p3: Tuple[float, float],
+        p4: Tuple[float, float]
+    ) -> bool:
+        """
+        Check if segment p1-p2 crosses segment p3-p4.
+        Uses cross product to determine intersection.
+        """
+        def ccw(a, b, c):
+            return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
+
+        # Check if segments share an endpoint (not a crossing)
+        if p1 == p3 or p1 == p4 or p2 == p3 or p2 == p4:
+            return False
+
+        return ccw(p1, p3, p4) != ccw(p2, p3, p4) and ccw(p1, p2, p3) != ccw(p1, p2, p4)
+
+    def optimize(
+        self,
+        solution: Dict[str, Any],
+        env: Dict[str, Any],
+        drone_configs: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Remove crossings from all drone routes.
+
+        Args:
+            solution: Current solution with routes for each drone
+            env: Environment dict with targets, airports
+            drone_configs: Drone configurations
+
+        Returns:
+            Optimized solution with crossings removed
+        """
+        targets = env.get("targets", [])
+        target_by_id = {str(t["id"]): t for t in targets}
+
+        # Build position lookup for all waypoints
+        waypoint_positions = {}
+        for t in targets:
+            waypoint_positions[str(t["id"])] = (float(t["x"]), float(t["y"]))
+        for a in env.get("airports", []):
+            waypoint_positions[str(a["id"])] = (float(a["x"]), float(a["y"]))
+
+        # Copy routes for modification
+        optimized_routes = {}
+        for did, route_data in solution.get("routes", {}).items():
+            optimized_routes[did] = {
+                "route": list(route_data.get("route", [])),
+                "sequence": route_data.get("sequence", ""),
+                "points": route_data.get("points", 0),
+                "distance": route_data.get("distance", 0),
+                "fuel_budget": route_data.get("fuel_budget", 0),
+            }
+
+        all_fixes = []  # Track all crossings fixed
+        num_passes = 4  # Do multiple passes
+
+        for pass_num in range(num_passes):
+            # Process each drone's route
+            for did, route_data in optimized_routes.items():
+                route = route_data["route"]
+
+                if len(route) < 4:
+                    continue  # Need at least 4 points to have a crossing
+
+                # Keep looking for crossings until none found
+                found_crossing = True
+                max_iterations = 50  # Safety limit per drone per pass
+                iterations = 0
+
+                while found_crossing and iterations < max_iterations:
+                    found_crossing = False
+                    iterations += 1
+
+                    # Check all pairs of non-adjacent segments
+                    for i in range(len(route) - 1):
+                        if found_crossing:
+                            break
+
+                        for j in range(i + 2, len(route) - 1):
+                            # Skip adjacent segments
+                            if j == i + 1:
+                                continue
+
+                            # Get segment endpoints
+                            p1 = waypoint_positions.get(str(route[i]))
+                            p2 = waypoint_positions.get(str(route[i + 1]))
+                            p3 = waypoint_positions.get(str(route[j]))
+                            p4 = waypoint_positions.get(str(route[j + 1]))
+
+                            if not all([p1, p2, p3, p4]):
+                                continue
+
+                            if self._segments_cross(p1, p2, p3, p4):
+                                # Found a crossing! Reverse the segment between i+1 and j
+                                # Route: ... A(i) → B(i+1) → ... → C(j) → D(j+1) ...
+                                # After:  ... A(i) → C(j) → ... → B(i+1) → D(j+1) ...
+
+                                old_segment = route[i+1:j+1]
+                                route[i+1:j+1] = old_segment[::-1]
+
+                                all_fixes.append({
+                                    "drone": did,
+                                    "segment_i": i,
+                                    "segment_j": j,
+                                    "reversed": old_segment,
+                                    "pass": pass_num + 1
+                                })
+
+                                found_crossing = True
+                                break
+
+        # Recalculate metrics for all routes
+        for did, route_data in optimized_routes.items():
+            route = route_data["route"]
+            route_data["sequence"] = ",".join(str(wp) for wp in route)
+            route_data["distance"] = self._calculate_route_distance(route, waypoint_positions)
+            route_data["points"] = self._calculate_route_points(route, target_by_id)
+
+        return {
+            "sequences": {
+                did: data["sequence"] for did, data in optimized_routes.items()
+            },
+            "routes": optimized_routes,
+            "fixes_made": all_fixes,
+            "passes": num_passes
+        }
+
+    def _calculate_route_distance(
+        self,
+        route: List[str],
+        waypoint_positions: Dict[str, Tuple[float, float]]
+    ) -> float:
+        """Calculate total Euclidean distance of a route."""
+        if len(route) < 2:
+            return 0.0
+
+        total = 0.0
+        for i in range(len(route) - 1):
+            p1 = waypoint_positions.get(str(route[i]))
+            p2 = waypoint_positions.get(str(route[i + 1]))
+            if p1 and p2:
+                total += math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+
+        return total
+
+    def _calculate_route_points(
+        self,
+        route: List[str],
+        target_by_id: Dict[str, Dict[str, Any]]
+    ) -> int:
+        """Calculate total priority points for a route."""
+        points = 0
+        for wp_id in route:
+            if str(wp_id).startswith("T"):
+                target = target_by_id.get(str(wp_id))
+                if target:
+                    points += int(target.get("priority", 5))
+        return points
+
+
+# Singleton instance
+_crossing_optimizer = CrossingRemovalOptimizer()
+
+
+def crossing_removal_optimize(
+    solution: Dict[str, Any],
+    env: Dict[str, Any],
+    drone_configs: Dict[str, Dict[str, Any]],
+    distance_matrix: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """
+    Remove self-crossings from drone trajectories using 2-opt.
+
+    Args:
+        solution: Current solution with drone routes
+        env: Environment data with targets, airports
+        drone_configs: Drone configurations
+        distance_matrix: Pre-calculated distance matrix (optional)
+
+    Returns:
+        Optimized solution with crossings removed
+    """
+    if distance_matrix:
+        _crossing_optimizer.set_distance_matrix(distance_matrix)
+
+    return _crossing_optimizer.optimize(solution, env, drone_configs)

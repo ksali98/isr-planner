@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from .agents.graph import workflow  # <-- our LangGraph workflow
 from .solver import sam_distance_matrix
-from .solver.post_optimizer import get_coverage_stats, trajectory_swap_optimize
+from .solver.post_optimizer import get_coverage_stats, trajectory_swap_optimize, crossing_removal_optimize
 from .solver.solver_bridge import (
     clear_cached_matrix,
     get_current_matrix,
@@ -1021,6 +1021,51 @@ async def api_trajectory_swap_optimize(req: TrajectorySwapRequest):
             "sequences": {d: r.get("sequence", "") for d, r in result.get("routes", {}).items()},
             "swaps_made": swaps,
             "iterations": result.get("iterations", 0),
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": str(e),
+        }
+
+
+@app.post("/api/crossing_removal_optimize")
+async def api_crossing_removal_optimize(req: TrajectorySwapRequest):
+    """
+    Remove self-crossings from drone trajectories using 2-opt.
+
+    Scans each drone's route for segment crossings and reverses the
+    middle portion to eliminate them.
+    """
+    print("\n" + "="*60)
+    print("📥 CROSSING REMOVAL ENDPOINT CALLED")
+    print(f"   Received routes: {list(req.solution.get('routes', {}).keys())}")
+    print("="*60)
+
+    try:
+        result = crossing_removal_optimize(
+            solution=req.solution,
+            env=req.env,
+            drone_configs=req.drone_configs,
+        )
+
+        # Log fixes made
+        fixes = result.get("fixes_made", [])
+        if fixes:
+            print(f"\n✂️ CROSSING REMOVAL: {len(fixes)} crossings fixed")
+            for fix in fixes:
+                print(f"   Drone {fix['drone']}: reversed segment {fix['segment_i']}-{fix['segment_j']} (pass {fix['pass']})")
+        else:
+            print("\n✂️ CROSSING REMOVAL: No crossings found")
+
+        return {
+            "success": True,
+            "routes": result.get("routes", {}),
+            "sequences": {d: r.get("sequence", "") for d, r in result.get("routes", {}).items()},
+            "fixes_made": fixes,
+            "passes": result.get("passes", 0),
         }
     except Exception as e:
         import traceback
