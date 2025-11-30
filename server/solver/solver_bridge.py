@@ -41,6 +41,49 @@ print("📦 Solver interface initialized", flush=True)
 _cached_env_hash: Optional[str] = None
 
 
+def _compute_env_hash(env: Dict[str, Any]) -> str:
+    """
+    Compute a hash of the environment to detect changes.
+    Uses airport/target/SAM IDs and positions to detect when cache is stale.
+    """
+    import hashlib
+    import json
+
+    # Extract key data that affects the distance matrix
+    airports = env.get("airports", [])
+    targets = env.get("targets", [])
+    sams = env.get("sams", [])
+
+    def get_pos(obj):
+        """Get position from object - handles both x/y and pos/position formats."""
+        if "x" in obj and "y" in obj:
+            return (round(float(obj["x"]), 6), round(float(obj["y"]), 6))
+        pos = obj.get("pos") or obj.get("position")
+        if pos and len(pos) >= 2:
+            return (round(float(pos[0]), 6), round(float(pos[1]), 6))
+        return (0, 0)
+
+    # Build a canonical representation
+    key_data = {
+        "airports": sorted([
+            (a.get("id", ""), get_pos(a))
+            for a in airports
+        ]),
+        "targets": sorted([
+            (t.get("id", ""), get_pos(t))
+            for t in targets
+        ]),
+        "sams": sorted([
+            (s.get("id", ""), get_pos(s), round(float(s.get("range", s.get("radius", 0))), 2))
+            for s in sams
+        ]),
+    }
+
+    # Create hash
+    data_str = json.dumps(key_data, sort_keys=True)
+    return hashlib.md5(data_str.encode()).hexdigest()
+
+
 def _build_distance_matrix(
     airports: List[Dict[str, Any]],
     targets: List[Dict[str, Any]],
@@ -436,17 +479,25 @@ def solve_mission_with_allocation(
             "routes": {},
         }
 
-    # Step 1: Get distance matrix (use cached if available)
+    # Step 1: Get distance matrix (use cached if available AND matches current env)
     if use_sam_aware_distances and sams:
-        # First check if we have a cached SAM-aware matrix
+        global _cached_env_hash
+        current_hash = _compute_env_hash(env)
         cached_matrix = get_cached_matrix()
-        if cached_matrix is not None:
-            print("⚡ Using cached SAM-aware distance matrix", flush=True)
+
+        # Only use cache if it matches the current environment
+        if cached_matrix is not None and _cached_env_hash == current_hash:
+            print("⚡ Using cached SAM-aware distance matrix (env hash match)", flush=True)
             dist_data = cached_matrix
         else:
-            # No cache - calculate SAM-aware distance matrix
-            print("⏳ Calculating SAM-aware distance matrix (no cache available)...", flush=True)
+            # Cache miss or env changed - recalculate
+            if cached_matrix is not None:
+                print(f"🔄 Environment changed (hash mismatch), recalculating distance matrix...", flush=True)
+                clear_matrix_cache()
+            else:
+                print("⏳ Calculating SAM-aware distance matrix (no cache available)...", flush=True)
             dist_data = calculate_sam_aware_matrix(env)
+            _cached_env_hash = current_hash  # Update hash after calculation
         set_allocator_matrix(dist_data)
         set_optimizer_matrix(dist_data)
     else:
@@ -676,29 +727,31 @@ def solve_mission_with_allocation(
     if post_optimize:
         solution = post_optimize_solution(solution, env, drone_configs, dist_data)
 
-    # 🔁 IMPORTANT: recompute allocations from FINAL routes so UI + logs agree
-    final_allocations: Dict[str, List[str]] = {}
+    # Compute route-derived allocations for comparison (what's actually in trajectories)
+    route_allocations: Dict[str, List[str]] = {}
     for did, route_data in solution.get("routes", {}).items():
         route = route_data.get("route", [])
-        final_allocations[did] = [
+        route_allocations[did] = [
             node_id for node_id in route
             if isinstance(node_id, str) and node_id.startswith("T")
         ]
 
-    # Optional: debug print to compare initial vs final
+    # Debug print to compare original allocator vs route-derived
     print("\n" + "="*60, flush=True)
-    print("🎯 FINAL ALLOCATIONS (derived from routes)", flush=True)
+    print("🎯 ROUTE-DERIVED TARGETS (what solver actually included)", flush=True)
     print("="*60, flush=True)
-    total_final = 0
-    for did in sorted(final_allocations.keys(), key=lambda x: int(x)):
-        tids = final_allocations[did]
-        total_final += len(tids)
+    total_in_routes = 0
+    for did in sorted(route_allocations.keys(), key=lambda x: int(x)):
+        tids = route_allocations[did]
+        total_in_routes += len(tids)
         print(f"  Drone {did}: {tids}", flush=True)
-    print(f"  Total targets in final routes: {total_final}", flush=True)
+    print(f"  Total targets in routes: {total_in_routes}", flush=True)
     print("="*60 + "\n", flush=True)
 
-    # Overwrite allocations with the final view
-    solution["allocations"] = final_allocations
+    # Keep the ORIGINAL allocator assignments (not route-derived)
+    # UI will show what the allocator assigned, even if solver dropped some
+    # Also include route_allocations for reference
+    solution["route_allocations"] = route_allocations
 
     return solution
 

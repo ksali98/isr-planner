@@ -78,18 +78,37 @@ class TargetAllocator:
 
         # Call appropriate strategy
         if strategy == AllocationStrategy.GREEDY:
-            return self._allocate_greedy(targets, active_drones, airports, drone_capabilities)
+            result = self._allocate_greedy(targets, active_drones, airports, drone_capabilities)
         elif strategy == AllocationStrategy.BALANCED:
-            return self._allocate_balanced(targets, active_drones, airports, drone_capabilities)
+            result = self._allocate_balanced(targets, active_drones, airports, drone_capabilities)
         elif strategy == AllocationStrategy.EFFICIENT:
-            return self._allocate_efficient(targets, active_drones, airports, drone_capabilities)
+            result = self._allocate_efficient(targets, active_drones, airports, drone_capabilities)
         elif strategy == AllocationStrategy.GEOGRAPHIC:
-            return self._allocate_geographic(targets, active_drones, airports, drone_capabilities)
+            result = self._allocate_geographic(targets, active_drones, airports, drone_capabilities)
         elif strategy == AllocationStrategy.EXCLUSIVE:
-            return self._allocate_exclusive_first(targets, active_drones, airports, drone_capabilities)
+            result = self._allocate_exclusive_first(targets, active_drones, airports, drone_capabilities)
         else:
             # Default to efficient
-            return self._allocate_efficient(targets, active_drones, airports, drone_capabilities)
+            result = self._allocate_efficient(targets, active_drones, airports, drone_capabilities)
+
+        # Log any unassigned targets for debugging
+        all_target_ids = {str(t["id"]) for t in targets}
+        assigned_ids = set()
+        for tid_list in result.values():
+            assigned_ids.update(tid_list)
+        unassigned = all_target_ids - assigned_ids
+
+        if unassigned:
+            print(f"⚠️ ALLOCATOR: {len(unassigned)} targets NOT assigned: {sorted(unassigned)}", flush=True)
+            # Debug: check why each was skipped
+            for tid in sorted(unassigned):
+                capable_drones = [did for did, caps in drone_capabilities.items() if tid in caps]
+                if not capable_drones:
+                    print(f"   {tid}: No drone has capability (type restriction)", flush=True)
+                else:
+                    print(f"   {tid}: Capable drones={capable_drones} but not assigned", flush=True)
+
+        return result
 
     def _calculate_capabilities(
         self,
@@ -349,7 +368,7 @@ class TargetAllocator:
 
             # Find drone with best efficiency for this target
             best_drone = None
-            best_efficiency = 0
+            best_efficiency = float('-inf')  # Allow any efficiency, even 0 or negative
 
             for did in drone_configs.keys():
                 if tid not in capabilities[did]:
@@ -362,11 +381,15 @@ class TargetAllocator:
 
                 distance = self._get_distance(drone_pos, tid, waypoints)
 
-                # Avoid division by zero
-                if distance <= 0:
+                # Avoid division by zero; treat infinity as very large distance
+                if distance == float('inf'):
+                    # Still allow assignment but with minimal efficiency
+                    efficiency = 0.0
+                elif distance <= 0:
                     distance = 0.1
-
-                efficiency = priority / distance
+                    efficiency = priority / distance
+                else:
+                    efficiency = priority / distance
 
                 if efficiency > best_efficiency:
                     best_efficiency = efficiency
@@ -525,7 +548,7 @@ class TargetAllocator:
 
             # Find drone with best efficiency
             best_drone = None
-            best_efficiency = 0
+            best_efficiency = float('-inf')  # Allow any efficiency, even 0 or negative
 
             for did in drone_configs.keys():
                 if tid not in capabilities[did]:
@@ -536,10 +559,16 @@ class TargetAllocator:
                     continue
 
                 distance = self._get_distance(drone_pos, tid, waypoints)
-                if distance <= 0:
-                    distance = 0.1
 
-                efficiency = priority / distance
+                # Avoid division by zero; treat infinity as very large distance
+                if distance == float('inf'):
+                    # Still allow assignment but with minimal efficiency
+                    efficiency = 0.0
+                elif distance <= 0:
+                    distance = 0.1
+                    efficiency = priority / distance
+                else:
+                    efficiency = priority / distance
 
                 if efficiency > best_efficiency:
                     best_efficiency = efficiency
