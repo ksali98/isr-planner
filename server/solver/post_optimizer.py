@@ -523,21 +523,19 @@ class TrajectorySwapOptimizer:
                 if not prev_wp or not next_wp:
                     continue
 
-                prev_pos = waypoint_positions.get(str(prev_wp))
-                next_pos = waypoint_positions.get(str(next_wp))
+                # Calculate current insertion cost using SAM-aware distance matrix
+                # Cost of having target in current position = dist(prev->target) + dist(target->next)
+                # Cost if we remove target = dist(prev->next)
+                # So current "extra cost" = dist(prev->target) + dist(target->next) - dist(prev->next)
+                d1 = self._get_matrix_distance(str(prev_wp), str(wp_id))
+                d2 = self._get_matrix_distance(str(wp_id), str(next_wp))
+                d3 = self._get_matrix_distance(str(prev_wp), str(next_wp))
+                current_cost = d1 + d2 - d3
 
-                if not prev_pos or not next_pos:
-                    continue
-
-                # Calculate distance from target to its current trajectory
-                current_dist = self._point_to_line_distance(
-                    target_pos, prev_pos, next_pos
-                )
-
-                # Check all other drones' trajectories
+                # Check all other drones' routes for better insertion
                 best_drone = None
                 best_segment = None
-                best_dist = current_dist
+                best_cost = current_cost
 
                 for other_drone, other_route_data in optimized_routes.items():
                     if other_drone == current_drone:
@@ -549,64 +547,33 @@ class TrajectorySwapOptimizer:
 
                     other_route = other_route_data["route"]
 
-                    # Use actual trajectory (SAM-avoiding polyline) if available
-                    other_trajectory = drone_trajectories.get(other_drone, [])
+                    # Check each segment in other drone's route for insertion cost
+                    for j in range(len(other_route) - 1):
+                        seg_start = str(other_route[j])
+                        seg_end = str(other_route[j + 1])
 
-                    if other_trajectory:
-                        # Measure distance to the actual bent trajectory polyline
-                        dist = self._point_to_polyline_distance(target_pos, other_trajectory)
+                        # Calculate insertion cost at this position
+                        # Cost = dist(seg_start->target) + dist(target->seg_end) - dist(seg_start->seg_end)
+                        d_start = self._get_matrix_distance(seg_start, str(wp_id))
+                        d_end = self._get_matrix_distance(str(wp_id), seg_end)
+                        d_direct = self._get_matrix_distance(seg_start, seg_end)
+                        insertion_cost = d_start + d_end - d_direct
 
-                        if dist < best_dist:
-                            # Find best insertion point based on route nodes
-                            # Insert at segment whose endpoints are closest to target
-                            best_insertion_idx = 1  # Default to after first waypoint
-                            best_insertion_dist = float('inf')
-
-                            for j in range(len(other_route) - 1):
-                                seg_start_pos = waypoint_positions.get(str(other_route[j]))
-                                seg_end_pos = waypoint_positions.get(str(other_route[j + 1]))
-
-                                if seg_start_pos and seg_end_pos:
-                                    seg_dist = self._point_to_line_distance(
-                                        target_pos, seg_start_pos, seg_end_pos
-                                    )
-                                    if seg_dist < best_insertion_dist:
-                                        best_insertion_dist = seg_dist
-                                        best_insertion_idx = j + 1
-
-                            best_dist = dist
+                        if insertion_cost < best_cost:
+                            best_cost = insertion_cost
                             best_drone = other_drone
-                            best_segment = best_insertion_idx
-                    else:
-                        # Fallback: no trajectory data, use straight-line route segments
-                        for j in range(len(other_route) - 1):
-                            seg_start = other_route[j]
-                            seg_end = other_route[j + 1]
+                            best_segment = j + 1  # Insert after seg_start
 
-                            seg_start_pos = waypoint_positions.get(str(seg_start))
-                            seg_end_pos = waypoint_positions.get(str(seg_end))
-
-                            if not seg_start_pos or not seg_end_pos:
-                                continue
-
-                            dist = self._point_to_line_distance(
-                                target_pos, seg_start_pos, seg_end_pos
-                            )
-
-                            if dist < best_dist:
-                                best_dist = dist
-                                best_drone = other_drone
-                                best_segment = j + 1  # Insert after seg_start
-
-                # If found a closer trajectory, swap
-                if best_drone and best_dist < current_dist:
+                # If found a lower cost insertion, swap
+                if best_drone and best_cost < current_cost:
                     # Record the swap
                     all_swaps.append({
                         "target": wp_id,
                         "from_drone": current_drone,
                         "to_drone": best_drone,
-                        "old_distance": current_dist,
-                        "new_distance": best_dist,
+                        "old_cost": current_cost,
+                        "new_cost": best_cost,
+                        "savings": current_cost - best_cost,
                         "pass": pass_num + 1
                     })
 
@@ -660,6 +627,30 @@ class TrajectorySwapOptimizer:
         closest_y = y1 + t * (y2 - y1)
 
         return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+
+    def _get_matrix_distance(self, from_id: str, to_id: str) -> float:
+        """
+        Get SAM-aware distance between two waypoints from the distance matrix.
+
+        Args:
+            from_id: Source waypoint ID (e.g., 'A1', 'T5')
+            to_id: Destination waypoint ID
+
+        Returns:
+            Distance from the pre-calculated SAM-aware matrix, or large fallback
+        """
+        if not self._distance_matrix:
+            return 1000.0  # Large fallback if no matrix
+
+        labels = self._distance_matrix.get("labels", [])
+        matrix = self._distance_matrix.get("matrix", [])
+
+        try:
+            idx_from = labels.index(from_id)
+            idx_to = labels.index(to_id)
+            return matrix[idx_from][idx_to]
+        except (ValueError, IndexError):
+            return 1000.0  # Large fallback for missing entries
 
     def _point_to_polyline_distance(
         self,

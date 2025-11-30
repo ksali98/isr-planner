@@ -998,11 +998,19 @@ async def api_trajectory_swap_optimize(req: TrajectorySwapRequest):
     print(f"   Received routes: {list(req.solution.get('routes', {}).keys())}")
     print("="*60)
 
+    # Get the cached distance matrix for SAM-aware distances
+    cached_matrix = get_current_matrix()
+    if cached_matrix:
+        print(f"   Using cached distance matrix with {len(cached_matrix.get('labels', []))} labels")
+    else:
+        print("   WARNING: No cached distance matrix available!")
+
     try:
         result = trajectory_swap_optimize(
             solution=req.solution,
             env=req.env,
             drone_configs=req.drone_configs,
+            distance_matrix=cached_matrix,
         )
 
         # Log swaps made
@@ -1011,7 +1019,8 @@ async def api_trajectory_swap_optimize(req: TrajectorySwapRequest):
             print(f"\n🔄 TRAJECTORY SWAP OPTIMIZATION: {len(swaps)} swaps made")
             for swap in swaps:
                 print(f"   {swap['target']}: Drone {swap['from_drone']} → Drone {swap['to_drone']} "
-                      f"(distance {swap['old_distance']:.1f} → {swap['new_distance']:.1f})")
+                      f"(cost {swap.get('old_cost', 0):.1f} → {swap.get('new_cost', 0):.1f}, "
+                      f"savings {swap.get('savings', 0):.1f})")
         else:
             print("\n🔄 TRAJECTORY SWAP OPTIMIZATION: No beneficial swaps found")
 
