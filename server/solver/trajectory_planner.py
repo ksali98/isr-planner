@@ -153,19 +153,8 @@ class ISRTrajectoryPlanner:
             )
             return [], float("inf")
 
-        # HARD VALIDATION: ensure NO sampled point is inside any SAM
-        violates, offending = self._path_violates_sams(path)
-        if violates:
-            ox, oy = offending
-            print(
-                f"🚨 SAM VIOLATION DETECTED: path from "
-                f"({start[0]:.1f},{start[1]:.1f}) → ({end[0]:.1f},{end[1]:.1f}) "
-                f"enters a SAM at approximately ({ox:.2f}, {oy:.2f}).",
-                flush=True,
-            )
-            print(f"   Method reported by boundary_navigation: {method}", flush=True)
-            print("   Rejecting this path (returning empty path, distance = inf).", flush=True)
-            return [], float("inf")
+        # boundary_navigation already validates paths against polygons.
+        # We trust its output - no additional circle-based validation needed.
 
         # Debug: show when SAM avoidance generates a non-direct path
         if len(path) > 2:

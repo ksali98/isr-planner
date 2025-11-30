@@ -124,6 +124,37 @@ class SAMDistanceMatrixCalculator:
             wrapped_polygons, _ = wrap_sams(sams_for_wrapping)
             polygon_boundaries = wrapped_polygons
 
+                # --- DEBUG: show polygon bounds and target inside/out status ---
+        try:
+            if polygon_boundaries:
+                print("📐 [DEBUG] SAM polygons in distance-matrix calculator:", flush=True)
+                for i, poly in enumerate(polygon_boundaries):
+                    xs = [p[0] for p in poly]
+                    ys = [p[1] for p in poly]
+                    print(
+                        f"    polygon {i}: X=[{min(xs):.1f},{max(xs):.1f}], "
+                        f"Y=[{min(ys):.1f},{max(ys):.1f}], {len(poly)} vertices",
+                        flush=True,
+                    )
+
+                print("🎯 [DEBUG] Targets vs SAM polygons:", flush=True)
+                for t in targets:
+                    tx, ty = float(t["x"]), float(t["y"])
+                    inside_any = False
+                    for poly in polygon_boundaries:
+                        if point_in_polygon((tx, ty), poly):
+                            inside_any = True
+                            break
+                    print(
+                        f"    target {t['id']} at ({tx:.2f},{ty:.2f}) "
+                        f"inside_boundary={inside_any}",
+                        flush=True,
+                    )
+
+        except Exception as e:
+            print("[DEBUG] Error in polygon/target debug block:", e, flush=True)
+        # --- END DEBUG ---
+
         for t in targets:
             tx, ty = float(t["x"]), float(t["y"])
             inside_boundary = False
@@ -149,7 +180,6 @@ class SAMDistanceMatrixCalculator:
         # Initialize matrix and paths storage
         matrix: List[List[float]] = [[0.0] * n for _ in range(n)]
         paths: Dict[str, List[List[float]]] = {}
-        excluded_targets: List[str] = []
 
         # Calculate all pairwise distances
         for i in range(n):
@@ -161,23 +191,14 @@ class SAMDistanceMatrixCalculator:
                 start = [all_waypoints[i]["x"], all_waypoints[i]["y"]]
                 end = [all_waypoints[j]["x"], all_waypoints[j]["y"]]
 
-                # Check if direct path is blocked by any SAM
                 if self._path_blocked(start, end, normalized_sams, buffer):
-                    # Use SAM-aware path planning
                     path, distance, method = self._plan_sam_avoiding_path(
                         start, end, normalized_sams, buffer
                     )
 
                     if path is None or distance == float('inf'):
-                        # No valid path found - mark as very large distance
+                        # No valid SAM-safe path for this pair → mark as very large
                         matrix[i][j] = 99999.0
-
-                        # Track if this makes a target inaccessible
-                        wp_id = all_waypoints[j]["id"]
-                        if wp_id.startswith("T") and wp_id not in excluded_targets:
-                            # Check if target is unreachable from any airport
-                            if all_waypoints[i]["id"].startswith("A"):
-                                excluded_targets.append(wp_id)
                     else:
                         matrix[i][j] = distance
                         # Store the path for later visualization
@@ -187,6 +208,7 @@ class SAMDistanceMatrixCalculator:
                     # Direct Euclidean distance
                     distance = math.hypot(end[0] - start[0], end[1] - start[1])
                     matrix[i][j] = distance
+
 
         # Build waypoint details for solver
         waypoint_details = []
@@ -201,11 +223,55 @@ class SAMDistanceMatrixCalculator:
                 detail["type"] = wp.get("type", "a")
             waypoint_details.append(detail)
 
-        # Combine all excluded targets (inside polygon boundary + path-unreachable)
-        all_excluded = excluded_inside_boundary + excluded_targets
+        # ------------------------------------------------------------
+        # Determine targets that are unreachable from *all* airports
+        # ------------------------------------------------------------
+        airport_ids = [str(a["id"]) for a in airports]
+        target_ids  = [str(t["id"]) for t in valid_targets]
+
+        id_to_index = {str(wp["id"]): idx for idx, wp in enumerate(all_waypoints)}
+
+        unreachable_targets: List[str] = []
+
+        for tid in target_ids:
+            tj = id_to_index.get(tid)
+            if tj is None:
+                continue
+
+            reachable_from_any_airport = False
+            for aid in airport_ids:
+                ai = id_to_index.get(aid)
+                if ai is None:
+                    continue
+                d = matrix[ai][tj]
+                # 99999.0 is our "no path" sentinel
+                if d < 99999.0:
+                    reachable_from_any_airport = True
+                    break
+
+            if not reachable_from_any_airport:
+                unreachable_targets.append(tid)
+
+        # Combine all excluded targets:
+        #   - ones inside polygon boundary (excluded_inside_boundary)
+        #   - ones unreachable from *all* airports (unreachable_targets)
+        all_excluded = excluded_inside_boundary + unreachable_targets
 
         if all_excluded:
-            print(f"📊 Excluded {len(all_excluded)} targets from mission: {all_excluded}", flush=True)
+            print(
+                f"📊 Excluded {len(all_excluded)} targets from mission: {all_excluded} "
+                f"(inside boundary: {excluded_inside_boundary}, unreachable: {unreachable_targets})",
+                flush=True,
+            )
+
+        # Store wrapped polygons for visualization
+        wrapped_polygon_lists = []
+        if polygon_boundaries:
+            for poly in polygon_boundaries:
+                if hasattr(poly, 'tolist'):
+                    wrapped_polygon_lists.append(poly.tolist())
+                else:
+                    wrapped_polygon_lists.append(list(poly))
 
         result = {
             "matrix": matrix,
@@ -215,12 +281,14 @@ class SAMDistanceMatrixCalculator:
             "excluded_targets": all_excluded,
             "sams": normalized_sams,
             "buffer": buffer,
+            "wrapped_polygons": wrapped_polygon_lists,
         }
 
         # Cache the result
         self._cached_matrix = result
 
         return result
+
 
     def get_cached_matrix(self) -> Optional[Dict[str, Any]]:
         """Return the cached distance matrix if available."""
@@ -450,6 +518,14 @@ def get_path_between(from_id: str, to_id: str) -> Optional[List[List[float]]]:
 def get_distance_between(from_id: str, to_id: str) -> Optional[float]:
     """Get the distance between two waypoints from the cached matrix."""
     return _calculator.get_distance(from_id, to_id)
+
+
+def get_wrapped_polygons() -> List[List[List[float]]]:
+    """Get the wrapped SAM polygons from the cached matrix."""
+    cached = _calculator.get_cached_matrix()
+    if cached is None:
+        return []
+    return cached.get("wrapped_polygons", [])
 
 
 # Tool definition for LangGraph

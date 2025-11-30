@@ -702,7 +702,7 @@ def solve_with_allocation(req: SolveWithAllocationRequest):
         drone_configs=req.drone_configs,
         allocation_strategy=req.allocation_strategy,
         use_sam_aware_distances=req.use_sam_aware_distances,
-        post_optimize=req.post_optimize,
+        post_optimize=False, # req.post_optimize,
     )
 
     routes: Dict[str, Any] = {}

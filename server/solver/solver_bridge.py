@@ -312,17 +312,20 @@ def solve_mission(
         # Build a FILTERED distance matrix containing only airports + this drone's targets
         # This is critical - the solver uses matrix_labels to determine which nodes to visit
         airport_ids = [a["id"] for a in airports]
-        filtered_ids = airport_ids + target_ids
+        desired_ids = airport_ids + target_ids
 
         # Create index mapping from original labels
         orig_labels = dist_data["labels"]
         orig_matrix = dist_data["matrix"]
 
-        # Build filtered matrix
+        # Build filtered matrix - ONLY include IDs that are actually in orig_labels
+        # This ensures labels and matrix dimensions match
         filtered_indices = []
-        for fid in filtered_ids:
+        filtered_ids = []  # Track which IDs are actually included
+        for fid in desired_ids:
             if fid in orig_labels:
                 filtered_indices.append(orig_labels.index(fid))
+                filtered_ids.append(fid)
 
         n = len(filtered_indices)
         filtered_matrix = [[0.0] * n for _ in range(n)]
@@ -332,12 +335,15 @@ def solve_mission(
 
         filtered_dist_data = {
             "matrix": filtered_matrix,
-            "labels": filtered_ids,
+            "labels": filtered_ids,  # Use the filtered list, not desired_ids
             "waypoints": [wp for wp in dist_data.get("waypoints", []) if wp["id"] in filtered_ids],
             "excluded_targets": [],
         }
 
-        print(f"   📊 Filtered matrix: {len(filtered_ids)} nodes ({len(airport_ids)} airports + {len(target_ids)} targets)", flush=True)
+        # Count actual airports and targets in filtered list
+        actual_airport_count = sum(1 for fid in filtered_ids if fid in airport_ids)
+        actual_target_count = len(filtered_ids) - actual_airport_count
+        print(f"   📊 Filtered matrix: {len(filtered_ids)} nodes ({actual_airport_count} airports + {actual_target_count} targets)", flush=True)
 
         # Build a per-drone environment using your existing interface
         env_for_solver = _solver.build_environment_for_solver(
@@ -354,8 +360,14 @@ def solve_mission(
         sol = _solver.solve(env_for_solver, fuel_budget)
         solve_time = time.time() - solve_start
 
-        route_ids: List[str] = sol.get("route", [])
-        total_points: int = int(sol.get("total_points", 0))
+        # The solver returns 'visited_goals' (target IDs only), not 'route'
+        # We need to build the full route: [start_airport, ...targets..., end_airport]
+        visited_targets: List[str] = sol.get("visited_goals", [])
+        route_ids: List[str] = [start_id] + visited_targets + [end_id]
+
+        # Calculate total points from visited targets
+        target_priorities = {t["id"]: int(t.get("priority", 1)) for t in candidate_targets}
+        total_points: int = sum(target_priorities.get(tid, 0) for tid in visited_targets)
         travel_distance: float = float(sol.get("distance", 0.0))
 
         print(f"   ✅ Drone {did} solved in {solve_time:.2f}s: {len(route_ids)} waypoints, {total_points} pts, {travel_distance:.1f} dist", flush=True)
@@ -424,10 +436,17 @@ def solve_mission_with_allocation(
             "routes": {},
         }
 
-    # Step 1: Calculate distance matrix
+    # Step 1: Get distance matrix (use cached if available)
     if use_sam_aware_distances and sams:
-        # Use SAM-aware distance calculation
-        dist_data = calculate_sam_aware_matrix(env)
+        # First check if we have a cached SAM-aware matrix
+        cached_matrix = get_cached_matrix()
+        if cached_matrix is not None:
+            print("⚡ Using cached SAM-aware distance matrix", flush=True)
+            dist_data = cached_matrix
+        else:
+            # No cache - calculate SAM-aware distance matrix
+            print("⏳ Calculating SAM-aware distance matrix (no cache available)...", flush=True)
+            dist_data = calculate_sam_aware_matrix(env)
         set_allocator_matrix(dist_data)
         set_optimizer_matrix(dist_data)
     else:
@@ -521,8 +540,8 @@ def solve_mission_with_allocation(
         ]
 
         # CRITICAL: Limit targets to prevent exponential solver blowup
-        # Orienteering solver has O(n!) complexity - cap at 15 targets max
-        MAX_TARGETS_PER_SOLVE = 15
+        # Orienteering solver has O(n!) complexity - cap at 12 targets max
+        MAX_TARGETS_PER_SOLVE = 12
         if len(candidate_targets) > MAX_TARGETS_PER_SOLVE:
             # Sort by priority (highest first) and take top N
             candidate_targets = sorted(
@@ -532,12 +551,52 @@ def solve_mission_with_allocation(
             )[:MAX_TARGETS_PER_SOLVE]
             print(f"  ⚠️ Drone {did}: Limited to {MAX_TARGETS_PER_SOLVE} highest-priority targets (had {len(assigned_target_ids)})", flush=True)
 
-        # Build environment for solver
+        # Debug: Print drone solve info
+        target_ids = [t["id"] for t in candidate_targets]
+        print(f"🚁 Drone {did}: Solving with {len(candidate_targets)} targets: {target_ids}", flush=True)
+
+        # Build a FILTERED distance matrix containing only airports + this drone's targets
+        # This is critical - the solver uses matrix_labels to determine which nodes to visit
+        airport_ids = [a["id"] for a in airports]
+        desired_ids = airport_ids + target_ids
+
+        # Create index mapping from original labels
+        orig_labels = dist_data["labels"]
+        orig_matrix = dist_data["matrix"]
+
+        # Build filtered matrix - ONLY include IDs that are actually in orig_labels
+        # This ensures labels and matrix dimensions match
+        filtered_indices = []
+        filtered_ids = []  # Track which IDs are actually included
+        for fid in desired_ids:
+            if fid in orig_labels:
+                filtered_indices.append(orig_labels.index(fid))
+                filtered_ids.append(fid)
+
+        n = len(filtered_indices)
+        filtered_matrix = [[0.0] * n for _ in range(n)]
+        for i, orig_i in enumerate(filtered_indices):
+            for j, orig_j in enumerate(filtered_indices):
+                filtered_matrix[i][j] = orig_matrix[orig_i][orig_j]
+
+        filtered_dist_data = {
+            "matrix": filtered_matrix,
+            "labels": filtered_ids,  # Use the filtered list, not desired_ids
+            "waypoints": [wp for wp in dist_data.get("waypoints", []) if wp["id"] in filtered_ids],
+            "excluded_targets": [],
+        }
+
+        # Count actual airports and targets in filtered list
+        actual_airport_count = sum(1 for fid in filtered_ids if fid in airport_ids)
+        actual_target_count = len(filtered_ids) - actual_airport_count
+        print(f"   📊 Filtered matrix: {len(filtered_ids)} nodes ({actual_airport_count} airports + {actual_target_count} targets)", flush=True)
+
+        # Build environment for solver with FILTERED matrix
         env_for_solver = _solver.build_environment_for_solver(
             airports=airports,
             targets=candidate_targets,
             sams=sams,
-            distance_matrix_data=dist_data,
+            distance_matrix_data=filtered_dist_data,
         )
         env_for_solver["start_airport"] = start_id
         env_for_solver["end_airport"] = end_id
@@ -545,9 +604,25 @@ def solve_mission_with_allocation(
         # Solve orienteering for this drone
         sol = _solver.solve(env_for_solver, fuel_budget)
 
+        # The solver returns BOTH 'visited_goals' (unordered target IDs) AND 'route' (optimized order)
+        # CRITICAL: Use 'route' for the optimized sequence from Held-Karp, NOT visited_goals!
+        visited_targets: List[str] = sol.get("visited_goals", [])
+
+        # Use the optimized route directly from solver (includes start/end airports in optimal order)
         route_ids: List[str] = sol.get("route", [])
-        total_points: int = int(sol.get("total_points", 0))
+        if not route_ids:
+            # Fallback if solver didn't return route
+            route_ids = [start_id] + visited_targets + [end_id]
+
+        # Calculate total points from visited targets
+        target_priorities = {t["id"]: int(t.get("priority", 1)) for t in candidate_targets}
+        total_points: int = sum(target_priorities.get(tid, 0) for tid in visited_targets)
         travel_distance: float = float(sol.get("distance", 0.0))
+
+        # DEBUG: Log solver output
+        print(f"🔍 [DEBUG] Drone {did} solver returned:", flush=True)
+        print(f"   route_ids = {route_ids}", flush=True)
+        print(f"   total_points = {total_points}, distance = {travel_distance:.2f}", flush=True)
 
         seq = ",".join(route_ids) if route_ids else ""
 
@@ -594,15 +669,38 @@ def solve_mission_with_allocation(
         "sequences": sequences,
         "routes": routes_detail,
         "wrapped_polygons": wrapped_polygons,
-        "allocations": allocations,
+        "allocations": allocations,  # initial allocator view
     }
 
     # Step 4: Post-optimize to include unvisited targets
     if post_optimize:
         solution = post_optimize_solution(solution, env, drone_configs, dist_data)
 
-    return solution
+    # 🔁 IMPORTANT: recompute allocations from FINAL routes so UI + logs agree
+    final_allocations: Dict[str, List[str]] = {}
+    for did, route_data in solution.get("routes", {}).items():
+        route = route_data.get("route", [])
+        final_allocations[did] = [
+            node_id for node_id in route
+            if isinstance(node_id, str) and node_id.startswith("T")
+        ]
 
+    # Optional: debug print to compare initial vs final
+    print("\n" + "="*60, flush=True)
+    print("🎯 FINAL ALLOCATIONS (derived from routes)", flush=True)
+    print("="*60, flush=True)
+    total_final = 0
+    for did in sorted(final_allocations.keys(), key=lambda x: int(x)):
+        tids = final_allocations[did]
+        total_final += len(tids)
+        print(f"  Drone {did}: {tids}", flush=True)
+    print(f"  Total targets in final routes: {total_final}", flush=True)
+    print("="*60 + "\n", flush=True)
+
+    # Overwrite allocations with the final view
+    solution["allocations"] = final_allocations
+
+    return solution
 
 def prepare_distance_matrix(env: Dict[str, Any], buffer: float = 0.0) -> Dict[str, Any]:
     """
