@@ -574,6 +574,42 @@ function drawEnvironment() {
       ctx.fillText(`D${did}`, cx + 8, cy - 8);
     });
   }
+
+  // Target Type Legend (top-right corner)
+  const legendTypes = [
+    { label: "A", color: "#93c5fd" },
+    { label: "B", color: "#facc15" },
+    { label: "C", color: "#fb923c" },
+    { label: "D", color: "#ef4444" },
+    { label: "E", color: "#b91c1c" },
+  ];
+  const legendX = canvas.width - 22;
+  const legendY = 15;
+  const dotRadius = 4;
+  const lineHeight = 14;
+
+  // Semi-transparent background box
+  ctx.fillStyle = "rgba(2, 6, 23, 0.8)";
+  ctx.strokeStyle = "#374151";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(legendX - 8, legendY - 8, 28, legendTypes.length * lineHeight + 10, 4);
+  ctx.fill();
+  ctx.stroke();
+
+  // Draw each legend item
+  legendTypes.forEach((item, i) => {
+    const y = legendY + i * lineHeight;
+    // Colored dot
+    ctx.beginPath();
+    ctx.arc(legendX, y + 4, dotRadius, 0, Math.PI * 2);
+    ctx.fillStyle = item.color;
+    ctx.fill();
+    // Label
+    ctx.fillStyle = "#e5e7eb";
+    ctx.font = "bold 10px system-ui";
+    ctx.fillText(item.label, legendX + 7, y + 8);
+  });
 }
 
 // ----------------------------------------------------
