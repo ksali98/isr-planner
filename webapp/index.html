@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>ISR Web Editor + Planner</title>
-  <link rel="stylesheet" href="/static/isr.css" />
+  <link rel="stylesheet" href="/static/isr.css?v=20251204memory" />
 </head>
 <body>
   <div id="app-root">
@@ -417,15 +417,40 @@
           <!-- AGENTS TAB -->
           <section class="tab-pane" id="tab-agents">
           <div class="card-header">
-            <span>LangGraph Agents</span>
+            <span>ISR Mission Planner Agent</span>
           </div>
-          <div class="agents-placeholder">
-            <p>Agent communication interface will be available here.</p>
-            <textarea id="agent-input" class="agent-input" placeholder="Type a message to the agents..." rows="3"></textarea>
-            <button id="btn-send-agent" class="secondary-btn">Send</button>
-            <div class="agent-output-section">
-              <div class="debug-title">Agent responses:</div>
-              <pre id="agent-output" class="debug-output">// No agent activity yet...</pre>
+          <div class="agent-chat-container">
+            <!-- Input area (at top) -->
+            <div class="agent-input-area">
+              <textarea id="agent-input" class="agent-input" placeholder="Type your question and press Enter..." rows="2"></textarea>
+              <button id="btn-send-agent" class="primary-btn">Send</button>
+            </div>
+            <!-- Chat history (scrollable, below input) -->
+            <div id="agent-chat-history" class="agent-chat-history">
+              <div class="agent-message system-message">
+                Ask me to plan routes, like: "Plan a mission for all drones" or "What targets can D2 visit?"
+              </div>
+            </div>
+            <!-- Memory Management Section -->
+            <div class="agent-memory-section">
+              <div class="memory-header">
+                <span class="memory-title">Agent Memory (<span id="memory-count">0</span>)</span>
+                <button id="btn-toggle-memory" class="small-btn">Show</button>
+                <button id="btn-clear-memory" class="small-btn danger-btn">Clear All</button>
+              </div>
+              <div id="memory-panel" class="memory-panel" style="display: none;">
+                <div class="memory-add-form">
+                  <select id="memory-category">
+                    <option value="correction">Correction</option>
+                    <option value="instruction">Instruction</option>
+                    <option value="preference">Preference</option>
+                    <option value="fact">Fact</option>
+                  </select>
+                  <input type="text" id="memory-input" placeholder="Add a memory (e.g., 'Always start routes from A1')">
+                  <button id="btn-add-memory" class="small-btn">Add</button>
+                </div>
+                <div id="memory-list" class="memory-list"></div>
+              </div>
             </div>
           </div>
           </section>
@@ -434,6 +459,6 @@
     </main>
   </div>
 
-  <script src="/static/isr.js?v=20251128r"></script>
+  <script src="/static/isr.js?v=20251204memory"></script>
 </body>
 </html>

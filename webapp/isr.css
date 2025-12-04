@@ -293,30 +293,285 @@ body {
   display: block;
 }
 
-/* Agents tab */
-.agents-placeholder {
-  font-size: 0.8rem;
-  color: #9ca3af;
+/* Agents tab - Chat interface */
+.agent-chat-container {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 180px);
+  min-height: 400px;
 }
 
-.agents-placeholder p {
+.agent-input-area {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
   margin-bottom: 0.5rem;
+  flex-shrink: 0;
+}
+
+.agent-chat-history {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.5rem;
+  background: #111827;
+  border-radius: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.agent-message {
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  max-width: 90%;
+  word-wrap: break-word;
+}
+
+/* Q&A Block - grouped question and response */
+.qa-block {
+  background: #020617;
+  border: 1px solid #374151;
+  border-radius: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+/* Question section - yellow/gold theme */
+.qa-question {
+  background: #422006;
+  border: 2px solid #f59e0b;
+  border-radius: 0.4rem;
+  margin: 0.5rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.qa-label {
+  color: #fbbf24;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.qa-text {
+  color: #fef3c7;
+  font-size: 0.85rem;
+  display: block;
+  margin-top: 0.25rem;
+}
+
+/* Response section - framed and scrollable */
+.qa-response-wrapper {
+  margin: 0.5rem;
+  border: 2px solid #22c55e;
+  border-radius: 0.4rem;
+  background: #052e16;
+}
+
+.qa-response-label {
+  background: #166534;
+  color: #bbf7d0;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.3rem 0.75rem;
+  border-bottom: 1px solid #22c55e;
+}
+
+.qa-response {
+  padding: 0.5rem 0.75rem;
+  color: #d1fae5;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.qa-response.thinking {
+  color: #e9d5ff;
+  font-style: italic;
+  background: #1e1b4b;
+  max-height: none;
+}
+
+.qa-response.error {
+  color: #fecaca;
+  background: #450a0a;
+}
+
+/* System message (initial help text) */
+.agent-message.system-message {
+  background: #1f2937;
+  border: 1px solid #374151;
+  color: #9ca3af;
+  align-self: center;
+  text-align: center;
+  font-size: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  max-width: 90%;
 }
 
 .agent-input {
-  width: 100%;
-  padding: 0.4rem;
+  flex: 1;
+  padding: 0.5rem;
   border-radius: 0.4rem;
   border: 1px solid #374151;
   background: #020617;
   color: #e5e7eb;
   font-size: 0.8rem;
-  resize: vertical;
-  margin-bottom: 0.4rem;
+  resize: none;
+  min-height: 40px;
+  max-height: 100px;
 }
 
-.agent-output-section {
+.agent-input:focus {
+  outline: none;
+  border-color: #22c55e;
+}
+
+.agent-input-area .primary-btn {
+  padding: 0.5rem 1rem;
+  white-space: nowrap;
+}
+
+.agent-route-badge {
+  display: inline-block;
+  background: #166534;
+  border: 1px solid #22c55e;
+  color: #bbf7d0;
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.25rem;
+  font-family: monospace;
+  font-size: 0.75rem;
   margin-top: 0.5rem;
+}
+
+/* Agent Memory Section */
+.agent-memory-section {
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  background: #1f2937;
+  border-radius: 0.5rem;
+  border: 1px solid #374151;
+}
+
+.memory-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.memory-title {
+  flex: 1;
+  color: #9ca3af;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.memory-panel {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #374151;
+}
+
+.memory-add-form {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.memory-add-form select {
+  padding: 0.25rem 0.4rem;
+  border-radius: 0.25rem;
+  border: 1px solid #374151;
+  background: #020617;
+  color: #e5e7eb;
+  font-size: 0.7rem;
+}
+
+.memory-add-form input {
+  flex: 1;
+  padding: 0.25rem 0.4rem;
+  border-radius: 0.25rem;
+  border: 1px solid #374151;
+  background: #020617;
+  color: #e5e7eb;
+  font-size: 0.7rem;
+}
+
+.memory-list {
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.memory-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.25rem;
+  padding: 0.25rem 0.4rem;
+  margin-bottom: 0.25rem;
+  background: #020617;
+  border-radius: 0.25rem;
+  border: 1px solid #374151;
+  font-size: 0.7rem;
+}
+
+.memory-item .memory-category {
+  color: #fbbf24;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.6rem;
+  padding: 0.1rem 0.3rem;
+  background: #422006;
+  border-radius: 0.2rem;
+  white-space: nowrap;
+}
+
+.memory-item .memory-content {
+  flex: 1;
+  color: #d1d5db;
+}
+
+.memory-item .btn-delete-memory {
+  padding: 0.1rem 0.3rem;
+  font-size: 0.6rem;
+  background: #450a0a;
+  color: #fecaca;
+  border: 1px solid #dc2626;
+  border-radius: 0.2rem;
+  cursor: pointer;
+}
+
+.memory-item .btn-delete-memory:hover {
+  background: #dc2626;
+}
+
+.small-btn {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.65rem;
+  border-radius: 0.25rem;
+  border: 1px solid #374151;
+  background: #1f2937;
+  color: #d1d5db;
+  cursor: pointer;
+}
+
+.small-btn:hover {
+  background: #374151;
+}
+
+.danger-btn {
+  border-color: #dc2626;
+  color: #fecaca;
+}
+
+.danger-btn:hover {
+  background: #450a0a;
 }
 
 /* Config */

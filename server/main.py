@@ -12,7 +12,14 @@ from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from .agents.graph import workflow  # <-- our LangGraph workflow
+from .agents.graph import workflow  # <-- our LangGraph workflow (GPT-based)
+from .agents.isr_agent import (
+    run_isr_agent,  # <-- new ISR agent (Claude-based with tools)
+    add_memory,
+    load_memory,
+    clear_memory,
+    delete_memory,
+)
 from .solver import sam_distance_matrix
 from .solver.post_optimizer import get_coverage_stats, trajectory_swap_optimize, crossing_removal_optimize
 from .solver.solver_bridge import (
@@ -53,6 +60,11 @@ class AgentChatRequest(BaseModel):
 
 class AgentChatResponse(BaseModel):
     reply: str
+    route: Optional[List[str]] = None  # Extracted route waypoints (legacy D1)
+    routes: Optional[Dict[str, List[str]]] = None  # Multi-drone routes {"1": ["A1","T3","A1"], ...}
+    trajectories: Optional[Dict[str, List[List[float]]]] = None  # SAM-avoiding trajectories for drawing
+    points: Optional[int] = None       # Total points
+    fuel: Optional[float] = None       # Total fuel used
 
 
 class ApplySequenceRequest(BaseModel):
@@ -925,33 +937,88 @@ def api_coverage_stats(req: CoverageStatsRequest):
 @app.post("/api/agents/chat", response_model=AgentChatResponse)
 async def agent_chat(req: AgentChatRequest):
     """
-    LangGraph agent endpoint.
+    ISR Agent endpoint using Claude with tool-calling.
+
     Frontend sends:
       - message: user's natural language instructions
       - env: current environment (airports, targets, sams)
-      - sequences: current sequences, if any
+      - sequences: current sequences, if any (for context)
       - drone_configs: config table from the Config tab
-    We return a single model reply, which should include a line that starts with
-    'SEQUENCES: ...'.
+
+    Returns:
+      - reply: The agent's response text
+      - route: Extracted route waypoints (if a route was planned)
+      - points: Total points collected
+      - fuel: Total fuel used
     """
-    initial_state = {
-        "messages": [HumanMessage(content=req.message)],
-        "env": req.env,
-        "sequences": req.sequences,
-        "drone_configs": req.drone_configs,
-    }
+    try:
+        # Use the new ISR agent with Claude and tools
+        # Pass drone_configs and sequences so agent knows all constraints
+        result = run_isr_agent(
+            env=req.env,
+            user_query=req.message,
+            drone_configs=req.drone_configs,
+            sequences=req.sequences
+        )
 
-    result_state = workflow.invoke(initial_state)
+        return AgentChatResponse(
+            reply=result.get("response", "(No agent reply)"),
+            route=result.get("route"),
+            routes=result.get("routes"),  # Multi-drone routes
+            trajectories=result.get("trajectories"),  # SAM-avoiding trajectories
+            points=result.get("points"),
+            fuel=result.get("fuel"),
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return AgentChatResponse(
+            reply=f"Error running agent: {str(e)}",
+            route=None,
+            routes=None,
+            trajectories=None,
+            points=None,
+            fuel=None,
+        )
 
-    # Take the last AI message
-    from langchain_core.messages import AIMessage
 
-    messages = result_state.get("messages", [])
-    ai_msgs = [m for m in messages if isinstance(m, AIMessage)]
-    if not ai_msgs:
-        return AgentChatResponse(reply="(No agent reply)")
+# ============================================================================
+# Agent Memory Endpoints
+# ============================================================================
 
-    return AgentChatResponse(reply=ai_msgs[-1].content)
+class AddMemoryRequest(BaseModel):
+    content: str
+    category: str = "correction"  # correction, instruction, preference, fact
+
+
+@app.get("/api/agent/memory")
+async def get_memories():
+    """Get all agent memories."""
+    memories = load_memory()
+    return {"success": True, "memories": memories, "count": len(memories)}
+
+
+@app.post("/api/agent/memory")
+async def add_agent_memory(req: AddMemoryRequest):
+    """Add a new memory entry."""
+    entry = add_memory(req.content, req.category)
+    return {"success": True, "memory": entry}
+
+
+@app.delete("/api/agent/memory/{memory_id}")
+async def delete_agent_memory(memory_id: int):
+    """Delete a specific memory by ID."""
+    success = delete_memory(memory_id)
+    if success:
+        return {"success": True, "message": f"Memory {memory_id} deleted"}
+    return {"success": False, "message": f"Memory {memory_id} not found"}
+
+
+@app.delete("/api/agent/memory")
+async def clear_agent_memory():
+    """Clear all memories."""
+    count = clear_memory()
+    return {"success": True, "message": f"Cleared {count} memories"}
 
 
 @app.get("/api/wrapped_polygons")

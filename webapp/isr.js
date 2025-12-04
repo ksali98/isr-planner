@@ -2026,5 +2026,490 @@ window.addEventListener("load", () => {
     });
   }
 
+  // Agent Send button
+  attachAgentHandlers();
+
   initialLoadEnv();
 });
+
+// ----------------------------------------------------
+// Agent Communication
+// ----------------------------------------------------
+function attachAgentHandlers() {
+  const btnSend = $("btn-send-agent");
+  const inputEl = $("agent-input");
+
+  if (!btnSend || !inputEl) return;
+
+  // Send on button click
+  btnSend.addEventListener("click", () => sendAgentMessage());
+
+  // Send on Enter (Shift+Enter for new line)
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendAgentMessage();
+    }
+  });
+
+  // Memory management handlers
+  attachMemoryHandlers();
+
+  // Load memories on init
+  loadAgentMemories();
+}
+
+// ----------------------------------------------------
+// Agent Memory Management
+// ----------------------------------------------------
+function attachMemoryHandlers() {
+  const btnToggle = $("btn-toggle-memory");
+  const btnClear = $("btn-clear-memory");
+  const btnAdd = $("btn-add-memory");
+  const memoryInput = $("memory-input");
+
+  if (btnToggle) {
+    btnToggle.addEventListener("click", () => {
+      const panel = $("memory-panel");
+      if (panel) {
+        const isHidden = panel.style.display === "none";
+        panel.style.display = isHidden ? "block" : "none";
+        btnToggle.textContent = isHidden ? "Hide" : "Show";
+      }
+    });
+  }
+
+  if (btnClear) {
+    btnClear.addEventListener("click", async () => {
+      if (!confirm("Clear all agent memories?")) return;
+      try {
+        const resp = await fetch("/api/agent/memory", { method: "DELETE" });
+        const data = await resp.json();
+        if (data.success) {
+          loadAgentMemories();
+          appendDebugLine("Cleared all agent memories");
+        }
+      } catch (e) {
+        console.error("Error clearing memories:", e);
+      }
+    });
+  }
+
+  if (btnAdd && memoryInput) {
+    btnAdd.addEventListener("click", () => addAgentMemory());
+    memoryInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        addAgentMemory();
+      }
+    });
+  }
+}
+
+async function loadAgentMemories() {
+  try {
+    const resp = await fetch("/api/agent/memory");
+    const data = await resp.json();
+    if (data.success) {
+      renderMemoryList(data.memories);
+      const countEl = $("memory-count");
+      if (countEl) countEl.textContent = data.count;
+    }
+  } catch (e) {
+    console.error("Error loading memories:", e);
+  }
+}
+
+function renderMemoryList(memories) {
+  const listEl = $("memory-list");
+  if (!listEl) return;
+
+  if (!memories || memories.length === 0) {
+    listEl.innerHTML = '<div style="color: #6b7280; font-size: 0.7rem; text-align: center; padding: 0.5rem;">No memories yet. Add instructions the agent should remember.</div>';
+    return;
+  }
+
+  listEl.innerHTML = memories.map(m => `
+    <div class="memory-item" data-id="${m.id}">
+      <span class="memory-category">${m.category}</span>
+      <span class="memory-content">${escapeHtml(m.content)}</span>
+      <button class="btn-delete-memory" onclick="deleteAgentMemory(${m.id})">×</button>
+    </div>
+  `).join("");
+}
+
+async function addAgentMemory() {
+  const inputEl = $("memory-input");
+  const categoryEl = $("memory-category");
+  if (!inputEl || !categoryEl) return;
+
+  const content = inputEl.value.trim();
+  if (!content) return;
+
+  const category = categoryEl.value;
+
+  try {
+    const resp = await fetch("/api/agent/memory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, category })
+    });
+    const data = await resp.json();
+    if (data.success) {
+      inputEl.value = "";
+      loadAgentMemories();
+      appendDebugLine(`Added memory: [${category}] ${content}`);
+    }
+  } catch (e) {
+    console.error("Error adding memory:", e);
+  }
+}
+
+async function deleteAgentMemory(memoryId) {
+  try {
+    const resp = await fetch(`/api/agent/memory/${memoryId}`, { method: "DELETE" });
+    const data = await resp.json();
+    if (data.success) {
+      loadAgentMemories();
+      appendDebugLine(`Deleted memory #${memoryId}`);
+    }
+  } catch (e) {
+    console.error("Error deleting memory:", e);
+  }
+}
+
+async function sendAgentMessage() {
+  const inputEl = $("agent-input");
+  const chatHistory = $("agent-chat-history");
+  const btnSend = $("btn-send-agent");
+
+  if (!inputEl || !chatHistory) return;
+
+  const message = inputEl.value.trim();
+  if (!message) return;
+
+  // Create a Q&A block container
+  const qaBlock = createQABlock(message);
+  chatHistory.appendChild(qaBlock);
+  inputEl.value = "";
+
+  // Scroll to show the new block
+  chatHistory.scrollTop = chatHistory.scrollHeight;
+
+  // Disable button while processing
+  if (btnSend) btnSend.disabled = true;
+
+  try {
+    const response = await fetch("/api/agents/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: message,
+        env: state.env,
+        sequences: state.sequences,
+        drone_configs: state.droneConfigs,
+      }),
+    });
+
+    const data = await response.json();
+
+    // Debug: log the response to see what we're getting
+    console.log("Agent response:", data);
+    appendDebugLine("Agent response keys: " + Object.keys(data).join(", "));
+    if (data.routes) {
+      appendDebugLine("Agent routes: " + JSON.stringify(data.routes));
+    }
+
+    // Update the Q&A block with the response
+    const responseArea = qaBlock.querySelector(".qa-response");
+    if (data.reply) {
+      let replyContent = data.reply;
+
+      // Show route badges for multi-drone routes
+      if (data.routes && Object.keys(data.routes).length > 0) {
+        replyContent += `\n\n`;
+        for (const [did, route] of Object.entries(data.routes)) {
+          if (route && route.length > 0) {
+            replyContent += `<span class="agent-route-badge">D${did}: ${route.join(" → ")}</span> `;
+          }
+        }
+      } else if (data.route && data.route.length > 0) {
+        // Legacy single route
+        replyContent += `\n\n<span class="agent-route-badge">Route: ${data.route.join(" → ")}</span>`;
+      }
+      responseArea.innerHTML = replyContent.replace(/\n/g, "<br>");
+      responseArea.classList.remove("thinking");
+
+      // If agent returned routes, apply them to the planner
+      if (data.routes && Object.keys(data.routes).length > 0) {
+        applyAgentRoutes(data.routes, data.trajectories, data.points, data.fuel);
+      } else if (data.route && data.route.length > 0) {
+        // Legacy single route (D1 only)
+        applyAgentRoute(data.route, data.points, data.fuel);
+      }
+    } else {
+      responseArea.innerHTML = "No response from agent.";
+      responseArea.classList.add("error");
+    }
+  } catch (err) {
+    const responseArea = qaBlock.querySelector(".qa-response");
+    responseArea.innerHTML = `Error: ${escapeHtml(err.message)}`;
+    responseArea.classList.add("error");
+    console.error("Agent error:", err);
+  } finally {
+    if (btnSend) btnSend.disabled = false;
+    chatHistory.scrollTop = chatHistory.scrollHeight;
+  }
+}
+
+function createQABlock(question) {
+  const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  const block = document.createElement("div");
+  block.className = "qa-block";
+  block.innerHTML = `
+    <div class="qa-question">
+      <span class="qa-label">YOU [${timestamp}]</span>
+      <span class="qa-text">${escapeHtml(question)}</span>
+    </div>
+    <div class="qa-response-wrapper">
+      <div class="qa-response-label">AGENT RESPONSE</div>
+      <div class="qa-response thinking">
+        🤔 Thinking...
+      </div>
+    </div>
+  `;
+  return block;
+}
+
+function appendChatMessage(content, type) {
+  // Legacy function - kept for system messages
+  const chatHistory = $("agent-chat-history");
+  if (!chatHistory) return null;
+
+  const msgId = "msg-" + Date.now() + "-" + Math.random().toString(36).substring(2, 7);
+  const msgDiv = document.createElement("div");
+  msgDiv.id = msgId;
+  msgDiv.className = "agent-message system-message";
+  msgDiv.innerHTML = content;
+
+  chatHistory.appendChild(msgDiv);
+  chatHistory.scrollTop = chatHistory.scrollHeight;
+  return msgId;
+}
+
+function removeChatMessage(msgId) {
+  if (!msgId) return;
+  const el = document.getElementById(msgId);
+  if (el) el.remove();
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function applyAgentRoutes(routes, trajectories, totalPoints, totalFuel) {
+  // Apply multi-drone routes from the agent
+  // routes is like {"1": ["A1", "T3", "A1"], "2": ["A2", "T5", "A2"], ...}
+  // trajectories is like {"1": [[x1,y1], [x2,y2], ...], ...} - SAM-avoiding paths
+
+  if (!routes || Object.keys(routes).length === 0) return;
+
+  // Build waypoint lookup for calculating distances and points
+  const waypoints = {};
+  const targetPriorities = {};
+
+  if (state.env) {
+    for (const a of (state.env.airports || [])) {
+      const id = a.id || a.label || "A?";
+      waypoints[id] = [a.x, a.y];
+    }
+    for (const t of (state.env.targets || [])) {
+      const id = t.id || t.label || "T?";
+      waypoints[id] = [t.x, t.y];
+      targetPriorities[id] = t.priority || t.value || 5;
+    }
+  }
+
+  // Build allocations for the allocation display
+  const allocations = {};
+
+  for (const [droneId, route] of Object.entries(routes)) {
+    if (!route || route.length < 2) continue;
+
+    const routeStr = route.join(",");
+
+    // Store sequence
+    state.sequences[droneId] = routeStr;
+
+    // Extract targets for allocation display
+    const routeTargets = route.filter(wp => String(wp).startsWith('T'));
+    allocations[droneId] = routeTargets;
+
+    // Calculate distance (sum of segment lengths)
+    let distance = 0;
+    for (let i = 0; i < route.length - 1; i++) {
+      const from = waypoints[route[i]];
+      const to = waypoints[route[i + 1]];
+      if (from && to) {
+        distance += _distance(from, to);
+      }
+    }
+
+    // Calculate points (sum of target priorities)
+    let points = 0;
+    for (const tid of routeTargets) {
+      points += targetPriorities[tid] || 0;
+    }
+
+    // Use server-provided SAM-avoiding trajectory if available, otherwise build locally
+    let trajectory;
+    if (trajectories && trajectories[droneId] && trajectories[droneId].length > 0) {
+      trajectory = trajectories[droneId];
+      appendDebugLine(`Agent route D${droneId}: using SAM-avoiding trajectory (${trajectory.length} points)`);
+    } else {
+      trajectory = buildTrajectoryFromRoute(route);
+    }
+
+    // Build route info for visualization
+    state.routes[droneId] = {
+      route: route,
+      points: points,
+      distance: distance,
+      trajectory: trajectory,
+    };
+
+    appendDebugLine(`Agent route D${droneId}: ${routeStr} (${points} pts, ${distance.toFixed(1)} fuel)`);
+  }
+
+  // Store allocations
+  state.allocations = allocations;
+
+  // Update the sequence input to show the currently selected drone's sequence
+  const curDrone = state.currentDroneForSeq || "1";
+  const seqInput = $("sequence-input");
+  if (seqInput && state.sequences[curDrone]) {
+    seqInput.value = state.sequences[curDrone];
+  }
+
+  // Update allocation display in Env tab
+  updateAllocationDisplay(allocations);
+
+  // Update debug output
+  appendDebugLine(`Agent applied ${Object.keys(routes).length} drone routes (${totalPoints || "?"} pts, ${totalFuel?.toFixed(1) || "?"} fuel)`);
+
+  // Redraw and update stats
+  drawEnvironment();
+  updateStatsFromRoutes();
+}
+
+function applyAgentRoute(route, points, fuel) {
+  // Apply the agent's route to drone D1 (legacy single-drone)
+  // Route is like ["A1", "T3", "T7", "A1"]
+
+  if (!route || route.length < 2) return;
+
+  const routeStr = route.join(",");
+
+  // Store as D1's sequence
+  state.sequences["1"] = routeStr;
+
+  // Update the sequence input if it exists
+  const seqInput = $("sequence-input");
+  if (seqInput) {
+    seqInput.value = routeStr;
+  }
+
+  // Calculate points and distance if not provided
+  let calculatedPoints = points || 0;
+  let calculatedFuel = fuel || 0;
+
+  if (!points || !fuel) {
+    // Build waypoint lookup
+    const waypoints = {};
+    const targetPriorities = {};
+
+    if (state.env) {
+      for (const a of (state.env.airports || [])) {
+        const id = a.id || a.label || "A?";
+        waypoints[id] = [a.x, a.y];
+      }
+      for (const t of (state.env.targets || [])) {
+        const id = t.id || t.label || "T?";
+        waypoints[id] = [t.x, t.y];
+        targetPriorities[id] = t.priority || t.value || 5;
+      }
+    }
+
+    // Calculate distance
+    if (!fuel) {
+      calculatedFuel = 0;
+      for (let i = 0; i < route.length - 1; i++) {
+        const from = waypoints[route[i]];
+        const to = waypoints[route[i + 1]];
+        if (from && to) {
+          calculatedFuel += _distance(from, to);
+        }
+      }
+    }
+
+    // Calculate points
+    if (!points) {
+      calculatedPoints = 0;
+      const routeTargets = route.filter(wp => String(wp).startsWith('T'));
+      for (const tid of routeTargets) {
+        calculatedPoints += targetPriorities[tid] || 0;
+      }
+    }
+  }
+
+  // Build route info for visualization
+  state.routes["1"] = {
+    route: route,
+    points: calculatedPoints,
+    distance: calculatedFuel,
+    trajectory: buildTrajectoryFromRoute(route),
+  };
+
+  // Update allocation display
+  state.allocations = { "1": route.filter(wp => String(wp).startsWith('T')) };
+  updateAllocationDisplay(state.allocations);
+
+  // Update debug output
+  appendDebugLine(`Agent route applied to D1: ${routeStr} (${calculatedPoints} pts, ${calculatedFuel.toFixed(1)} fuel)`);
+
+  // Redraw
+  drawEnvironment();
+  updateStatsFromRoutes();
+}
+
+function buildTrajectoryFromRoute(route) {
+  // Build trajectory points from waypoint IDs
+  if (!state.env || !route) return [];
+
+  const trajectory = [];
+  const waypoints = {};
+
+  // Index airports
+  for (const a of (state.env.airports || [])) {
+    const id = a.id || a.label || "A?";
+    waypoints[id] = [a.x, a.y];
+  }
+
+  // Index targets
+  for (const t of (state.env.targets || [])) {
+    const id = t.id || t.label || "T?";
+    waypoints[id] = [t.x, t.y];
+  }
+
+  // Build trajectory
+  for (const wp of route) {
+    if (waypoints[wp]) {
+      trajectory.push(waypoints[wp]);
+    }
+  }
+
+  return trajectory;
+}

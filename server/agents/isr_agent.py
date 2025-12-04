@@ -1,0 +1,1370 @@
+"""
+ISR Mission Planning Agent for Web Planner
+
+LangGraph-based agent with tools for planning MULTI-DRONE missions.
+Integrates with the web planner UI to visualize routes.
+
+The agent receives:
+- Environment (airports, targets, SAMs)
+- Drone configurations (fuel budgets, start/end airports, target access per drone)
+- Current sequences (if any)
+"""
+
+import os
+import json
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Literal, Annotated
+
+from dotenv import load_dotenv
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
+from langchain_core.tools import tool
+from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode
+
+# Import optimization functions from post_optimizer
+from ..solver.post_optimizer import (
+    post_optimize_solution,
+    trajectory_swap_optimize,
+    crossing_removal_optimize,
+    get_coverage_stats,
+)
+
+# Import SAM-aware distance matrix calculator
+from ..solver.sam_distance_matrix import (
+    calculate_sam_aware_matrix,
+    get_path_between,
+)
+
+# Load environment variables
+load_dotenv()
+
+# Try to load from benchmark .env if not set
+if not os.getenv("ANTHROPIC_API_KEY"):
+    benchmark_env = os.path.join(os.path.dirname(__file__), "..", "..", "..", "isr_benchmark", ".env")
+    if os.path.exists(benchmark_env):
+        load_dotenv(benchmark_env)
+
+
+# ============================================================================
+# Persistent Memory System
+# ============================================================================
+
+MEMORY_FILE = Path(__file__).parent.parent.parent / "agent_memory.json"
+
+
+def load_memory() -> List[Dict[str, Any]]:
+    """Load persistent memory from file."""
+    if MEMORY_FILE.exists():
+        try:
+            with open(MEMORY_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return []
+    return []
+
+
+def save_memory(memories: List[Dict[str, Any]]) -> None:
+    """Save memories to persistent file."""
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(memories, f, indent=2)
+
+
+def add_memory(content: str, category: str = "correction") -> Dict[str, Any]:
+    """
+    Add a new memory entry.
+
+    Categories:
+    - correction: User corrected the agent's behavior
+    - instruction: User gave a standing instruction
+    - preference: User preference for how to do things
+    - fact: Important fact to remember
+    """
+    memories = load_memory()
+    entry = {
+        "id": len(memories) + 1,
+        "timestamp": datetime.now().isoformat(),
+        "category": category,
+        "content": content,
+        "active": True
+    }
+    memories.append(entry)
+    save_memory(memories)
+    return entry
+
+
+def get_active_memories() -> List[Dict[str, Any]]:
+    """Get all active memories."""
+    return [m for m in load_memory() if m.get("active", True)]
+
+
+def clear_memory() -> int:
+    """Clear all memories. Returns count of cleared entries."""
+    memories = load_memory()
+    count = len(memories)
+    save_memory([])
+    return count
+
+
+def delete_memory(memory_id: int) -> bool:
+    """Delete a specific memory by ID."""
+    memories = load_memory()
+    original_len = len(memories)
+    memories = [m for m in memories if m.get("id") != memory_id]
+    if len(memories) < original_len:
+        save_memory(memories)
+        return True
+    return False
+
+
+def format_memories_for_prompt() -> str:
+    """Format active memories as text to include in system prompt."""
+    memories = get_active_memories()
+    if not memories:
+        return ""
+
+    lines = ["\n\n" + "=" * 60]
+    lines.append("IMPORTANT MEMORIES & INSTRUCTIONS FROM PREVIOUS SESSIONS:")
+    lines.append("=" * 60)
+
+    for m in memories:
+        category = m.get("category", "note").upper()
+        content = m.get("content", "")
+        lines.append(f"\n[{category}] {content}")
+
+    lines.append("\n" + "=" * 60)
+    lines.append("END OF MEMORIES - Follow these instructions carefully!")
+    lines.append("=" * 60 + "\n")
+
+    return "\n".join(lines)
+
+
+# ============================================================================
+# State Definition
+# ============================================================================
+
+class ISRAgentState(dict):
+    """State for the ISR planning agent."""
+    messages: Annotated[list, add_messages]
+    environment: Optional[Dict[str, Any]]
+    drone_configs: Optional[Dict[str, Any]]
+    current_sequences: Optional[Dict[str, str]]
+    proposed_routes: Optional[Dict[str, Any]]
+
+
+# ============================================================================
+# Environment & Config Context (set per request)
+# ============================================================================
+
+_current_env: Optional[Dict[str, Any]] = None
+_drone_configs: Optional[Dict[str, Any]] = None
+_current_sequences: Optional[Dict[str, str]] = None
+_distance_matrix: Optional[Dict[str, Dict[str, float]]] = None
+_sam_paths: Optional[Dict[str, List[List[float]]]] = None  # Pre-computed SAM-avoiding paths
+
+
+def set_context(env: Dict[str, Any], drone_configs: Optional[Dict[str, Any]] = None,
+               sequences: Optional[Dict[str, str]] = None):
+    """Set the current context for tools to use."""
+    global _current_env, _drone_configs, _current_sequences, _distance_matrix, _sam_paths
+    _current_env = env
+    _drone_configs = drone_configs or {}
+    _current_sequences = sequences or {}
+    _distance_matrix = env.get("distance_matrix")
+    _sam_paths = None
+
+    # If no distance matrix, compute one (SAM-aware if SAMs present)
+    if not _distance_matrix:
+        _distance_matrix, _sam_paths = _compute_distance_matrix(env)
+
+
+def _compute_distance_matrix(env: Dict[str, Any]) -> tuple:
+    """
+    Compute distance matrix from environment.
+    Uses SAM-aware distances if SAMs are present, otherwise Euclidean.
+
+    Returns:
+        Tuple of (distance_matrix_dict, sam_paths_dict)
+    """
+    import math
+
+    sams = env.get("sams", [])
+
+    # If SAMs exist, use SAM-aware distance calculation
+    if sams:
+        try:
+            result = calculate_sam_aware_matrix(env)
+
+            # Convert matrix format from list-of-lists to dict-of-dicts
+            labels = result.get("labels", [])
+            matrix_data = result.get("matrix", [])
+            paths = result.get("paths", {})
+
+            matrix = {}
+            for i, from_id in enumerate(labels):
+                matrix[from_id] = {}
+                for j, to_id in enumerate(labels):
+                    matrix[from_id][to_id] = round(matrix_data[i][j], 2)
+
+            print(f"✅ Using SAM-aware distance matrix ({len(labels)} waypoints, {len(paths)} SAM-avoiding paths)")
+            return matrix, paths
+
+        except Exception as e:
+            print(f"⚠️ SAM-aware matrix calculation failed: {e}, falling back to Euclidean")
+
+    # Fallback: Simple Euclidean distances
+    waypoints = {}
+
+    # Add airports
+    for airport in env.get("airports", []):
+        aid = airport.get("id", airport.get("label", "A1"))
+        waypoints[aid] = (airport["x"], airport["y"])
+
+    # Add targets
+    for target in env.get("targets", []):
+        tid = target.get("id", target.get("label", "T?"))
+        waypoints[tid] = (target["x"], target["y"])
+
+    # Compute distances
+    matrix = {}
+    for from_id, from_pos in waypoints.items():
+        matrix[from_id] = {}
+        for to_id, to_pos in waypoints.items():
+            if from_id == to_id:
+                matrix[from_id][to_id] = 0.0
+            else:
+                dist = math.hypot(to_pos[0] - from_pos[0], to_pos[1] - from_pos[1])
+                matrix[from_id][to_id] = round(dist, 2)
+
+    return matrix, None
+
+
+def get_sam_path(from_id: str, to_id: str) -> Optional[List[List[float]]]:
+    """Get the pre-computed SAM-avoiding path between two waypoints."""
+    if _sam_paths is None:
+        return None
+    path_key = f"{from_id}->{to_id}"
+    return _sam_paths.get(path_key)
+
+
+def get_environment() -> Dict[str, Any]:
+    """Get the current environment."""
+    if _current_env is None:
+        raise ValueError("No environment loaded")
+    return _current_env
+
+
+def get_drone_configs() -> Dict[str, Any]:
+    """Get the drone configurations."""
+    return _drone_configs or {}
+
+
+def get_current_sequences() -> Dict[str, str]:
+    """Get the current sequences."""
+    return _current_sequences or {}
+
+
+# ============================================================================
+# Tools
+# ============================================================================
+
+@tool
+def get_mission_overview() -> str:
+    """
+    Get complete mission overview including:
+    - All airports with positions
+    - All targets with priorities and types
+    - All enabled drones with their constraints (fuel budget, start/end airport, accessible target types)
+    - Current sequences if any
+
+    Call this FIRST to understand the mission parameters.
+    """
+    env = get_environment()
+    configs = get_drone_configs()
+    sequences = get_current_sequences()
+
+    airports = env.get("airports", [])
+    targets = env.get("targets", [])
+    sams = env.get("sams", [])
+
+    lines = [
+        "=" * 60,
+        "MISSION OVERVIEW",
+        "=" * 60,
+        "",
+        f"Grid Size: {env.get('grid_size', 100)}x{env.get('grid_size', 100)}",
+        "",
+        f"AIRPORTS ({len(airports)}):",
+    ]
+
+    for a in airports:
+        aid = a.get("id", a.get("label", "A?"))
+        lines.append(f"  {aid}: position ({a['x']}, {a['y']})")
+
+    lines.append("")
+    lines.append(f"TARGETS ({len(targets)}):")
+
+    # Group by type
+    by_type = {}
+    for t in targets:
+        ttype = t.get("type", "a").upper()
+        if ttype not in by_type:
+            by_type[ttype] = []
+        by_type[ttype].append(t)
+
+    for ttype in sorted(by_type.keys()):
+        type_targets = sorted(by_type[ttype], key=lambda x: x.get("priority", 5), reverse=True)
+        lines.append(f"  Type {ttype}:")
+        for t in type_targets:
+            tid = t.get("id", t.get("label", "T?"))
+            priority = t.get("priority", t.get("value", 5))
+            lines.append(f"    {tid}: priority={priority}, pos=({t['x']}, {t['y']})")
+
+    total_points = sum(t.get("priority", t.get("value", 5)) for t in targets)
+    lines.append(f"\n  Total possible points: {total_points}")
+
+    if sams:
+        lines.append(f"\nSAMs/NFZs: {len(sams)} (handled by low-level planner)")
+
+    lines.append("")
+    lines.append("=" * 60)
+    lines.append("DRONE CONFIGURATIONS")
+    lines.append("=" * 60)
+
+    enabled_drones = []
+    for drone_id in ["1", "2", "3", "4", "5"]:
+        cfg = configs.get(drone_id, {})
+        enabled = cfg.get("enabled", drone_id == "1")  # D1 enabled by default
+
+        if enabled:
+            enabled_drones.append(drone_id)
+            fuel = cfg.get("fuel_budget", 200)
+            start = cfg.get("start_airport", "A1")
+            end = cfg.get("end_airport", "A1")
+
+            # Target access
+            target_access = cfg.get("target_access", {})
+            if target_access:
+                accessible = [k.upper() for k, v in target_access.items() if v]
+                types_str = ", ".join(accessible) if accessible else "NONE"
+            else:
+                types_str = "ALL"
+
+            lines.append(f"\nDrone D{drone_id}:")
+            lines.append(f"  Fuel budget: {fuel}")
+            lines.append(f"  Start airport: {start}")
+            lines.append(f"  End airport: {end}")
+            lines.append(f"  Accessible target types: {types_str}")
+
+            seq = sequences.get(drone_id, "")
+            if seq:
+                lines.append(f"  Current sequence: {seq}")
+
+    lines.append("")
+    lines.append(f"Enabled drones: {len(enabled_drones)} ({', '.join(['D' + d for d in enabled_drones])})")
+
+    return "\n".join(lines)
+
+
+@tool
+def get_drone_info(drone_id: str) -> str:
+    """
+    Get detailed info for a specific drone including its constraints.
+
+    Args:
+        drone_id: The drone ID ("1", "2", etc. or "D1", "D2", etc.)
+    """
+    # Normalize drone ID
+    drone_id = drone_id.replace("D", "").replace("d", "")
+
+    configs = get_drone_configs()
+    sequences = get_current_sequences()
+    env = get_environment()
+    targets = {t.get("id", t.get("label")): t for t in env.get("targets", [])}
+
+    cfg = configs.get(drone_id, {})
+
+    if not cfg:
+        return f"Drone D{drone_id} has no configuration (using defaults: fuel=200, start/end=A1, all types)"
+
+    enabled = cfg.get("enabled", drone_id == "1")
+    fuel = cfg.get("fuel_budget", 200)
+    start = cfg.get("start_airport", "A1")
+    end = cfg.get("end_airport", "A1")
+
+    # Target access
+    target_access = cfg.get("target_access", {})
+    accessible_types = []
+    if target_access:
+        accessible_types = [k.upper() for k, v in target_access.items() if v]
+    else:
+        accessible_types = ["A", "B", "C", "D", "E"]
+
+    # Find accessible targets
+    accessible_targets = []
+    for tid, t in targets.items():
+        ttype = t.get("type", "a").upper()
+        if ttype in accessible_types or not accessible_types:
+            accessible_targets.append((tid, t.get("priority", 5), ttype))
+
+    accessible_targets.sort(key=lambda x: x[1], reverse=True)
+
+    lines = [
+        f"=== Drone D{drone_id} ===",
+        f"Status: {'ENABLED' if enabled else 'DISABLED'}",
+        f"Fuel budget: {fuel}",
+        f"Start airport: {start}",
+        f"End airport: {end}",
+        f"Accessible types: {', '.join(accessible_types) if accessible_types else 'ALL'}",
+        "",
+        f"Accessible targets ({len(accessible_targets)}):",
+    ]
+
+    for tid, priority, ttype in accessible_targets:
+        lines.append(f"  {tid}: priority={priority}, type={ttype}")
+
+    total_accessible_points = sum(t[1] for t in accessible_targets)
+    lines.append(f"\nMax possible points for this drone: {total_accessible_points}")
+
+    seq = sequences.get(drone_id, "")
+    if seq:
+        lines.append(f"\nCurrent assigned sequence: {seq}")
+
+    return "\n".join(lines)
+
+
+@tool
+def get_distance(from_point: str, to_point: str) -> str:
+    """
+    Get the distance between two waypoints.
+
+    Args:
+        from_point: Starting waypoint ID (e.g., "A1", "T3")
+        to_point: Destination waypoint ID
+    """
+    if _distance_matrix is None:
+        return "Error: No distance matrix available"
+
+    if from_point not in _distance_matrix:
+        return f"Error: Unknown waypoint '{from_point}'"
+    if to_point not in _distance_matrix.get(from_point, {}):
+        return f"Error: Unknown waypoint '{to_point}'"
+
+    distance = _distance_matrix[from_point][to_point]
+    return f"Distance from {from_point} to {to_point}: {distance:.2f} fuel units"
+
+
+@tool
+def calculate_route_fuel(drone_id: str, waypoints: List[str]) -> str:
+    """
+    Calculate total fuel consumption for a drone's route.
+
+    Args:
+        drone_id: The drone ID ("1" or "D1")
+        waypoints: Ordered list of waypoint IDs (e.g., ["A1", "T3", "T7", "A1"])
+    """
+    if _distance_matrix is None:
+        return "Error: No distance matrix available"
+
+    drone_id = drone_id.replace("D", "").replace("d", "")
+    configs = get_drone_configs()
+    cfg = configs.get(drone_id, {})
+    fuel_budget = cfg.get("fuel_budget", 200)
+
+    if len(waypoints) < 2:
+        return "Error: Route must have at least 2 waypoints"
+
+    # Validate waypoints
+    for wp in waypoints:
+        if wp not in _distance_matrix:
+            return f"Error: Unknown waypoint '{wp}'"
+
+    # Calculate each leg
+    legs = []
+    total_fuel = 0.0
+
+    for i in range(len(waypoints) - 1):
+        from_wp = waypoints[i]
+        to_wp = waypoints[i + 1]
+        distance = _distance_matrix[from_wp][to_wp]
+        total_fuel += distance
+        legs.append(f"  {from_wp} -> {to_wp}: {distance:.2f} fuel")
+
+    lines = [f"Route fuel calculation for D{drone_id}:"] + legs
+    lines.append("")
+    lines.append(f"Total fuel: {total_fuel:.2f}")
+    lines.append(f"Fuel budget: {fuel_budget}")
+    lines.append(f"Remaining: {fuel_budget - total_fuel:.2f}")
+
+    if total_fuel <= fuel_budget:
+        lines.append("Status: ✓ VALID (within budget)")
+    else:
+        lines.append(f"Status: ✗ INVALID (exceeds budget by {total_fuel - fuel_budget:.2f})")
+
+    return "\n".join(lines)
+
+
+@tool
+def validate_drone_route(drone_id: str, waypoints: List[str]) -> str:
+    """
+    Fully validate a route for a specific drone against ALL constraints:
+    - Fuel budget
+    - Start/end airports
+    - Target type access
+    - No duplicate targets
+
+    Args:
+        drone_id: The drone ID ("1" or "D1")
+        waypoints: Ordered list of waypoint IDs (e.g., ["A1", "T3", "T7", "A1"])
+    """
+    if _distance_matrix is None:
+        return "Error: No distance matrix available"
+
+    drone_id = drone_id.replace("D", "").replace("d", "")
+    env = get_environment()
+    configs = get_drone_configs()
+    cfg = configs.get(drone_id, {})
+
+    fuel_budget = cfg.get("fuel_budget", 200)
+    start_airport = cfg.get("start_airport", "A1")
+    end_airport = cfg.get("end_airport", "A1")
+    target_access = cfg.get("target_access", {})
+
+    targets = {t.get("id", t.get("label")): t for t in env.get("targets", [])}
+    airports = {a.get("id", a.get("label")): a for a in env.get("airports", [])}
+
+    errors = []
+
+    if len(waypoints) < 2:
+        return f"Error: Route for D{drone_id} must have at least 2 waypoints"
+
+    # Check all waypoints are valid
+    for wp in waypoints:
+        if wp not in _distance_matrix:
+            errors.append(f"Unknown waypoint: {wp}")
+
+    if errors:
+        return f"Validation FAILED for D{drone_id}:\n" + "\n".join(f"  - {e}" for e in errors)
+
+    # Check starts at correct airport
+    if waypoints[0] != start_airport:
+        errors.append(f"Must start at {start_airport}, but starts at {waypoints[0]}")
+
+    # Check ends at correct airport
+    if waypoints[-1] != end_airport:
+        errors.append(f"Must end at {end_airport}, but ends at {waypoints[-1]}")
+
+    # Check target type access
+    target_visits = []
+    for wp in waypoints:
+        if wp in targets:
+            target_visits.append(wp)
+            t = targets[wp]
+            ttype = t.get("type", "a").lower()
+            if target_access:
+                if not target_access.get(ttype, True):
+                    errors.append(f"D{drone_id} cannot access type {ttype.upper()} target {wp}")
+
+    # Check for duplicate targets
+    if len(target_visits) != len(set(target_visits)):
+        duplicates = [wp for wp in set(target_visits) if target_visits.count(wp) > 1]
+        errors.append(f"Duplicate target visits: {duplicates}")
+
+    # Calculate fuel
+    total_fuel = 0.0
+    for i in range(len(waypoints) - 1):
+        total_fuel += _distance_matrix[waypoints[i]][waypoints[i + 1]]
+
+    if total_fuel > fuel_budget:
+        errors.append(f"Exceeds fuel budget: {total_fuel:.2f} > {fuel_budget}")
+
+    # Calculate points
+    total_points = sum(targets[wp].get("priority", targets[wp].get("value", 5))
+                       for wp in target_visits if wp in targets)
+
+    # Build result
+    lines = []
+    if errors:
+        lines.append(f"=== VALIDATION FAILED for D{drone_id} ===")
+        for e in errors:
+            lines.append(f"  ✗ {e}")
+    else:
+        lines.append(f"=== VALIDATION PASSED for D{drone_id} ===")
+
+    lines.append("")
+    lines.append(f"Route: {' -> '.join(waypoints)}")
+    lines.append(f"Targets visited: {len(target_visits)}")
+    lines.append(f"Total points: {total_points}")
+    lines.append(f"Total fuel: {total_fuel:.2f} / {fuel_budget}")
+
+    if not errors:
+        lines.append("")
+        lines.append(f"✓ This route is valid for D{drone_id}!")
+
+    return "\n".join(lines)
+
+
+@tool
+def find_accessible_targets(drone_id: str, from_point: str) -> str:
+    """
+    Find targets accessible to a specific drone, sorted by efficiency (points per fuel).
+    Takes into account the drone's target type restrictions.
+
+    Args:
+        drone_id: The drone ID ("1" or "D1")
+        from_point: The starting waypoint ID
+    """
+    if _distance_matrix is None:
+        return "Error: No distance matrix available"
+
+    drone_id = drone_id.replace("D", "").replace("d", "")
+    env = get_environment()
+    configs = get_drone_configs()
+    cfg = configs.get(drone_id, {})
+
+    target_access = cfg.get("target_access", {})
+    end_airport = cfg.get("end_airport", "A1")
+
+    targets = {t.get("id", t.get("label")): t for t in env.get("targets", [])}
+
+    if from_point not in _distance_matrix:
+        return f"Error: Unknown waypoint '{from_point}'"
+
+    efficiencies = []
+    for target_id, target in targets.items():
+        ttype = target.get("type", "a").lower()
+
+        # Check if drone can access this type
+        if target_access:
+            if not target_access.get(ttype, True):
+                continue
+
+        dist_to = _distance_matrix[from_point][target_id]
+        dist_back = _distance_matrix[target_id][end_airport]
+        total_cost = dist_to + dist_back
+        priority = target.get("priority", target.get("value", 5))
+        efficiency = priority / total_cost if total_cost > 0 else 0
+        efficiencies.append((target_id, priority, ttype.upper(), dist_to, total_cost, efficiency))
+
+    # Sort by efficiency
+    efficiencies.sort(key=lambda x: x[5], reverse=True)
+
+    lines = [f"Accessible targets for D{drone_id} from {from_point} (sorted by efficiency):"]
+    lines.append(f"{'Target':<8} {'Pts':<5} {'Type':<6} {'Dist':<8} {'Round':<8} {'Eff':<8}")
+    lines.append("-" * 55)
+    for tid, pts, ttype, dist, total, eff in efficiencies:
+        lines.append(f"{tid:<8} {pts:<5} {ttype:<6} {dist:<8.2f} {total:<8.2f} {eff:<8.3f}")
+
+    return "\n".join(lines)
+
+
+@tool
+def suggest_drone_route(drone_id: str) -> str:
+    """
+    Suggest an optimized route for a specific drone using a greedy algorithm.
+    Respects the drone's constraints (fuel, start/end, type access).
+
+    Args:
+        drone_id: The drone ID ("1" or "D1")
+    """
+    if _distance_matrix is None:
+        return "Error: No distance matrix available"
+
+    drone_id = drone_id.replace("D", "").replace("d", "")
+    env = get_environment()
+    configs = get_drone_configs()
+    cfg = configs.get(drone_id, {})
+
+    fuel_budget = cfg.get("fuel_budget", 200)
+    start_airport = cfg.get("start_airport", "A1")
+    end_airport = cfg.get("end_airport", "A1")
+    target_access = cfg.get("target_access", {})
+
+    targets = {t.get("id", t.get("label")): t for t in env.get("targets", [])}
+
+    # Filter by accessible types
+    accessible_targets = {}
+    for tid, t in targets.items():
+        ttype = t.get("type", "a").lower()
+        if target_access:
+            if target_access.get(ttype, True):
+                accessible_targets[tid] = t
+        else:
+            accessible_targets[tid] = t
+
+    route = [start_airport]
+    visited = set()
+    fuel_used = 0.0
+    total_points = 0
+    current = start_airport
+
+    while True:
+        best_target = None
+        best_efficiency = -1
+
+        for tid, target in accessible_targets.items():
+            if tid in visited:
+                continue
+
+            dist_to = _distance_matrix[current][tid]
+            dist_back = _distance_matrix[tid][end_airport]
+
+            if fuel_used + dist_to + dist_back <= fuel_budget:
+                priority = target.get("priority", target.get("value", 5))
+                efficiency = priority / dist_to if dist_to > 0 else float('inf')
+
+                if efficiency > best_efficiency:
+                    best_efficiency = efficiency
+                    best_target = tid
+
+        if best_target is None:
+            break
+
+        dist = _distance_matrix[current][best_target]
+        route.append(best_target)
+        visited.add(best_target)
+        fuel_used += dist
+        total_points += accessible_targets[best_target].get("priority",
+                        accessible_targets[best_target].get("value", 5))
+        current = best_target
+
+    # Return to end airport
+    fuel_used += _distance_matrix[current][end_airport]
+    route.append(end_airport)
+
+    lines = [
+        f"=== SUGGESTED ROUTE for D{drone_id} ===",
+        f"Route: {' -> '.join(route)}",
+        f"Targets: {len(visited)}",
+        f"Points: {total_points}",
+        f"Fuel: {fuel_used:.2f} / {fuel_budget}",
+        f"Remaining: {fuel_budget - fuel_used:.2f}",
+        "",
+        f"ROUTE_D{drone_id}: {','.join(route)}",
+    ]
+
+    return "\n".join(lines)
+
+
+@tool
+def check_target_conflicts(routes: Dict[str, str]) -> str:
+    """
+    Check if multiple drones are assigned the same targets.
+
+    Args:
+        routes: Dictionary mapping drone IDs to route strings, e.g. {"1": "A1,T3,T7,A1", "2": "A2,T5,A2"}
+    """
+    env = get_environment()
+    targets = {t.get("id", t.get("label")) for t in env.get("targets", [])}
+
+    # Parse routes and find targets
+    drone_targets = {}
+    for drone_id, route_str in routes.items():
+        drone_id = drone_id.replace("D", "").replace("d", "")
+        waypoints = [wp.strip() for wp in route_str.split(",")]
+        drone_targets[drone_id] = [wp for wp in waypoints if wp in targets]
+
+    # Find conflicts
+    all_targets = []
+    for targets_list in drone_targets.values():
+        all_targets.extend(targets_list)
+
+    duplicates = [t for t in set(all_targets) if all_targets.count(t) > 1]
+
+    lines = ["=== TARGET ASSIGNMENT CHECK ==="]
+    for drone_id, targets_list in drone_targets.items():
+        lines.append(f"D{drone_id}: {', '.join(targets_list) if targets_list else '(none)'}")
+
+    if duplicates:
+        lines.append("")
+        lines.append("⚠️ CONFLICTS FOUND - These targets are assigned to multiple drones:")
+        for dup in duplicates:
+            assigned_to = [f"D{d}" for d, tl in drone_targets.items() if dup in tl]
+            lines.append(f"  {dup}: assigned to {', '.join(assigned_to)}")
+    else:
+        lines.append("")
+        lines.append("✓ No conflicts - each target assigned to at most one drone")
+
+    return "\n".join(lines)
+
+
+@tool
+def get_mission_summary(routes: Dict[str, str]) -> str:
+    """
+    Get a complete summary of a multi-drone mission plan.
+
+    Args:
+        routes: Dictionary mapping drone IDs to route strings, e.g. {"1": "A1,T3,T7,A1", "2": "A2,T5,A2"}
+    """
+    env = get_environment()
+    configs = get_drone_configs()
+    targets = {t.get("id", t.get("label")): t for t in env.get("targets", [])}
+
+    total_points = 0
+    total_fuel = 0.0
+    all_visited = set()
+
+    lines = ["=" * 60, "MISSION SUMMARY", "=" * 60, ""]
+
+    for drone_id, route_str in sorted(routes.items()):
+        drone_id = drone_id.replace("D", "").replace("d", "")
+        cfg = configs.get(drone_id, {})
+        fuel_budget = cfg.get("fuel_budget", 200)
+
+        waypoints = [wp.strip() for wp in route_str.split(",")]
+
+        # Calculate fuel
+        fuel = 0.0
+        for i in range(len(waypoints) - 1):
+            if waypoints[i] in _distance_matrix and waypoints[i+1] in _distance_matrix.get(waypoints[i], {}):
+                fuel += _distance_matrix[waypoints[i]][waypoints[i+1]]
+
+        # Calculate points
+        drone_points = 0
+        drone_targets = []
+        for wp in waypoints:
+            if wp in targets and wp not in all_visited:
+                drone_points += targets[wp].get("priority", targets[wp].get("value", 5))
+                drone_targets.append(wp)
+                all_visited.add(wp)
+
+        total_points += drone_points
+        total_fuel += fuel
+
+        lines.append(f"D{drone_id}: {route_str}")
+        lines.append(f"  Targets: {', '.join(drone_targets) if drone_targets else '(none)'}")
+        lines.append(f"  Points: {drone_points}")
+        lines.append(f"  Fuel: {fuel:.2f} / {fuel_budget}")
+        lines.append("")
+
+    # Total stats
+    total_possible = sum(t.get("priority", t.get("value", 5)) for t in targets.values())
+    unvisited = [tid for tid in targets.keys() if tid not in all_visited]
+
+    lines.append("-" * 40)
+    lines.append(f"TOTAL POINTS: {total_points} / {total_possible} ({100*total_points/total_possible:.1f}%)")
+    lines.append(f"TOTAL FUEL: {total_fuel:.2f}")
+    lines.append(f"TARGETS VISITED: {len(all_visited)} / {len(targets)}")
+
+    if unvisited:
+        lines.append(f"UNVISITED: {', '.join(sorted(unvisited))}")
+
+    return "\n".join(lines)
+
+
+@tool
+def optimize_assign_unvisited(routes: Dict[str, str]) -> str:
+    """
+    Assign unvisited targets to drones that have spare fuel capacity.
+    Inserts targets at optimal positions in existing routes to minimize
+    additional fuel consumption while maximizing coverage.
+
+    Args:
+        routes: Dictionary mapping drone IDs to route strings, e.g. {"1": "A1,T3,T7,A1", "2": "A2,T5,A2"}
+
+    Returns:
+        Optimized routes with unvisited targets assigned, or error message.
+    """
+    env = get_environment()
+    configs = get_drone_configs()
+    targets = {t.get("id", t.get("label")): t for t in env.get("targets", [])}
+
+    # Build solution structure expected by post_optimizer
+    solution = {"routes": {}}
+    for drone_id, route_str in routes.items():
+        drone_id = drone_id.replace("D", "").replace("d", "")
+        waypoints = [wp.strip() for wp in route_str.split(",")]
+        cfg = configs.get(drone_id, {})
+
+        # Calculate distance
+        total_dist = 0.0
+        if _distance_matrix:
+            for i in range(len(waypoints) - 1):
+                if waypoints[i] in _distance_matrix:
+                    total_dist += _distance_matrix[waypoints[i]].get(waypoints[i+1], 0)
+
+        solution["routes"][drone_id] = {
+            "route": waypoints,
+            "sequence": route_str,
+            "distance": total_dist,
+            "fuel_budget": cfg.get("fuel_budget", 200),
+            "points": sum(targets[wp].get("priority", 5) for wp in waypoints if wp in targets)
+        }
+
+    # Build distance matrix in expected format
+    matrix_data = None
+    if _distance_matrix:
+        labels = list(_distance_matrix.keys())
+        matrix = [[_distance_matrix[f].get(t, 1000) for t in labels] for f in labels]
+        matrix_data = {"labels": labels, "matrix": matrix}
+
+    # Run optimizer
+    result = post_optimize_solution(solution, env, configs, matrix_data)
+
+    # Format result
+    lines = ["=== UNVISITED TARGET ASSIGNMENT ===", ""]
+
+    for did, route_data in sorted(result.get("routes", {}).items()):
+        route = route_data.get("route", [])
+        lines.append(f"D{did}: {','.join(route)}")
+        lines.append(f"  Points: {route_data.get('points', 0)}, Fuel: {route_data.get('distance', 0):.1f}")
+
+    lines.append("")
+    lines.append("Updated routes (copy these):")
+    for did, route_data in sorted(result.get("routes", {}).items()):
+        lines.append(f"ROUTE_D{did}: {','.join(route_data.get('route', []))}")
+
+    return "\n".join(lines)
+
+
+@tool
+def optimize_reassign_targets(routes: Dict[str, str]) -> str:
+    """
+    Reassign targets to drones whose trajectories pass closer to them.
+    For each target, if another drone's path passes closer AND that drone
+    can carry the target type, move it to minimize total travel distance.
+
+    Args:
+        routes: Dictionary mapping drone IDs to route strings, e.g. {"1": "A1,T3,T7,A1", "2": "A2,T5,A2"}
+
+    Returns:
+        Optimized routes with targets reassigned, including swap details.
+    """
+    env = get_environment()
+    configs = get_drone_configs()
+    targets = {t.get("id", t.get("label")): t for t in env.get("targets", [])}
+
+    # Build solution structure
+    solution = {"routes": {}}
+    for drone_id, route_str in routes.items():
+        drone_id = drone_id.replace("D", "").replace("d", "")
+        waypoints = [wp.strip() for wp in route_str.split(",")]
+        cfg = configs.get(drone_id, {})
+
+        total_dist = 0.0
+        if _distance_matrix:
+            for i in range(len(waypoints) - 1):
+                if waypoints[i] in _distance_matrix:
+                    total_dist += _distance_matrix[waypoints[i]].get(waypoints[i+1], 0)
+
+        solution["routes"][drone_id] = {
+            "route": waypoints,
+            "sequence": route_str,
+            "distance": total_dist,
+            "fuel_budget": cfg.get("fuel_budget", 200),
+            "points": sum(targets[wp].get("priority", 5) for wp in waypoints if wp in targets)
+        }
+
+    # Build distance matrix
+    matrix_data = None
+    if _distance_matrix:
+        labels = list(_distance_matrix.keys())
+        matrix = [[_distance_matrix[f].get(t, 1000) for t in labels] for f in labels]
+        matrix_data = {"labels": labels, "matrix": matrix}
+
+    # Run trajectory swap optimizer
+    result = trajectory_swap_optimize(solution, env, configs, matrix_data)
+
+    # Format result
+    lines = ["=== TARGET REASSIGNMENT OPTIMIZATION ===", ""]
+
+    swaps = result.get("swaps_made", [])
+    if swaps:
+        lines.append(f"Made {len(swaps)} swaps:")
+        for swap in swaps[:10]:  # Show first 10
+            lines.append(f"  {swap['target']}: D{swap['from_drone']} → D{swap['to_drone']} (saved {swap['savings']:.1f} fuel)")
+        if len(swaps) > 10:
+            lines.append(f"  ... and {len(swaps) - 10} more")
+    else:
+        lines.append("No beneficial swaps found - routes are already optimized.")
+
+    lines.append("")
+    lines.append("Updated routes:")
+    for did, route_data in sorted(result.get("routes", {}).items()):
+        route = route_data.get("route", [])
+        lines.append(f"D{did}: {','.join(route)}")
+        lines.append(f"  Points: {route_data.get('points', 0)}, Fuel: {route_data.get('distance', 0):.1f}")
+
+    lines.append("")
+    lines.append("Copy these routes:")
+    for did, route_data in sorted(result.get("routes", {}).items()):
+        lines.append(f"ROUTE_D{did}: {','.join(route_data.get('route', []))}")
+
+    return "\n".join(lines)
+
+
+@tool
+def optimize_remove_crossings(routes: Dict[str, str]) -> str:
+    """
+    Remove self-crossings from drone trajectories using 2-opt algorithm.
+    When segment A→B crosses segment C→D, reverse the middle portion
+    to eliminate the crossing and reduce total distance.
+
+    Args:
+        routes: Dictionary mapping drone IDs to route strings, e.g. {"1": "A1,T3,T7,A1", "2": "A2,T5,A2"}
+
+    Returns:
+        Optimized routes with crossings removed, including fix details.
+    """
+    env = get_environment()
+    configs = get_drone_configs()
+    targets = {t.get("id", t.get("label")): t for t in env.get("targets", [])}
+
+    # Build solution structure
+    solution = {"routes": {}}
+    for drone_id, route_str in routes.items():
+        drone_id = drone_id.replace("D", "").replace("d", "")
+        waypoints = [wp.strip() for wp in route_str.split(",")]
+        cfg = configs.get(drone_id, {})
+
+        total_dist = 0.0
+        if _distance_matrix:
+            for i in range(len(waypoints) - 1):
+                if waypoints[i] in _distance_matrix:
+                    total_dist += _distance_matrix[waypoints[i]].get(waypoints[i+1], 0)
+
+        solution["routes"][drone_id] = {
+            "route": waypoints,
+            "sequence": route_str,
+            "distance": total_dist,
+            "fuel_budget": cfg.get("fuel_budget", 200),
+            "points": sum(targets[wp].get("priority", 5) for wp in waypoints if wp in targets)
+        }
+
+    # Build distance matrix
+    matrix_data = None
+    if _distance_matrix:
+        labels = list(_distance_matrix.keys())
+        matrix = [[_distance_matrix[f].get(t, 1000) for t in labels] for f in labels]
+        matrix_data = {"labels": labels, "matrix": matrix}
+
+    # Run crossing removal optimizer
+    result = crossing_removal_optimize(solution, env, configs, matrix_data)
+
+    # Format result
+    lines = ["=== CROSSING REMOVAL (2-OPT) ===", ""]
+
+    fixes = result.get("fixes_made", [])
+    if fixes:
+        lines.append(f"Fixed {len(fixes)} crossings:")
+        for fix in fixes[:10]:  # Show first 10
+            lines.append(f"  D{fix['drone']}: reversed segment at positions {fix['segment_i']}-{fix['segment_j']}")
+        if len(fixes) > 10:
+            lines.append(f"  ... and {len(fixes) - 10} more")
+    else:
+        lines.append("No crossings found - routes are already optimal.")
+
+    lines.append("")
+    lines.append("Updated routes:")
+    for did, route_data in sorted(result.get("routes", {}).items()):
+        route = route_data.get("route", [])
+        lines.append(f"D{did}: {','.join(str(wp) for wp in route)}")
+        lines.append(f"  Points: {route_data.get('points', 0)}, Fuel: {route_data.get('distance', 0):.1f}")
+
+    lines.append("")
+    lines.append("Copy these routes:")
+    for did, route_data in sorted(result.get("routes", {}).items()):
+        lines.append(f"ROUTE_D{did}: {','.join(str(wp) for wp in route_data.get('route', []))}")
+
+    return "\n".join(lines)
+
+
+# All tools
+ALL_TOOLS = [
+    get_mission_overview,
+    get_drone_info,
+    get_distance,
+    calculate_route_fuel,
+    validate_drone_route,
+    find_accessible_targets,
+    suggest_drone_route,
+    check_target_conflicts,
+    get_mission_summary,
+    # Optimization tools
+    optimize_assign_unvisited,
+    optimize_reassign_targets,
+    optimize_remove_crossings,
+]
+
+
+# ============================================================================
+# System Prompt
+# ============================================================================
+
+SYSTEM_PROMPT = """You are an expert ISR (Intelligence, Surveillance, Reconnaissance) multi-drone mission planner embedded in a web-based planning tool.
+
+IMPORTANT: You are NOT a chatbot that needs to explain what you "would" do. You ARE the planner.
+When asked to plan routes, you MUST actually use your tools and output the routes.
+The UI will automatically parse your ROUTE_Dx: output and display it.
+
+Your job is to help plan optimal routes for MULTIPLE DRONES that:
+1. Maximize total priority points collected across all drones
+2. Respect each drone's individual fuel budget (CRITICAL - exceeding means mission failure)
+3. Respect each drone's start and end airport constraints
+4. Respect each drone's target type access restrictions (some drones can only visit certain target types)
+5. Avoid assigning the same target to multiple drones (each target should be visited at most once)
+
+AVAILABLE TOOLS:
+- get_mission_overview: Get complete overview (airports, targets, ALL drone configs) - CALL THIS FIRST
+- get_drone_info: Get detailed info for a specific drone
+- get_distance: Look up distance between any two waypoints
+- calculate_route_fuel: Calculate total fuel for a drone's route
+- validate_drone_route: Validate a route against a drone's specific constraints
+- find_accessible_targets: Find targets accessible to a specific drone (respects type restrictions)
+- suggest_drone_route: Get a greedy baseline route for a specific drone
+- check_target_conflicts: Check if any targets are assigned to multiple drones
+- get_mission_summary: Get summary stats for a multi-drone plan
+
+OPTIMIZATION TOOLS (use ONLY when user explicitly requests):
+- optimize_assign_unvisited: Insert unvisited targets into routes (UI: "Insert Missed" button)
+- optimize_reassign_targets: Swap targets to closer drone trajectories (UI: "Swap Closer" button)
+- optimize_remove_crossings: Fix self-crossing trajectories using 2-opt (UI: "Cross Remove" button)
+
+WORKFLOW:
+1. FIRST call get_mission_overview to understand ALL drones and their constraints
+2. Plan routes for each enabled drone, considering their individual constraints
+3. Use check_target_conflicts to ensure no duplicate assignments
+4. Validate each drone's route with validate_drone_route
+5. Use get_mission_summary to verify the complete plan
+6. OUTPUT the routes in ROUTE_Dx format and STOP
+
+OPTIMIZATION RULES (CRITICAL - read carefully):
+- Do NOT automatically call optimization tools during planning
+- Only use them when user explicitly asks to "optimize", "insert missed", "swap closer", or "remove crossings"
+- optimize_remove_crossings: Call ONCE, only if routes visually cross themselves
+- optimize_reassign_targets: Call AT MOST 8 times total, stop if no swaps are made
+- optimize_assign_unvisited: Call ONCE, only if there are unvisited targets
+- After ANY optimization tool call, OUTPUT the new routes and STOP immediately
+
+CRITICAL RULES:
+- Each drone has its OWN fuel budget, start/end airports, and type restrictions
+- NEVER exceed any drone's fuel budget
+- Drones may have different starting airports (e.g., D1 starts at A1, D2 starts at A2)
+- Drones may have different ending airports
+- Some drones can only visit certain target types (A, B, C, D, E)
+- Each target should only be visited by ONE drone
+- Always validate routes before presenting them
+- DO NOT explain what you "would" do or ask for additional tools - USE the tools you have!
+
+OUTPUT FORMAT - When presenting your final plan, you MUST include routes in this EXACT format:
+ROUTE_D1: A1,T3,T7,A1
+ROUTE_D2: A2,T5,T8,A2
+ROUTE_D3: A1,T1,A1
+(etc. for each enabled drone)
+
+The UI automatically parses lines starting with "ROUTE_D" and loads them into the planner.
+You do NOT need any special capabilities to update the UI - just output the routes in this format.
+
+Include for each drone:
+- The route sequence (in ROUTE_Dx format above)
+- Points collected
+- Fuel used
+
+Then provide a brief summary of the total mission performance.
+"""
+
+
+# ============================================================================
+# Agent Graph
+# ============================================================================
+
+def create_isr_agent():
+    """Create the LangGraph workflow for the ISR agent."""
+
+    llm = ChatAnthropic(
+        model="claude-sonnet-4-20250514",
+        temperature=0,
+        max_tokens=4096,
+    )
+
+    llm_with_tools = llm.bind_tools(ALL_TOOLS)
+
+    def agent_node(state: ISRAgentState) -> Dict[str, Any]:
+        """Main agent node."""
+        messages = state.get("messages", [])
+
+        # Build system prompt with persistent memories
+        memories_text = format_memories_for_prompt()
+        full_system_prompt = SYSTEM_PROMPT + memories_text
+
+        # Add system message if not present
+        if not messages or not isinstance(messages[0], SystemMessage):
+            messages = [SystemMessage(content=full_system_prompt)] + list(messages)
+
+        response = llm_with_tools.invoke(messages)
+        return {"messages": [response]}
+
+    def should_continue(state: ISRAgentState) -> Literal["tools", "end"]:
+        """Decide whether to continue to tools or end."""
+        messages = state.get("messages", [])
+        if not messages:
+            return "end"
+
+        last_message = messages[-1]
+        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+            return "tools"
+        return "end"
+
+    # Build graph
+    workflow = StateGraph(ISRAgentState)
+    workflow.add_node("agent", agent_node)
+    workflow.add_node("tools", ToolNode(ALL_TOOLS))
+    workflow.set_entry_point("agent")
+    workflow.add_conditional_edges(
+        "agent",
+        should_continue,
+        {"tools": "tools", "end": END}
+    )
+    workflow.add_edge("tools", "agent")
+
+    return workflow.compile()
+
+
+# Singleton
+_isr_workflow = None
+
+
+def get_isr_workflow():
+    """Get or create the ISR workflow singleton."""
+    global _isr_workflow
+    if _isr_workflow is None:
+        _isr_workflow = create_isr_agent()
+    return _isr_workflow
+
+
+def run_isr_agent(env: Dict[str, Any], user_query: str,
+                  drone_configs: Optional[Dict[str, Any]] = None,
+                  sequences: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """
+    Run the ISR agent with given environment, drone configs, and query.
+
+    Returns:
+        Dict with:
+            - response: The agent's text response
+            - routes: Dict of drone_id -> route list (e.g., {"1": ["A1", "T3", "A1"], ...})
+            - total_points: Total points across all drones
+            - total_fuel: Total fuel used across all drones
+    """
+    # Set context for tools
+    set_context(env, drone_configs, sequences)
+
+    # Get workflow
+    workflow = get_isr_workflow()
+
+    # Initial state
+    initial_state = {
+        "messages": [HumanMessage(content=user_query)],
+        "environment": env,
+        "drone_configs": drone_configs,
+        "current_sequences": sequences,
+    }
+
+    # Run with reasonable recursion limit
+    # Note: 25 is enough for typical planning (overview + suggest routes + validate + summary)
+    # If agent hits this limit, it's likely in a loop - the fix is in the system prompt
+    config = {"recursion_limit": 25}
+
+    final_state = None
+    for step in workflow.stream(initial_state, config=config):
+        final_state = step
+
+    # Extract response
+    response_text = ""
+    if final_state:
+        for node_output in final_state.values():
+            messages = node_output.get("messages", [])
+            if messages:
+                response_text = messages[-1].content
+
+    # Parse routes from response (supports multi-drone format)
+    routes = {}
+
+    # Match ROUTE_D1: A1,T3,A1 format
+    route_matches = re.findall(r'ROUTE_D(\d+):\s*([A-Z0-9,]+)', response_text)
+    for drone_id, route_str in route_matches:
+        routes[drone_id] = route_str.split(',')
+
+    # Fallback: old single-drone format ROUTE_DATA: A1,T3,A1
+    if not routes:
+        route_match = re.search(r'ROUTE_DATA:\s*([A-Z0-9,]+)', response_text)
+        if route_match:
+            routes["1"] = route_match.group(1).split(',')
+
+    # Calculate totals
+    total_points = 0
+    total_fuel = 0.0
+    targets = {t.get("id", t.get("label")): t for t in env.get("targets", [])}
+    visited = set()
+
+    # Build trajectories with SAM-avoiding paths
+    trajectories = {}
+
+    for drone_id, route in routes.items():
+        # Calculate points (no double counting)
+        for wp in route:
+            if wp in targets and wp not in visited:
+                total_points += targets[wp].get("priority", targets[wp].get("value", 5))
+                visited.add(wp)
+
+        # Calculate fuel and build trajectory
+        trajectory = []
+        for i in range(len(route) - 1):
+            from_wp = route[i]
+            to_wp = route[i + 1]
+
+            if _distance_matrix and from_wp in _distance_matrix:
+                total_fuel += _distance_matrix[from_wp].get(to_wp, 0)
+
+            # Check if there's a SAM-avoiding path for this segment
+            sam_path = get_sam_path(from_wp, to_wp)
+            if sam_path and len(sam_path) > 2:
+                # Use the SAM-avoiding path (skip first point if not first segment)
+                if trajectory:
+                    trajectory.extend(sam_path[1:])  # Skip first to avoid duplicate
+                else:
+                    trajectory.extend(sam_path)
+            else:
+                # Direct path - get coordinates from environment
+                if not trajectory:
+                    # Add start point
+                    start_pos = _get_waypoint_position(from_wp, env)
+                    if start_pos:
+                        trajectory.append(start_pos)
+                # Add end point
+                end_pos = _get_waypoint_position(to_wp, env)
+                if end_pos:
+                    trajectory.append(end_pos)
+
+        trajectories[drone_id] = trajectory
+
+    return {
+        "response": response_text,
+        "routes": routes,
+        "trajectories": trajectories,  # SAM-avoiding trajectories for drawing
+        "total_points": total_points,
+        "total_fuel": total_fuel,
+        # Legacy single-route for backward compatibility (use D1 if available)
+        "route": routes.get("1"),
+        "points": total_points,
+        "fuel": total_fuel,
+    }
+
+
+def _get_waypoint_position(wp_id: str, env: Dict[str, Any]) -> Optional[List[float]]:
+    """Get the [x, y] position of a waypoint from the environment."""
+    # Check airports
+    for airport in env.get("airports", []):
+        aid = airport.get("id", airport.get("label"))
+        if aid == wp_id:
+            return [float(airport["x"]), float(airport["y"])]
+
+    # Check targets
+    for target in env.get("targets", []):
+        tid = target.get("id", target.get("label"))
+        if tid == wp_id:
+            return [float(target["x"]), float(target["y"])]
+
+    return None
