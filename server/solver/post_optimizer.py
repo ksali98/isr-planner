@@ -547,6 +547,16 @@ class TrajectorySwapOptimizer:
 
                     other_route = other_route_data["route"]
 
+                    # Get fuel budget for the receiving drone
+                    other_fuel_budget = other_route_data.get("fuel_budget", 0)
+                    if other_fuel_budget <= 0:
+                        # Try to get from drone_configs
+                        other_cfg = drone_configs.get(other_drone, {})
+                        other_fuel_budget = other_cfg.get("fuel_budget", 200)
+
+                    # Calculate current fuel usage for receiving drone
+                    other_current_distance = self._calculate_route_distance(other_route)
+
                     # Check each segment in other drone's route for insertion cost
                     for j in range(len(other_route) - 1):
                         seg_start = str(other_route[j])
@@ -558,6 +568,11 @@ class TrajectorySwapOptimizer:
                         d_end = self._get_matrix_distance(str(wp_id), seg_end)
                         d_direct = self._get_matrix_distance(seg_start, seg_end)
                         insertion_cost = d_start + d_end - d_direct
+
+                        # Check if adding this target would exceed fuel budget
+                        new_total_distance = other_current_distance + insertion_cost
+                        if new_total_distance > other_fuel_budget:
+                            continue  # Skip - would exceed fuel budget
 
                         if insertion_cost < best_cost:
                             best_cost = insertion_cost

@@ -11,6 +11,7 @@ The agent receives:
 """
 
 import os
+import sys
 import json
 import re
 from datetime import datetime
@@ -344,6 +345,7 @@ def get_mission_overview() -> str:
             fuel = cfg.get("fuel_budget", 200)
             start = cfg.get("start_airport", "A1")
             end = cfg.get("end_airport", "A1")
+            end_display = "ANY (optimal)" if end == "-" else end
 
             # Target access
             target_access = cfg.get("target_access", {})
@@ -356,7 +358,7 @@ def get_mission_overview() -> str:
             lines.append(f"\nDrone D{drone_id}:")
             lines.append(f"  Fuel budget: {fuel}")
             lines.append(f"  Start airport: {start}")
-            lines.append(f"  End airport: {end}")
+            lines.append(f"  End airport: {end_display}")
             lines.append(f"  Accessible target types: {types_str}")
 
             seq = sequences.get(drone_id, "")
@@ -394,6 +396,7 @@ def get_drone_info(drone_id: str) -> str:
     fuel = cfg.get("fuel_budget", 200)
     start = cfg.get("start_airport", "A1")
     end = cfg.get("end_airport", "A1")
+    end_display = "ANY (optimal)" if end == "-" else end
 
     # Target access
     target_access = cfg.get("target_access", {})
@@ -417,7 +420,7 @@ def get_drone_info(drone_id: str) -> str:
         f"Status: {'ENABLED' if enabled else 'DISABLED'}",
         f"Fuel budget: {fuel}",
         f"Start airport: {start}",
-        f"End airport: {end}",
+        f"End airport: {end_display}",
         f"Accessible types: {', '.join(accessible_types) if accessible_types else 'ALL'}",
         "",
         f"Accessible targets ({len(accessible_targets)}):",
@@ -553,8 +556,12 @@ def validate_drone_route(drone_id: str, waypoints: List[str]) -> str:
     if waypoints[0] != start_airport:
         errors.append(f"Must start at {start_airport}, but starts at {waypoints[0]}")
 
-    # Check ends at correct airport
-    if waypoints[-1] != end_airport:
+    # Check ends at correct airport (or any airport if flexible endpoint "-")
+    if end_airport == "-":
+        # Flexible endpoint: accept any airport as valid end
+        if waypoints[-1] not in airports:
+            errors.append(f"Must end at an airport (flexible mode), but ends at {waypoints[-1]}")
+    elif waypoints[-1] != end_airport:
         errors.append(f"Must end at {end_airport}, but ends at {waypoints[-1]}")
 
     # Check target type access
@@ -1144,6 +1151,9 @@ CRITICAL RULES:
 - NEVER exceed any drone's fuel budget
 - Drones may have different starting airports (e.g., D1 starts at A1, D2 starts at A2)
 - Drones may have different ending airports
+- ANY ENDPOINT: If a drone's end_airport is "Any" or "-", it can end at ANY airport.
+  The solver automatically chooses the optimal ending airport to maximize points.
+  When you see "ANY (optimal)" as end airport, the route can end at any airport.
 - Some drones can only visit certain target types (A, B, C, D, E)
 - Each target should only be visited by ONE drone
 - Always validate routes before presenting them
@@ -1262,14 +1272,44 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
         "current_sequences": sequences,
     }
 
-    # Run with reasonable recursion limit
-    # Note: 25 is enough for typical planning (overview + suggest routes + validate + summary)
-    # If agent hits this limit, it's likely in a loop - the fix is in the system prompt
-    config = {"recursion_limit": 25}
+    # Run with recursion limit sized for multi-drone missions
+    # Each tool call = 2 steps (agent + tool execution)
+    # For 5 drones: overview(2) + 5*suggest(10) + conflicts(2) + 5*validate(10) + summary(2) = ~26 minimum
+    # Setting to 100 to observe actual usage and determine optimal limit
+    config = {"recursion_limit": 100}
 
     final_state = None
+    step_count = 0
+    tool_call_history = []  # Track tool calls to detect loops
+    print(f"\n{'='*60}", file=sys.stderr)
+    print(f"🤖 AGENT WORKFLOW STARTED", file=sys.stderr)
+    print(f"{'='*60}", file=sys.stderr)
+    sys.stderr.flush()
+
     for step in workflow.stream(initial_state, config=config):
+        step_count += 1
+        # Debug: Log tool calls to identify loops
+        for node_name, node_output in step.items():
+            if node_name == "agent":
+                msg = node_output.get("messages", [])[-1] if node_output.get("messages") else None
+                if msg and hasattr(msg, "tool_calls") and msg.tool_calls:
+                    tool_names = [tc["name"] for tc in msg.tool_calls]
+                    tool_call_history.append(tool_names)
+                    print(f"[Step {step_count}] 🔧 Agent calling: {tool_names}", file=sys.stderr)
+                    sys.stderr.flush()
+                elif msg:
+                    print(f"[Step {step_count}] ✅ Agent response ready (no tool calls)", file=sys.stderr)
+                    sys.stderr.flush()
+            elif node_name == "tools":
+                print(f"[Step {step_count}] 📦 Tools executed", file=sys.stderr)
+                sys.stderr.flush()
         final_state = step
+
+    print(f"{'='*60}", file=sys.stderr)
+    print(f"🏁 AGENT WORKFLOW COMPLETED after {step_count} steps", file=sys.stderr)
+    print(f"   Tool call history: {tool_call_history}", file=sys.stderr)
+    print(f"{'='*60}\n", file=sys.stderr)
+    sys.stderr.flush()
 
     # Extract response
     response_text = ""

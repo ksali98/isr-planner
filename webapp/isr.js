@@ -953,17 +953,33 @@ function updateAirportDropdowns() {
     const currentStart = startSel ? startSel.value : null;
     const currentEnd = endSel ? endSel.value : null;
 
-    // Repopulate dropdowns
-    [startSel, endSel].forEach((sel) => {
-      if (!sel) return;
-      sel.innerHTML = "";
+    // Repopulate start dropdown (no flexible option for start)
+    if (startSel) {
+      startSel.innerHTML = "";
       airportIds.forEach((aid) => {
         const opt = document.createElement("option");
         opt.value = aid;
         opt.textContent = aid;
-        sel.appendChild(opt);
+        startSel.appendChild(opt);
       });
-    });
+    }
+
+    // Repopulate end dropdown WITH flexible "-" option
+    if (endSel) {
+      endSel.innerHTML = "";
+      // Add flexible endpoint option first
+      const flexOpt = document.createElement("option");
+      flexOpt.value = "-";
+      flexOpt.textContent = "Any";
+      endSel.appendChild(flexOpt);
+      // Add airport options
+      airportIds.forEach((aid) => {
+        const opt = document.createElement("option");
+        opt.value = aid;
+        opt.textContent = aid;
+        endSel.appendChild(opt);
+      });
+    }
 
     // Restore selections if they still exist, otherwise use first available
     if (startSel) {
@@ -976,7 +992,8 @@ function updateAirportDropdowns() {
     }
 
     if (endSel) {
-      if (airportIds.includes(currentEnd)) {
+      // Check if current selection is valid (flexible "-" or a known airport)
+      if (currentEnd === "-" || airportIds.includes(currentEnd)) {
         endSel.value = currentEnd;
       } else if (airportIds.length > 0) {
         endSel.value = airportIds[0];
@@ -994,10 +1011,28 @@ function initDroneConfigsFromEnv() {
   // Check if drone_configs are saved in the environment
   const savedConfigs = (state.env && state.env.drone_configs) || {};
 
-  function populateSelect(selectId) {
+  function populateStartSelect(selectId) {
     const sel = $(selectId);
     if (!sel) return;
     sel.innerHTML = "";
+    airportIds.forEach((aid) => {
+      const opt = document.createElement("option");
+      opt.value = aid;
+      opt.textContent = aid;
+      sel.appendChild(opt);
+    });
+  }
+
+  function populateEndSelect(selectId) {
+    const sel = $(selectId);
+    if (!sel) return;
+    sel.innerHTML = "";
+    // Add flexible endpoint option first
+    const flexOpt = document.createElement("option");
+    flexOpt.value = "-";
+    flexOpt.textContent = "Any";
+    sel.appendChild(flexOpt);
+    // Add airport options
     airportIds.forEach((aid) => {
       const opt = document.createElement("option");
       opt.value = aid;
@@ -1025,8 +1060,8 @@ function initDroneConfigsFromEnv() {
       target_access: accessDefault,
     };
 
-    populateSelect(`cfg-d${did}-start`);
-    populateSelect(`cfg-d${did}-end`);
+    populateStartSelect(`cfg-d${did}-start`);
+    populateEndSelect(`cfg-d${did}-end`);
 
     const cfg = state.droneConfigs[idStr];
     const cbEnabled = $(`cfg-d${did}-enabled`);

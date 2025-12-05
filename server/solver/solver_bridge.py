@@ -303,7 +303,11 @@ def solve_mission(
         start_id = cfg.get("start_airport") or (
             default_start if default_start in airport_by_id else airports[0]["id"]
         )
-        end_id = cfg.get("end_airport") or start_id
+
+        # Handle flexible endpoint: "-" means solver chooses optimal endpoint
+        raw_end_id = cfg.get("end_airport") or start_id
+        flexible_endpoint = (raw_end_id == "-")
+        end_id = start_id if flexible_endpoint else raw_end_id  # Initial end for solve
 
         # Filter targets by type access (A, B, C, D types)
         target_access = cfg.get("target_access", {})
@@ -556,14 +560,20 @@ def solve_mission_with_allocation(
         start_id = cfg.get("start_airport") or (
             default_start if default_start in airport_by_id else airports[0]["id"]
         )
-        end_id = cfg.get("end_airport") or start_id
+
+        # Handle flexible endpoint: "-" means solver chooses optimal endpoint
+        raw_end_id = cfg.get("end_airport") or start_id
+        flexible_endpoint = (raw_end_id == "-")
+        end_id = start_id if flexible_endpoint else raw_end_id  # Initial end for solve
 
         # Get this drone's assigned targets
         assigned_target_ids = set(allocations.get(did, []))
 
         if not assigned_target_ids:
             # No targets assigned: trivial route from start to end airport
-            route_ids = [start_id, end_id] if start_id and end_id else []
+            # For flexible endpoint with no targets, just return to start
+            effective_end = start_id if flexible_endpoint else end_id
+            route_ids = [start_id, effective_end] if start_id and effective_end else []
             seq = ",".join(route_ids)
 
             # Still need to generate SAM-avoiding trajectory for airport-to-airport!
@@ -650,10 +660,45 @@ def solve_mission_with_allocation(
             distance_matrix_data=filtered_dist_data,
         )
         env_for_solver["start_airport"] = start_id
-        env_for_solver["end_airport"] = end_id
 
-        # Solve orienteering for this drone
-        sol = _solver.solve(env_for_solver, fuel_budget)
+        # If flexible endpoint, try all airports and pick best result
+        if flexible_endpoint:
+            print(f"   🔄 Flexible endpoint: trying all {len(airports)} airports...", flush=True)
+            best_sol = None
+            best_points = -1
+            best_distance = float('inf')
+            best_end_id = start_id
+
+            for try_airport in airports:
+                try_end_id = try_airport["id"]
+                env_for_solver["end_airport"] = try_end_id
+                try_sol = _solver.solve(env_for_solver, fuel_budget)
+
+                try_visited = try_sol.get("visited_goals", [])
+                target_priorities = {t["id"]: int(t.get("priority", 1)) for t in candidate_targets}
+                try_points = sum(target_priorities.get(tid, 0) for tid in try_visited)
+                try_distance = float(try_sol.get("distance", 0.0))
+
+                # Pick solution with more points, or same points but shorter distance
+                is_better = (try_points > best_points or
+                            (try_points == best_points and try_distance < best_distance))
+
+                if is_better:
+                    best_sol = try_sol
+                    best_points = try_points
+                    best_distance = try_distance
+                    best_end_id = try_end_id
+                    print(f"      ✓ {try_end_id}: {try_points} pts, {try_distance:.1f} dist (new best)", flush=True)
+                else:
+                    print(f"      - {try_end_id}: {try_points} pts, {try_distance:.1f} dist", flush=True)
+
+            sol = best_sol
+            end_id = best_end_id  # Update end_id to the chosen optimal endpoint
+            print(f"   🎯 Optimal endpoint: {end_id} ({best_points} pts, {best_distance:.1f} dist)", flush=True)
+        else:
+            env_for_solver["end_airport"] = end_id
+            # Solve orienteering for this drone
+            sol = _solver.solve(env_for_solver, fuel_budget)
 
         # The solver returns BOTH 'visited_goals' (unordered target IDs) AND 'route' (optimized order)
         # CRITICAL: Use 'route' for the optimized sequence from Held-Karp, NOT visited_goals!
