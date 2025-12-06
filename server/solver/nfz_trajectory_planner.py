@@ -7,9 +7,13 @@ from typing import List, Dict, Tuple
 import sys
 import os
 
-# Import SAM navigation logic from ISR editor
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from isr_editor.path_planning import SAMNavigator
+# Add project root to path for path_planning_core
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Import from single source of truth
+from path_planning_core import SAMNavigator
 
 
 class NFZTrajectoryPlanner:

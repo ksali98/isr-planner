@@ -220,11 +220,12 @@ def solve_mission(
         }
 
     # Build a global distance matrix; we'll reuse it per drone
-    # TEMPORARILY using simple Euclidean distances (SAM-aware matrix is too slow)
-    # TODO: Optimize calculate_sam_aware_matrix performance
-    dist_data = _build_distance_matrix(airports, targets)
+    # Use SAM-aware distances if SAMs are present
     if sams:
-        print("🎯 SAMs present - using Euclidean distances (SAM avoidance applied to trajectory only)", flush=True)
+        print("🎯 SAMs present - calculating SAM-aware distance matrix...", flush=True)
+        dist_data = calculate_sam_aware_matrix(env)
+    else:
+        dist_data = _build_distance_matrix(airports, targets)
 
     sequences: Dict[str, str] = {}
     routes_detail: Dict[str, Dict[str, Any]] = {}
@@ -407,10 +408,14 @@ def solve_mission(
         sol = _solver.solve(env_for_solver, fuel_budget)
         solve_time = time.time() - solve_start
 
-        # The solver returns 'visited_goals' (target IDs only), not 'route'
-        # We need to build the full route: [start_airport, ...targets..., end_airport]
-        visited_targets: List[str] = sol.get("visited_goals", [])
-        route_ids: List[str] = [start_id] + visited_targets + [end_id]
+        # The solver returns 'route' (optimal ordered path) and 'visited_targets' (target IDs)
+        # Use 'route' directly as it contains the optimal ordering from Held-Karp
+        route_ids: List[str] = sol.get("route", [])
+        visited_targets: List[str] = sol.get("visited_targets", [])
+
+        # Fallback if solver didn't return route
+        if not route_ids:
+            route_ids = [start_id] + visited_targets + [end_id]
 
         # Calculate total points from visited targets
         target_priorities = {t["id"]: int(t.get("priority", 1)) for t in candidate_targets}

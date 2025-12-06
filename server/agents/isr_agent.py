@@ -40,6 +40,12 @@ from ..solver.sam_distance_matrix import (
     get_path_between,
 )
 
+# Import the REAL orienteering solver (Held-Karp algorithm)
+from ..solver.solver_bridge import solve_mission
+
+# Import target allocator for multi-drone missions
+from ..solver.target_allocator import allocate_targets as _allocate_targets_impl
+
 # Load environment variables
 load_dotenv()
 
@@ -757,6 +763,263 @@ def suggest_drone_route(drone_id: str) -> str:
 
 
 @tool
+def solve_optimal_route(drone_id: str) -> str:
+    """
+    Solve for the OPTIMAL route for a specific drone using the Held-Karp algorithm.
+    This finds the mathematically optimal solution that maximizes points within fuel budget.
+    Use this instead of suggest_drone_route for better results.
+
+    Args:
+        drone_id: The drone ID ("1" or "D1")
+    """
+    drone_id = drone_id.replace("D", "").replace("d", "")
+    env = get_environment()
+    configs = get_drone_configs()
+
+    if drone_id not in configs:
+        return f"Error: Drone {drone_id} not found in configuration"
+
+    # Create a single-drone config for the solver
+    single_drone_config = {drone_id: configs[drone_id]}
+
+    # Call the real Held-Karp solver
+    result = solve_mission(env, single_drone_config)
+
+    # Extract the route for this drone
+    route_data = result.get("routes", {}).get(drone_id, {})
+    route = route_data.get("route", [])
+    points = route_data.get("points", 0)
+    distance = route_data.get("distance", 0)
+    fuel_budget = route_data.get("fuel_budget", 0)
+
+    if not route:
+        return f"No feasible route found for D{drone_id}"
+
+    # Get target details
+    targets = {t.get("id", t.get("label")): t for t in env.get("targets", [])}
+    target_details = []
+    for wp in route:
+        if wp in targets:
+            t = targets[wp]
+            target_details.append(f"  {wp}: priority {t.get('priority', 5)}, type {t.get('type', 'A').upper()}")
+
+    lines = [
+        f"=== OPTIMAL ROUTE for D{drone_id} (Held-Karp) ===",
+        f"Route: {' -> '.join(route)}",
+        f"Targets visited: {len([w for w in route if w.startswith('T')])}",
+        f"Points: {points}",
+        f"Fuel: {distance:.2f} / {fuel_budget}",
+        f"Remaining: {fuel_budget - distance:.2f}",
+        "",
+        "Target details:",
+    ]
+    lines.extend(target_details)
+    lines.append("")
+    lines.append(f"ROUTE_D{drone_id}: {','.join(route)}")
+
+    return "\n".join(lines)
+
+
+@tool
+def solve_constrained_route(
+    drone_id: str,
+    start_waypoint: str,
+    end_waypoint: str,
+    fuel_budget: float,
+    exclude_targets: str = ""
+) -> str:
+    """
+    Solve for optimal route with CUSTOM start/end waypoints and fuel budget.
+    Use this when the user specifies route constraints like "first target must be X".
+
+    Args:
+        drone_id: The drone ID ("1" or "D1") - used to get target type access
+        start_waypoint: Starting waypoint ID (can be airport or target, e.g., "A1" or "T9")
+        end_waypoint: Ending waypoint ID (can be airport or target, e.g., "A1" or "T2")
+        fuel_budget: Available fuel for this segment
+        exclude_targets: Comma-separated target IDs to exclude (e.g., "T9,T5" if they're in fixed segments)
+
+    Example: For "first target must be T9" constraint:
+        1. First get distance A1->T9 using get_distance
+        2. Call solve_constrained_route(drone_id="1", start_waypoint="T9", end_waypoint="A1",
+                                         fuel_budget=250-dist_A1_T9, exclude_targets="T9")
+        3. Prepend A1,T9 to the returned route
+    """
+    import math
+
+    drone_id = drone_id.replace("D", "").replace("d", "")
+    env = get_environment()
+    configs = get_drone_configs()
+
+    if drone_id not in configs:
+        return f"Error: Drone {drone_id} not found in configuration"
+
+    cfg = configs[drone_id]
+
+    # Parse excluded targets
+    excluded = set(t.strip() for t in exclude_targets.split(",") if t.strip())
+
+    # Get target access for this drone
+    target_access = cfg.get("target_access", {})
+    allowed_types = {t.lower() for t, enabled in target_access.items() if enabled}
+    if not allowed_types:
+        allowed_types = {"a", "b", "c", "d", "e"}
+
+    # Filter targets
+    airports = env.get("airports", [])
+    all_targets = env.get("targets", [])
+
+    # Filter by type access and exclusions
+    filtered_targets = [
+        t for t in all_targets
+        if t.get("id", t.get("label")) not in excluded
+        and t.get("type", "a").lower() in allowed_types
+    ]
+
+    # Build distance matrix
+    # First, we need to include start/end waypoints (which might be targets)
+    all_waypoints = list(airports)  # Start with airports
+
+    # Add targets (filtered)
+    all_waypoints.extend(filtered_targets)
+
+    # Make sure start and end waypoints are in the list
+    start_wp = None
+    end_wp = None
+
+    # Find start waypoint
+    for wp in airports + all_targets:
+        wp_id = wp.get("id", wp.get("label"))
+        if wp_id == start_waypoint:
+            start_wp = wp
+            break
+
+    # Find end waypoint
+    for wp in airports + all_targets:
+        wp_id = wp.get("id", wp.get("label"))
+        if wp_id == end_waypoint:
+            end_wp = wp
+            break
+
+    if not start_wp:
+        return f"Error: Start waypoint '{start_waypoint}' not found"
+    if not end_wp:
+        return f"Error: End waypoint '{end_waypoint}' not found"
+
+    # Build labels and ensure start/end are included
+    labels = []
+    waypoints_for_matrix = []
+
+    # Add start waypoint first (as "airport" for solver)
+    labels.append(start_waypoint)
+    waypoints_for_matrix.append(start_wp)
+
+    # Add end waypoint if different from start
+    if end_waypoint != start_waypoint:
+        labels.append(end_waypoint)
+        waypoints_for_matrix.append(end_wp)
+
+    # Add other airports (not start/end)
+    for a in airports:
+        aid = a.get("id")
+        if aid not in labels:
+            labels.append(aid)
+            waypoints_for_matrix.append(a)
+
+    # Add filtered targets (not start/end)
+    for t in filtered_targets:
+        tid = t.get("id", t.get("label"))
+        if tid not in labels:
+            labels.append(tid)
+            waypoints_for_matrix.append(t)
+
+    # Use the global SAM-aware distance matrix
+    if _distance_matrix is None:
+        return "Error: Distance matrix not initialized. Call get_mission_overview first."
+
+    # Build matrix from global SAM-aware distances
+    n = len(labels)
+    matrix = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        from_id = labels[i]
+        for j in range(n):
+            to_id = labels[j]
+            if from_id in _distance_matrix and to_id in _distance_matrix.get(from_id, {}):
+                matrix[i][j] = _distance_matrix[from_id][to_id]
+            else:
+                # Fallback to Euclidean if not in SAM matrix
+                xi, yi = waypoints_for_matrix[i]["x"], waypoints_for_matrix[i]["y"]
+                xj, yj = waypoints_for_matrix[j]["x"], waypoints_for_matrix[j]["y"]
+                matrix[i][j] = math.hypot(xj - xi, yj - yi)
+
+    # Build solver environment
+    # Treat start waypoint as airport for solver
+    solver_airports = [{"id": start_waypoint, "x": start_wp["x"], "y": start_wp["y"]}]
+    if end_waypoint != start_waypoint:
+        solver_airports.append({"id": end_waypoint, "x": end_wp["x"], "y": end_wp["y"]})
+
+    # Add real airports that aren't start/end
+    for a in airports:
+        if a.get("id") not in [start_waypoint, end_waypoint]:
+            solver_airports.append(a)
+
+    solver_targets = [
+        {"id": t.get("id", t.get("label")), "x": t["x"], "y": t["y"],
+         "priority": t.get("priority", 5), "type": t.get("type", "a")}
+        for t in filtered_targets
+        if t.get("id", t.get("label")) not in [start_waypoint, end_waypoint]
+    ]
+
+    solver_env = {
+        "airports": solver_airports,
+        "targets": solver_targets,
+        "matrix_labels": labels,
+        "distance_matrix": matrix,
+        "start_airport": start_waypoint,
+        "end_airport": end_waypoint,
+        "fuel_budget": fuel_budget
+    }
+
+    # Call the solver
+    from orienteering_with_matrix import solve_orienteering_with_matrix
+    result = solve_orienteering_with_matrix(
+        solver_env,
+        start_id=start_waypoint,
+        end_id=end_waypoint,
+        fuel_cap=fuel_budget
+    )
+
+    route = result.get("route", [])
+    distance = result.get("distance", 0)
+    points = result.get("total_points", 0)
+    visited = result.get("visited_targets", [])
+
+    # Get target details
+    target_map = {t.get("id", t.get("label")): t for t in all_targets}
+    target_details = []
+    for tid in visited:
+        if tid in target_map:
+            t = target_map[tid]
+            target_details.append(f"  {tid}: priority {t.get('priority', 5)}")
+
+    lines = [
+        f"=== CONSTRAINED ROUTE ({start_waypoint} -> {end_waypoint}) ===",
+        f"Route: {' -> '.join(route)}",
+        f"Targets visited: {len(visited)}",
+        f"Points: {points}",
+        f"Distance: {distance:.2f} / {fuel_budget:.2f}",
+        f"Remaining: {fuel_budget - distance:.2f}",
+        "",
+        "Targets in route:",
+    ]
+    lines.extend(target_details)
+    lines.append("")
+    lines.append(f"Route segment: {','.join(route)}")
+
+    return "\n".join(lines)
+
+
+@tool
 def check_target_conflicts(routes: Dict[str, str]) -> str:
     """
     Check if multiple drones are assigned the same targets.
@@ -1079,6 +1342,200 @@ def optimize_remove_crossings(routes: Dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+@tool
+def allocate_targets_to_drones(strategy: str = "efficient") -> str:
+    """
+    CRITICAL FOR MULTI-DRONE PLANNING: Allocate targets to drones BEFORE solving routes.
+
+    This tool divides targets among enabled drones to:
+    - Prevent solver from exploring all 2^N subsets for each drone
+    - Ensure each target is assigned to exactly one drone
+    - Respect drone type restrictions (which target types each drone can access)
+    - Balance workload efficiently across drones
+
+    Call this FIRST when planning multi-drone missions, BEFORE calling solve_allocated_route.
+
+    Args:
+        strategy: Allocation strategy to use:
+            - "efficient": Maximize priority/distance ratio (recommended)
+            - "greedy": Assign highest priority targets to nearest capable drone
+            - "balanced": Distribute targets evenly by count
+            - "geographic": Divide environment into angular sectors
+            - "exclusive": Prioritize targets only one drone can reach first
+
+    Returns:
+        Target allocation showing which targets are assigned to each drone.
+        Use these allocations with solve_allocated_route.
+    """
+    env = get_environment()
+    configs = get_drone_configs()
+
+    # Build distance matrix data for allocator
+    matrix_data = None
+    if _distance_matrix:
+        labels = list(_distance_matrix.keys())
+        matrix = [[_distance_matrix[f].get(t, 1000) for t in labels] for f in labels]
+        matrix_data = {"labels": labels, "matrix": matrix}
+
+    # Call the allocator
+    allocation = _allocate_targets_impl(env, configs, strategy, matrix_data)
+
+    # Store allocation globally for solve_allocated_route to use
+    global _target_allocation
+    _target_allocation = allocation
+
+    # Format result
+    targets = {t.get("id", t.get("label")): t for t in env.get("targets", [])}
+
+    lines = [
+        "=" * 60,
+        f"TARGET ALLOCATION (strategy: {strategy})",
+        "=" * 60,
+        "",
+    ]
+
+    total_assigned = 0
+    total_points = 0
+
+    for drone_id in sorted(allocation.keys()):
+        cfg = configs.get(drone_id, {})
+        if not cfg.get("enabled", True):
+            continue
+
+        assigned_targets = allocation[drone_id]
+        drone_points = sum(targets[tid].get("priority", 5) for tid in assigned_targets if tid in targets)
+        total_assigned += len(assigned_targets)
+        total_points += drone_points
+
+        lines.append(f"D{drone_id} ({len(assigned_targets)} targets, {drone_points} pts):")
+        for tid in assigned_targets:
+            if tid in targets:
+                t = targets[tid]
+                lines.append(f"  {tid}: priority={t.get('priority', 5)}, type={t.get('type', 'A').upper()}")
+        lines.append("")
+
+    # Check for unassigned targets
+    all_target_ids = set(targets.keys())
+    assigned_ids = set()
+    for tids in allocation.values():
+        assigned_ids.update(tids)
+    unassigned = all_target_ids - assigned_ids
+
+    if unassigned:
+        lines.append(f"⚠️ UNASSIGNED TARGETS: {', '.join(sorted(unassigned))}")
+        lines.append("  (These targets may be inside SAM zones or have no capable drone)")
+        lines.append("")
+
+    lines.append("-" * 40)
+    lines.append(f"Total assigned: {total_assigned} targets, {total_points} points")
+    lines.append("")
+    lines.append("Next: Call solve_allocated_route for each drone to get optimal routes")
+
+    return "\n".join(lines)
+
+
+# Store target allocation globally
+_target_allocation: Optional[Dict[str, List[str]]] = None
+
+
+@tool
+def solve_allocated_route(drone_id: str) -> str:
+    """
+    Solve optimal route for a drone using ONLY its allocated targets.
+
+    MUST call allocate_targets_to_drones FIRST to get allocations.
+    This solves much faster than solve_optimal_route because it only
+    considers the drone's assigned targets, not all targets.
+
+    Args:
+        drone_id: The drone ID ("1" or "D1")
+
+    Returns:
+        Optimal route for this drone visiting only its allocated targets.
+    """
+    global _target_allocation
+
+    drone_id = drone_id.replace("D", "").replace("d", "")
+
+    if _target_allocation is None:
+        return "Error: Must call allocate_targets_to_drones first to get allocations!"
+
+    allocated = _target_allocation.get(drone_id, [])
+
+    if not allocated:
+        # No targets allocated - return empty route
+        env = get_environment()
+        configs = get_drone_configs()
+        cfg = configs.get(drone_id, {})
+        start = cfg.get("start_airport", "A1")
+        end = cfg.get("end_airport", "A1")
+        if end == "-":
+            end = start  # If flexible, just return to start
+
+        return f"""=== ROUTE for D{drone_id} (no allocated targets) ===
+Route: {start} -> {end}
+Targets: 0
+Points: 0
+Fuel: {_distance_matrix.get(start, {}).get(end, 0):.2f}
+
+ROUTE_D{drone_id}: {start},{end}"""
+
+    env = get_environment()
+    configs = get_drone_configs()
+
+    # Filter environment to only include allocated targets
+    original_targets = env.get("targets", [])
+    filtered_targets = [
+        t for t in original_targets
+        if t.get("id", t.get("label")) in allocated
+    ]
+
+    # Create filtered environment
+    filtered_env = env.copy()
+    filtered_env["targets"] = filtered_targets
+
+    # Create single-drone config
+    single_drone_config = {drone_id: configs.get(drone_id, {})}
+
+    # Call solver with filtered environment
+    result = solve_mission(filtered_env, single_drone_config)
+
+    # Extract route
+    route_data = result.get("routes", {}).get(drone_id, {})
+    route = route_data.get("route", [])
+    points = route_data.get("points", 0)
+    distance = route_data.get("distance", 0)
+    fuel_budget = route_data.get("fuel_budget", 0)
+
+    if not route:
+        return f"No feasible route found for D{drone_id} with allocated targets: {allocated}"
+
+    # Get target details
+    targets = {t.get("id", t.get("label")): t for t in original_targets}
+    target_details = []
+    for wp in route:
+        if wp in targets:
+            t = targets[wp]
+            target_details.append(f"  {wp}: priority {t.get('priority', 5)}, type {t.get('type', 'A').upper()}")
+
+    lines = [
+        f"=== OPTIMAL ROUTE for D{drone_id} (allocated targets) ===",
+        f"Allocated targets: {', '.join(allocated)}",
+        f"Route: {' -> '.join(route)}",
+        f"Targets visited: {len([w for w in route if w.startswith('T')])}",
+        f"Points: {points}",
+        f"Fuel: {distance:.2f} / {fuel_budget}",
+        f"Remaining: {fuel_budget - distance:.2f}",
+        "",
+        "Target details:",
+    ]
+    lines.extend(target_details)
+    lines.append("")
+    lines.append(f"ROUTE_D{drone_id}: {','.join(route)}")
+
+    return "\n".join(lines)
+
+
 # All tools
 ALL_TOOLS = [
     get_mission_overview,
@@ -1088,6 +1545,12 @@ ALL_TOOLS = [
     validate_drone_route,
     find_accessible_targets,
     suggest_drone_route,
+    # Multi-drone allocation workflow (use for 2+ drones)
+    allocate_targets_to_drones,  # STEP 1: Divide targets among drones
+    solve_allocated_route,  # STEP 2: Solve each drone's allocated targets
+    # Single-drone solver (use for 1 drone only)
+    solve_optimal_route,  # Held-Karp solver - use this for single drone
+    solve_constrained_route,  # For routes with user-specified constraints (first/last target)
     check_target_conflicts,
     get_mission_summary,
     # Optimization tools
@@ -1121,7 +1584,23 @@ AVAILABLE TOOLS:
 - calculate_route_fuel: Calculate total fuel for a drone's route
 - validate_drone_route: Validate a route against a drone's specific constraints
 - find_accessible_targets: Find targets accessible to a specific drone (respects type restrictions)
-- suggest_drone_route: Get a greedy baseline route for a specific drone
+
+MULTI-DRONE ALLOCATION TOOLS (use for 2+ drones):
+- allocate_targets_to_drones: **CRITICAL** - Divide targets among drones BEFORE solving.
+  Available strategies (pass as "strategy" parameter):
+    * "efficient" (default): Maximize priority/distance ratio - best for most missions
+    * "greedy": Assign highest priority targets to nearest capable drone
+    * "balanced": Distribute targets evenly by count
+    * "geographic": Divide environment into angular sectors per drone
+    * "exclusive": Prioritize targets only one drone can reach first
+- solve_allocated_route: Solve optimal route for a drone using ONLY its allocated targets (FAST!)
+
+SINGLE-DRONE SOLVER (use for 1 drone only):
+- solve_optimal_route: Get the OPTIMAL route using Held-Karp algorithm (maximizes points)
+- solve_constrained_route: Solve with CUSTOM start/end waypoints and fuel - use when user specifies route constraints
+- suggest_drone_route: Get a quick greedy route (suboptimal)
+
+VALIDATION & SUMMARY:
 - check_target_conflicts: Check if any targets are assigned to multiple drones
 - get_mission_summary: Get summary stats for a multi-drone plan
 
@@ -1130,13 +1609,21 @@ OPTIMIZATION TOOLS (use ONLY when user explicitly requests):
 - optimize_reassign_targets: Swap targets to closer drone trajectories (UI: "Swap Closer" button)
 - optimize_remove_crossings: Fix self-crossing trajectories using 2-opt (UI: "Cross Remove" button)
 
-WORKFLOW:
+MULTI-DRONE WORKFLOW (for 2+ enabled drones):
 1. FIRST call get_mission_overview to understand ALL drones and their constraints
-2. Plan routes for each enabled drone, considering their individual constraints
-3. Use check_target_conflicts to ensure no duplicate assignments
+2. Call allocate_targets_to_drones(strategy="efficient") to divide targets among drones
+   - This ensures each target is assigned to exactly one drone
+   - Respects drone type restrictions (which target types each can access)
+   - Prevents the solver from exploring all 2^N subsets (MUCH faster!)
+3. For each enabled drone, call solve_allocated_route(drone_id) to get its optimal route
 4. Validate each drone's route with validate_drone_route
 5. Use get_mission_summary to verify the complete plan
 6. OUTPUT the routes in ROUTE_Dx format and STOP
+
+SINGLE-DRONE WORKFLOW (for 1 drone):
+1. Call get_mission_overview
+2. Call solve_optimal_route(drone_id) directly
+3. Validate and output
 
 OPTIMIZATION RULES (CRITICAL - read carefully):
 - Do NOT automatically call optimization tools during planning
@@ -1158,6 +1645,35 @@ CRITICAL RULES:
 - Each target should only be visited by ONE drone
 - Always validate routes before presenting them
 - DO NOT explain what you "would" do or ask for additional tools - USE the tools you have!
+
+HANDLING ROUTE CONSTRAINTS (e.g., "first target must be X" or "visit Y before returning"):
+When the user specifies constraints on the route order, decompose the problem:
+
+1. FIXED PREFIX (e.g., "first target must be T9"):
+   - The segment from start_airport → T9 is FIXED
+   - Use get_distance to find the cost of this fixed segment
+   - Remaining fuel = original_fuel - distance(start_airport, T9)
+   - Now solve: start=T9, end=original_end, fuel=remaining_fuel
+   - Final route = [start_airport] + [T9] + [solver_result excluding T9]
+
+2. FIXED SUFFIX (e.g., "end with T2 then T12 before returning"):
+   - The segment T2 → T12 → end_airport is FIXED
+   - Use get_distance to find costs: dist(T2,T12) + dist(T12, end_airport)
+   - Remaining fuel = original_fuel - fixed_suffix_cost
+   - Now solve: start=original_start, end=T2, fuel=remaining_fuel
+   - Final route = [solver_result] + [T12] + [end_airport]
+
+3. BOTH PREFIX AND SUFFIX:
+   - Combine both: subtract prefix + suffix costs from fuel
+   - Solve the middle segment with reduced budget
+   - Stitch together: prefix + middle + suffix
+
+Example: User says "T9 must be the first target visited"
+- Get distance A1→T9 (e.g., 74.6 units)
+- Remaining fuel: 250 - 74.6 = 175.4
+- Solve from T9 to A1 with 175.4 fuel budget (excluding T9 from targets)
+- Result: T9→T4→T7→T6→T2→T8→A1
+- Final route: A1→T9→T4→T7→T6→T2→T8→A1
 
 OUTPUT FORMAT - When presenting your final plan, you MUST include routes in this EXACT format:
 ROUTE_D1: A1,T3,T7,A1
