@@ -1,0 +1,30 @@
+[
+  {
+    "id": 1,
+    "timestamp": "2025-12-05T09:52:11.174309",
+    "category": "correction",
+    "content": "Always use the optimize_remove_crossings tool at the end of solving",
+    "active": true
+  },
+  {
+    "id": 2,
+    "timestamp": "2025-12-05T12:38:17.153037",
+    "category": "correction",
+    "content": "Never accept an optimization that violates a direct command",
+    "active": true
+  },
+  {
+    "id": 3,
+    "timestamp": "2025-12-06T12:17:42.623549",
+    "category": "correction",
+    "content": "Always optimize while respecting mission constraints.",
+    "active": true
+  },
+  {
+    "id": 4,
+    "timestamp": "2025-12-06T13:00:00.000000",
+    "category": "instruction",
+    "content": "HARD CONSTRAINTS - NEVER VIOLATE: 1) Fuel Budget - route must not exceed drone's fuel capacity, 2) SAM/NFZ Boundaries - paths must avoid all no-fly zones, 3) Mission Constraints - ALL constraints must be respected including: target type accessibility from UI, priority constraints from commands (e.g., 'Dx visits priority>=6'), route order constraints (e.g., 'start at T5'). When optimizing, only add targets that the drone is ALLOWED to visit per its constraints. Reject any optimization that would violate these hard constraints.",
+    "active": true
+  }
+]

@@ -1,0 +1,29 @@
+# ISR Mission Planning - Docker Compose
+# Usage: docker-compose up --build
+
+version: '3.8'
+
+services:
+  isr-web:
+    build:
+      context: ..  # Parent directory (isr_projects) to include sibling packages
+      dockerfile: isr_web/Dockerfile
+    ports:
+      - "8893:8893"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      # Mount for development (optional - comment out for production)
+      # - ./webapp:/app/isr_web/webapp:ro
+      # - ./server:/app/isr_web/server:ro
+
+      # Persist agent memory (optional)
+      - ./agent_memory.json:/app/isr_web/agent_memory.json
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8893/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

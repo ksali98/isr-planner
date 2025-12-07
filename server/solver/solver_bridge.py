@@ -679,7 +679,7 @@ def solve_mission_with_allocation(
                 env_for_solver["end_airport"] = try_end_id
                 try_sol = _solver.solve(env_for_solver, fuel_budget)
 
-                try_visited = try_sol.get("visited_goals", [])
+                try_visited = try_sol.get("visited_targets", [])
                 target_priorities = {t["id"]: int(t.get("priority", 1)) for t in candidate_targets}
                 try_points = sum(target_priorities.get(tid, 0) for tid in try_visited)
                 try_distance = float(try_sol.get("distance", 0.0))
@@ -705,9 +705,9 @@ def solve_mission_with_allocation(
             # Solve orienteering for this drone
             sol = _solver.solve(env_for_solver, fuel_budget)
 
-        # The solver returns BOTH 'visited_goals' (unordered target IDs) AND 'route' (optimized order)
-        # CRITICAL: Use 'route' for the optimized sequence from Held-Karp, NOT visited_goals!
-        visited_targets: List[str] = sol.get("visited_goals", [])
+        # The solver returns BOTH 'visited_targets' (unordered target IDs) AND 'route' (optimized order)
+        # CRITICAL: Use 'route' for the optimized sequence from Held-Karp, NOT visited_targets!
+        visited_targets: List[str] = sol.get("visited_targets", [])
 
         # Use the optimized route directly from solver (includes start/end airports in optimal order)
         route_ids: List[str] = sol.get("route", [])

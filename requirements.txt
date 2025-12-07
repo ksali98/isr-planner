@@ -1,0 +1,24 @@
+# ISR Mission Planning Web Application
+# Install with: pip install -r requirements.txt
+
+# Web Framework
+fastapi>=0.122.0
+uvicorn>=0.38.0
+pydantic>=2.12.0
+python-dotenv>=1.2.0
+
+# LangGraph/LangChain for AI Agent
+langgraph>=0.6.11
+langchain>=0.3.27
+langchain-anthropic>=0.3.22
+langchain-core>=0.3.80
+
+# OpenAI (for GPT agent option)
+openai>=2.8.1
+
+# Scientific/Math
+numpy>=2.0.0
+matplotlib>=3.9.0
+
+# Utilities
+requests>=2.32.0

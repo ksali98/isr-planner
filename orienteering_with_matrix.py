@@ -114,28 +114,19 @@ def evaluate_path(D_full, labels, start_idx, subset_idxs, end_idx):
 def choose_best_end(D_full, labels, start_idx, subset_idxs, airport_idxs, fuel_cap):
     """Try all airport ends (INCLUDING start for round-trip); pick best feasible."""
     best = {"len": math.inf, "route": None, "end_idx": None}
-    
-    print(f"    🔍 Evaluating {len(airport_idxs)} possible end airports (including start for round-trip):")
+
     for aidx in airport_idxs:
         # Don't skip start - we want to consider round trips too!
         if aidx == start_idx:
             # For round trip, use evaluate_cycle instead
             cost, route = evaluate_cycle(D_full, labels, start_idx, subset_idxs)
-            print(f"      - {labels[aidx]} (ROUND TRIP): cost={cost:.1f}, feasible={cost <= fuel_cap}")
         else:
             cost, route = evaluate_path(D_full, labels, start_idx, subset_idxs, aidx)
-            print(f"      - {labels[aidx]}: cost={cost:.1f}, feasible={cost <= fuel_cap}")
-        
+
         if cost <= fuel_cap and route:
             if cost < best["len"] or (best["route"] is None):
-                print(f"        → NEW BEST END: {labels[aidx]} with cost {cost:.1f}")
                 best.update({"len": cost, "route": route, "end_idx": aidx})
-    
-    if best["route"]:
-        print(f"    ✅ Selected end airport: {labels[best['end_idx']]} (cost: {best['len']:.1f})")
-    else:
-        print(f"    ❌ No feasible end airport found within fuel budget")
-    
+
     return best if best["route"] else None
 
 def solve_orienteering_with_matrix(env, start_id=None, mode=None, fuel_cap=None, end_id=None):
@@ -233,19 +224,15 @@ def solve_orienteering_with_matrix(env, start_id=None, mode=None, fuel_cap=None,
             elif mode == "end":
                 cost, route = evaluate_path(D_full, labels, start_idx, combo, end_idx)
             else:  # best_end
-                print(f"    🎯 Mode=best_end: Choosing optimal end airport...")
                 end_choice = choose_best_end(D_full, labels, start_idx, combo, airport_idxs, fuel_cap)
                 if end_choice:
                     cost, route = end_choice["len"], end_choice["route"]
-                    print(f"    → Chosen end: {route[-1] if route else 'None'}, cost={cost:.1f}")
                 else:
                     cost, route = math.inf, []
-                    print(f"    → No feasible end found")
 
             # STRICT FUEL CONSTRAINT CHECK
             feasible = (cost <= fuel_cap) and route and (cost is not None) and (cost != math.inf)
-            print(f"    Testing combo with {r} targets: cost={cost:.1f}, fuel_cap={fuel_cap}, feasible={feasible}")
-            
+            # Only print for feasible solutions or when we find a new best (reduce verbosity)
             if feasible:
                 better = (pts > best["points"]) or \
                          (pts == best["points"] and cost < best["len"]) or \
@@ -265,8 +252,7 @@ def solve_orienteering_with_matrix(env, start_id=None, mode=None, fuel_cap=None,
                         "route": route,
                         "end_airport": route[-1] if mode in ("end","best_end") else start_id
                     })
-            else:
-                print(f"    ❌ REJECTED: cost={cost:.1f}, fuel_cap={fuel_cap}, route_exists={route is not None}")
+            # Removed verbose rejected logging - only show feasible solutions
 
     # Nothing fit: return start-only (0 points)
     if best["points"] < 0:

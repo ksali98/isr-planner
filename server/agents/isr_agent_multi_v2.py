@@ -80,54 +80,6 @@ def load_memory() -> List[Dict[str, Any]]:
     return []
 
 
-def save_memory(memories: List[Dict[str, Any]]) -> None:
-    """Save memories to persistent file."""
-    with open(MEMORY_FILE, "w") as f:
-        json.dump(memories, f, indent=2)
-
-
-def add_memory(content: str, category: str = "correction") -> Dict[str, Any]:
-    """
-    Add a new memory entry.
-
-    Categories:
-    - correction: User corrected the agent's behavior
-    - instruction: User gave a standing instruction
-    - preference: User preference for how to do things
-    - fact: Important fact to remember
-    """
-    memories = load_memory()
-    entry = {
-        "id": len(memories) + 1,
-        "timestamp": datetime.now().isoformat(),
-        "category": category,
-        "content": content,
-        "active": True
-    }
-    memories.append(entry)
-    save_memory(memories)
-    return entry
-
-
-def clear_memory() -> int:
-    """Clear all memories. Returns count of cleared entries."""
-    memories = load_memory()
-    count = len(memories)
-    save_memory([])
-    return count
-
-
-def delete_memory(memory_id: int) -> bool:
-    """Delete a specific memory by ID."""
-    memories = load_memory()
-    original_len = len(memories)
-    memories = [m for m in memories if m.get("id") != memory_id]
-    if len(memories) < original_len:
-        save_memory(memories)
-        return True
-    return False
-
-
 def get_active_memories() -> List[Dict[str, Any]]:
     """Get all active memories."""
     return [m for m in load_memory() if m.get("active", True)]
@@ -448,16 +400,16 @@ def allocate_targets_to_drones(strategy: str = "efficient") -> str:
     """
     global _target_allocation
 
+    print(f"\n🎯 ALLOCATE_TARGETS_TO_DRONES CALLED with strategy={strategy}", file=sys.stderr)
+    sys.stderr.flush()
+
     env = get_environment()
     configs = get_drone_configs()
     targets = env.get("targets", [])
     airports = env.get("airports", [])
 
     # Get enabled drones
-    # Debug: log the configs to see what we're receiving
-    print(f"🔍 DEBUG allocate_targets: configs = {configs}", flush=True)
     enabled = [did for did, cfg in configs.items() if cfg.get("enabled", did == "1")]
-    print(f"🔍 DEBUG allocate_targets: enabled = {enabled}", flush=True)
 
     if not enabled:
         return "ERROR: No enabled drones found"
@@ -475,8 +427,15 @@ def allocate_targets_to_drones(strategy: str = "efficient") -> str:
     if matrix_data:
         set_allocator_matrix(matrix_data)
 
-    allocation = alloc_fn(targets, configs, airports, strategy)
+    allocation = alloc_fn(env, configs, strategy, matrix_data)
     _target_allocation = allocation
+
+    # Debug: print actual allocation result
+    total_targets = sum(len(v) for v in allocation.values())
+    print(f"📊 ALLOCATION RESULT: {total_targets} targets across {len(allocation)} drones", file=sys.stderr)
+    for did in sorted(allocation.keys()):
+        print(f"   D{did}: {allocation[did]}", file=sys.stderr)
+    sys.stderr.flush()
 
     # Format result
     lines = ["=== TARGET ALLOCATION ===", f"Strategy: {strategy}", ""]
@@ -573,42 +532,49 @@ def solve_optimal_route(drone_id: str) -> str:
         return f"ERROR: Drone D{drone_id} is not enabled"
 
     fuel_budget = cfg.get("fuel_budget", 200)
+    start_airport = cfg.get("start_airport", "A1")
+    end_airport = cfg.get("end_airport", "A1")
 
-    # Get target access for filtering
+    # Get target access
     target_access = cfg.get("target_access", {})
     if target_access:
         accessible_types = {t.lower() for t, enabled in target_access.items() if enabled}
     else:
         accessible_types = {"a", "b", "c", "d", "e"}
 
-    # Filter targets by type
-    all_targets = env.get("targets", [])
+    # Filter targets
+    targets = env.get("targets", [])
     accessible_targets = [
-        t for t in all_targets
+        t for t in targets
         if str(t.get("type", "a")).lower() in accessible_types
     ]
 
     if not accessible_targets:
         return f"D{drone_id}: No accessible targets"
 
-    # Create filtered environment with only accessible targets
-    filtered_env = dict(env)
-    filtered_env["targets"] = accessible_targets
+    # Build matrix for solver
+    matrix_data = None
+    if _distance_matrix:
+        labels = list(_distance_matrix.keys())
+        matrix = [[_distance_matrix[f].get(t, 1000) for t in labels] for f in labels]
+        matrix_data = {"labels": labels, "matrix": matrix}
 
-    # Create a single-drone config for the solver (same as v1)
-    single_drone_config = {drone_id: configs[drone_id]}
+    # Call solver
+    result = solve_mission(
+        targets=accessible_targets,
+        airports=env.get("airports", []),
+        start_airport=start_airport,
+        end_airport=end_airport if end_airport != "-" else None,
+        fuel_budget=fuel_budget,
+        distance_matrix=matrix_data
+    )
 
-    # Call the REAL Held-Karp solver with correct signature
-    result = solve_mission(filtered_env, single_drone_config)
-
-    # Extract the route for this drone
-    route_data = result.get("routes", {}).get(drone_id, {})
-    route = route_data.get("route", [])
-    points = route_data.get("points", 0)
-    distance = route_data.get("distance", 0)
-
-    if not route:
+    if not result or result.get("status") != "optimal":
         return f"D{drone_id}: No feasible route found"
+
+    route = result.get("route", [])
+    points = result.get("total_priority", 0)
+    distance = result.get("total_distance", 0)
 
     lines = [
         f"=== D{drone_id} OPTIMAL ROUTE ===",
@@ -650,29 +616,36 @@ def solve_allocated_route(drone_id: str) -> str:
     cfg = configs.get(drone_id, {})
 
     fuel_budget = cfg.get("fuel_budget", 200)
+    start_airport = cfg.get("start_airport", "A1")
+    end_airport = cfg.get("end_airport", "A1")
 
     # Filter to only allocated targets
     all_targets = env.get("targets", [])
     targets = [t for t in all_targets if str(t.get("id", t.get("label"))) in allocated_targets]
 
-    # Create filtered environment with only allocated targets
-    filtered_env = dict(env)
-    filtered_env["targets"] = targets
+    # Build matrix
+    matrix_data = None
+    if _distance_matrix:
+        labels = list(_distance_matrix.keys())
+        matrix = [[_distance_matrix[f].get(t, 1000) for t in labels] for f in labels]
+        matrix_data = {"labels": labels, "matrix": matrix}
 
-    # Create single-drone config for solver (same as v1)
-    single_drone_config = {drone_id: configs.get(drone_id, {})}
+    # Solve
+    result = solve_mission(
+        targets=targets,
+        airports=env.get("airports", []),
+        start_airport=start_airport,
+        end_airport=end_airport if end_airport != "-" else None,
+        fuel_budget=fuel_budget,
+        distance_matrix=matrix_data
+    )
 
-    # Call the REAL Held-Karp solver with correct signature
-    result = solve_mission(filtered_env, single_drone_config)
-
-    # Extract route for this drone
-    route_data = result.get("routes", {}).get(drone_id, {})
-    route = route_data.get("route", [])
-    points = route_data.get("points", 0)
-    distance = route_data.get("distance", 0)
-
-    if not route:
+    if not result or result.get("status") != "optimal":
         return f"D{drone_id}: No feasible route for allocated targets"
+
+    route = result.get("route", [])
+    points = result.get("total_priority", 0)
+    distance = result.get("total_distance", 0)
 
     lines = [
         f"=== D{drone_id} ALLOCATED ROUTE ===",
@@ -715,33 +688,34 @@ def solve_all_drones_parallel() -> str:
 
         cfg = configs.get(drone_id, {})
         fuel_budget = cfg.get("fuel_budget", 200)
+        start_airport = cfg.get("start_airport", "A1")
+        end_airport = cfg.get("end_airport", "A1")
 
         all_targets = env.get("targets", [])
         targets = [t for t in all_targets if str(t.get("id", t.get("label"))) in allocated]
 
-        # Create filtered environment with only allocated targets
-        filtered_env = dict(env)
-        filtered_env["targets"] = targets
+        matrix_data = None
+        if _distance_matrix:
+            labels = list(_distance_matrix.keys())
+            matrix = [[_distance_matrix[f].get(t, 1000) for t in labels] for f in labels]
+            matrix_data = {"labels": labels, "matrix": matrix}
 
-        # Create single-drone config (same as v1)
-        single_drone_config = {drone_id: configs.get(drone_id, {})}
+        result = solve_mission(
+            targets=targets,
+            airports=env.get("airports", []),
+            start_airport=start_airport,
+            end_airport=end_airport if end_airport != "-" else None,
+            fuel_budget=fuel_budget,
+            distance_matrix=matrix_data
+        )
 
-        # Call the REAL Held-Karp solver with correct signature
-        result = solve_mission(filtered_env, single_drone_config)
-
-        # Extract route for this drone
-        route_data = result.get("routes", {}).get(drone_id, {})
-        route = route_data.get("route", [])
-        points = route_data.get("points", 0)
-        distance = route_data.get("distance", 0)
-
-        if route:
+        if result and result.get("status") == "optimal":
             return {
                 "drone_id": drone_id,
                 "status": "optimal",
-                "route": route,
-                "points": points,
-                "distance": distance,
+                "route": result.get("route", []),
+                "points": result.get("total_priority", 0),
+                "distance": result.get("total_distance", 0),
                 "fuel_budget": fuel_budget
             }
         else:
@@ -1259,8 +1233,8 @@ Your role is to:
 3. Decompose the task and route to specialist agents:
    - ALLOCATOR: For target allocation (call route_to_allocator with priority_constraints)
    - ROUTER: For computing optimal routes (call route_to_router with drone_ids)
-   - OPTIMIZER: For post-optimization (call route_to_optimizer with routes and type)
    - VALIDATOR: For validating routes (call route_to_validator with routes)
+   - OPTIMIZER: For post-optimization (call route_to_optimizer with routes and type)
 
 IMPORTANT: After each specialist completes, you must continue the workflow by calling the next routing tool.
 
@@ -1268,15 +1242,13 @@ WORKFLOW - Follow these steps IN ORDER:
 1. Call get_mission_overview to understand the mission
 2. Call route_to_allocator (system will pass control to ALLOCATOR)
 3. When you see allocation results, call route_to_router (system will pass control to ROUTER)
-4. When you see ROUTE_D results from ROUTER, call route_to_optimizer to optimize routes
-5. When you see optimized ROUTE_D results from OPTIMIZER, you are DONE - output the final routes
+4. When you see ROUTE_D results, you are DONE - just repeat the routes in your response
+5. (Optional) If validation or optimization is requested, route to those agents
 
-CRITICAL: You MUST always call:
-- route_to_allocator first (to distribute targets)
-- route_to_router second (to compute routes)
-- route_to_optimizer third (to optimize and add unvisited targets)
+CRITICAL: You MUST call route_to_router after seeing allocation results!
+After ROUTER returns routes, just output those routes - no further routing needed.
 
-OUTPUT FORMAT (copy from OPTIMIZER results):
+OUTPUT FORMAT (copy from ROUTER results):
 ROUTE_D1: A1,T3,T7,A1
 ROUTE_D2: A2,T5,T8,A2
 """
@@ -1522,29 +1494,19 @@ def create_multi_agent_workflow():
         if hasattr(last, "tool_calls") and last.tool_calls:
             return "coordinator_tools"
 
-        # Check if the OPTIMIZER has returned (look for optimized routes from optimizer)
-        # Only end if OPTIMIZER has been called (not just ROUTER)
-        optimizer_called = False
-        for msg in messages:
-            if isinstance(msg, ToolMessage):
-                content = str(msg.content) if hasattr(msg, 'content') else ""
-                # Check if optimizer tools have been called
-                if any(opt_marker in content for opt_marker in [
-                    "UNVISITED TARGET ASSIGNMENT",
-                    "TARGET REASSIGNMENT OPTIMIZATION",
-                    "CROSSING REMOVAL"
-                ]):
-                    optimizer_called = True
-                    break
-
-        # Only end after optimizer has run AND coordinator has produced final routes
-        if optimizer_called and hasattr(last, "content"):
+        # Check if we have final routes in the coordinator's response - if so, we're done
+        if hasattr(last, "content"):
             content = str(last.content)
             if "ROUTE_D" in content:
                 return "end"
 
-        # If no tool calls, just end (avoid infinite loop)
-        # The coordinator should continue making tool calls until optimizer completes
+        # Check if we have routes anywhere in messages - if so, we're done
+        for msg in messages:
+            if hasattr(msg, "content") and "ROUTE_D" in str(msg.content):
+                return "end"
+
+        # If no tool calls and no routes, just end (avoid infinite loop)
+        # The coordinator should have made tool calls or produced routes
         return "end"
 
     workflow.add_conditional_edges("coordinator", coordinator_route, {
@@ -1713,6 +1675,8 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
     print(f"{'='*60}\n", file=sys.stderr)
     sys.stderr.flush()
 
+    print(f"🔍 [DEBUG] Starting response extraction from {len(all_steps)} steps", flush=True)
+
     # Extract response - look for ROUTE_D in all messages from all steps
     response_text = ""
     all_messages = []
@@ -1742,35 +1706,74 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
             else:
                 text = ""
 
-            # If this message has ROUTE_D, use it
+            # Collect ALL messages containing ROUTE_D (don't break on first)
             if "ROUTE_D" in text:
-                response_text = text
-                break
+                print(f"🔍 [DEBUG] Found ROUTE_D in message", flush=True)
+                if response_text:
+                    response_text += "\n" + text
+                else:
+                    response_text = text
 
-    # If no ROUTE_D found, use the last message
+    print(f"🔍 [DEBUG] After message scan: all_messages={len(all_messages)}, response_text={len(response_text)} chars", flush=True)
+
+    # If no ROUTE_D found, search backwards for any message with text content
     if not response_text and all_messages:
-        last_msg = all_messages[-1]
-        if hasattr(last_msg, "content"):
-            content = last_msg.content
-            if isinstance(content, str):
-                response_text = content
-            elif isinstance(content, list):
-                text_parts = []
-                for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        text_parts.append(item.get("text", ""))
-                    elif isinstance(item, str):
-                        text_parts.append(item)
-                response_text = "\n".join(text_parts)
+        print(f"🔍 [DEBUG] Searching backwards for message with text content...", file=sys.stderr)
+        for msg in reversed(all_messages):
+            if hasattr(msg, "content"):
+                content = msg.content
+                extracted = ""
+                if isinstance(content, str) and content.strip():
+                    extracted = content
+                elif isinstance(content, list):
+                    text_parts = []
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            text_parts.append(item.get("text", ""))
+                        elif isinstance(item, str):
+                            text_parts.append(item)
+                    extracted = "\n".join(text_parts)
+
+                if extracted.strip():
+                    response_text = extracted
+                    print(f"🔍 [DEBUG] Found text in {type(msg).__name__}: {extracted[:100]}...", file=sys.stderr)
+                    break
+        sys.stderr.flush()
 
     # Parse routes
     routes = {}
     if response_text:
+        # Debug: show actual response_text content to diagnose regex issues
+        print(f"\n📋 ==================== RESPONSE TEXT DEBUG ====================", flush=True)
+        print(f"📋 response_text (first 500 chars):\n{response_text[:500]}", flush=True)
+        print(f"📋 ===============================================================", flush=True)
+
+        # Try multiple regex patterns to find routes
         route_matches = re.findall(r'ROUTE_D(\d+):\s*([A-Z0-9,]+)', response_text)
+        print(f"\n📋 Parsing routes from response_text ({len(response_text)} chars)", flush=True)
+        print(f"📋 Pattern 1 (ROUTE_D\\d+:\\s*[A-Z0-9,]+): Found {len(route_matches)} matches: {route_matches}", flush=True)
+
+        # If no matches, try alternative patterns
+        if not route_matches:
+            # Try with more flexible spacing/formatting
+            route_matches = re.findall(r'ROUTE_D(\d+)\s*:\s*([A-Z0-9,\s]+?)(?:\n|$)', response_text, re.MULTILINE)
+            print(f"📋 Pattern 2 (multiline): Found {len(route_matches)} matches: {route_matches}", flush=True)
+
+        if not route_matches:
+            # Try with **bold** markdown formatting
+            route_matches = re.findall(r'\*\*ROUTE_D(\d+)\*\*\s*:\s*([A-Z0-9,\s]+?)(?:\n|$)', response_text, re.MULTILINE)
+            print(f"📋 Pattern 3 (bold markdown): Found {len(route_matches)} matches: {route_matches}", flush=True)
+
+        if not route_matches:
+            # Try finding any line containing ROUTE_D
+            route_lines = [line for line in response_text.split('\n') if 'ROUTE_D' in line]
+            print(f"📋 Lines containing ROUTE_D: {route_lines}", flush=True)
     else:
         route_matches = []
+        print(f"\n⚠️ No response_text found to parse routes from", flush=True)
     for drone_id, route_str in route_matches:
         routes[drone_id] = route_str.split(',')
+    print(f"📋 Final parsed routes: {routes}", flush=True)
 
     # Calculate totals
     total_points = 0
@@ -1804,6 +1807,13 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
 
         trajectories[drone_id] = trajectory
 
+    # Include allocation from global state (set by allocator tool)
+    global _target_allocation
+    allocation = _target_allocation.copy() if _target_allocation else {}
+
+    if allocation:
+        print(f"\n📊 Returning allocation: {allocation}", file=sys.stderr)
+
     return {
         "response": response_text,
         "routes": routes,
@@ -1813,6 +1823,7 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
         "route": routes.get("1"),
         "points": total_points,
         "fuel": total_fuel,
+        "allocation": allocation,  # Target allocation from allocator agent
     }
 
 

@@ -1385,10 +1385,45 @@ function attachOptimizationHandlers() {
       btnInsert.textContent = "Working...";
 
       try {
-        // The post_optimize is already called during solve if enabled
-        // For now, re-run the planner with post_optimize=true
-        await runPlanner();
-        appendDebugLine("Insert Missed optimization applied via planner.");
+        const droneConfigs = state.droneConfigs;
+        const resp = await fetch("/api/insert_missed_optimize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            solution: { routes: state.routes },
+            env: state.env,
+            drone_configs: droneConfigs
+          })
+        });
+        const data = await resp.json();
+
+        if (data.success) {
+          const insertions = data.insertions || [];
+          if (insertions.length > 0) {
+            // Update routes with optimized solution
+            state.routes = data.routes;
+            state.sequences = data.sequences;
+
+            // Update sequence display
+            for (const [did, seq] of Object.entries(data.sequences)) {
+              state.sequences[did] = seq;
+            }
+
+            appendDebugLine(`Insert optimization: ${insertions.length} targets inserted.`);
+            insertions.forEach(ins => {
+              appendDebugLine(`  ${ins.target} -> D${ins.drone}`);
+            });
+
+            // Recalculate trajectories for modified routes
+            await regenerateTrajectories();
+            updateStatsFromRoutes();
+            drawEnvironment();
+          } else {
+            appendDebugLine("Insert optimization: No insertions possible (all visited or fuel exhausted).");
+          }
+        } else {
+          appendDebugLine("Insert optimization error: " + (data.error || "Unknown error"));
+        }
       } catch (err) {
         appendDebugLine("Insert optimization error: " + err.message);
       } finally {
@@ -2350,7 +2385,14 @@ function applyAgentRoutes(routes, trajectories, totalPoints, totalFuel) {
   // routes is like {"1": ["A1", "T3", "A1"], "2": ["A2", "T5", "A2"], ...}
   // trajectories is like {"1": [[x1,y1], [x2,y2], ...], ...} - SAM-avoiding paths
 
-  if (!routes || Object.keys(routes).length === 0) return;
+  console.log("🎯 applyAgentRoutes called with:", { routes, trajectories, totalPoints, totalFuel });
+  appendDebugLine(`🎯 applyAgentRoutes: ${Object.keys(routes || {}).length} routes`);
+
+  if (!routes || Object.keys(routes).length === 0) {
+    console.log("❌ No routes to apply");
+    appendDebugLine("❌ applyAgentRoutes: No routes to apply");
+    return;
+  }
 
   // Build waypoint lookup for calculating distances and points
   const waypoints = {};
@@ -2415,6 +2457,9 @@ function applyAgentRoutes(routes, trajectories, totalPoints, totalFuel) {
       distance: distance,
       trajectory: trajectory,
     };
+
+    // Ensure trajectory is visible for this drone
+    state.trajectoryVisible[droneId] = true;
 
     appendDebugLine(`Agent route D${droneId}: ${routeStr} (${points} pts, ${distance.toFixed(1)} fuel)`);
   }
@@ -2507,6 +2552,9 @@ function applyAgentRoute(route, points, fuel) {
     distance: calculatedFuel,
     trajectory: buildTrajectoryFromRoute(route),
   };
+
+  // Ensure trajectory is visible for D1
+  state.trajectoryVisible["1"] = true;
 
   // Update allocation display
   state.allocations = { "1": route.filter(wp => String(wp).startsWith('T')) };

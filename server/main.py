@@ -13,15 +13,18 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from .agents.graph import workflow  # <-- our LangGraph workflow (GPT-based)
-from .agents.isr_agent import (
-    run_isr_agent,  # <-- new ISR agent (Claude-based with tools)
-    add_memory,
+from .agents.isr_agent_multi_v2 import (
+    run_isr_agent,  # <-- Multi-agent system (Coordinator + Allocator + Router)
     load_memory,
+)
+# Memory functions from single-agent (shares same agent_memory.json)
+from .agents.isr_agent import (
+    add_memory,
     clear_memory,
     delete_memory,
 )
 from .solver import sam_distance_matrix
-from .solver.post_optimizer import get_coverage_stats, trajectory_swap_optimize, crossing_removal_optimize
+from .solver.post_optimizer import get_coverage_stats, trajectory_swap_optimize, crossing_removal_optimize, post_optimize_solution
 from .solver.solver_bridge import (
     clear_cached_matrix,
     get_current_matrix,
@@ -1142,6 +1145,77 @@ async def api_crossing_removal_optimize(req: TrajectorySwapRequest):
             "sequences": {d: r.get("sequence", "") for d, r in result.get("routes", {}).items()},
             "fixes_made": fixes,
             "passes": result.get("passes", 0),
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": str(e),
+        }
+
+
+class InsertMissedRequest(BaseModel):
+    solution: Dict[str, Any]  # routes from solve_with_allocation
+    env: Dict[str, Any]
+    drone_configs: Dict[str, Any]
+
+
+@app.post("/api/insert_missed_optimize")
+async def api_insert_missed_optimize(req: InsertMissedRequest):
+    """
+    Insert unvisited targets into existing routes.
+
+    Takes the current solution and attempts to insert any unvisited targets
+    into drone routes that have remaining fuel capacity. Targets are inserted
+    at optimal positions to minimize additional fuel consumption.
+    """
+    print("\n" + "="*60)
+    print("📥 INSERT MISSED ENDPOINT CALLED")
+    print(f"   Received routes: {list(req.solution.get('routes', {}).keys())}")
+    print("="*60)
+
+    # Get the cached distance matrix for SAM-aware distances
+    cached_matrix = get_current_matrix()
+    if cached_matrix:
+        print(f"   Using cached distance matrix with {len(cached_matrix.get('labels', []))} labels")
+    else:
+        print("   WARNING: No cached distance matrix available!")
+
+    try:
+        result = post_optimize_solution(
+            solution=req.solution,
+            env=req.env,
+            drone_configs=req.drone_configs,
+            distance_matrix=cached_matrix,
+        )
+
+        # Count insertions by comparing routes
+        insertions = []
+        original_routes = req.solution.get("routes", {})
+        optimized_routes = result.get("routes", {})
+
+        for did, opt_data in optimized_routes.items():
+            orig_data = original_routes.get(did, {})
+            orig_route = set(orig_data.get("route", []))
+            opt_route = set(opt_data.get("route", []))
+            new_targets = opt_route - orig_route
+            for tid in new_targets:
+                if str(tid).startswith("T"):
+                    insertions.append({"target": tid, "drone": did})
+
+        if insertions:
+            print(f"\n➕ INSERT MISSED OPTIMIZATION: {len(insertions)} targets inserted")
+            for ins in insertions:
+                print(f"   {ins['target']} → Drone {ins['drone']}")
+        else:
+            print("\n➕ INSERT MISSED OPTIMIZATION: No insertions possible (all targets visited or fuel exhausted)")
+
+        return {
+            "success": True,
+            "routes": result.get("routes", {}),
+            "sequences": result.get("sequences", {}),
+            "insertions": insertions,
         }
     except Exception as e:
         import traceback
