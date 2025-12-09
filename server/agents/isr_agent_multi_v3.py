@@ -177,20 +177,31 @@ def set_state(state: MissionState):
 
 COORDINATOR_SYSTEM_PROMPT = """You are the COORDINATOR agent in a multi-agent ISR mission planning system.
 
-Your role is to:
-1. Understand the user's mission planning request
-2. Analyze the mission context (drones, targets, constraints)
-3. Determine the workflow needed
+Your role is to understand user requests and either:
+1. Answer questions about the current mission configuration
+2. Start a planning workflow to compute routes
+3. Request optimization of existing routes
 
-You have TWO tools available:
-1. analyze_mission_request: For NEW solve requests - allocate targets and compute routes
-2. request_optimization: For OPTIMIZATION requests when routes already exist
+TOOLS AVAILABLE:
+1. get_mission_info: Get detailed drone configurations, targets, environment data, and current solution state
+2. analyze_mission_request: Start new route planning (use for "solve", "plan", "compute" requests)
+3. request_optimization: Improve existing routes (use for "optimize", "swap", "2-opt" requests)
 
-IMPORTANT: You MUST call one of these tools. Choose based on user request:
-- "solve", "plan mission", "compute routes" → use analyze_mission_request
-- "optimize", "swap closer", "2-opt", "crossing", "insert unvisited" → use request_optimization
+HOW TO RESPOND:
 
-After you call the tool, the system will route to the appropriate specialist agents.
+FOR QUESTIONS about the mission (drone configs, fuel budgets, targets, SAMs, current routes, allocations):
+- Call get_mission_info tool FIRST to get the current configuration
+- Then respond with a clear, human-friendly answer based on the tool's output
+- Example questions: "What drone configuration are you using?", "What is D1's fuel budget?", "How many targets?"
+
+FOR SOLVE/PLANNING REQUESTS ("solve", "plan mission", "compute routes", "run planner"):
+- Call analyze_mission_request tool to start the planning workflow
+
+FOR OPTIMIZATION REQUESTS ("optimize", "swap closer", "2-opt", "remove crossings"):
+- Call request_optimization tool to improve existing routes
+
+IMPORTANT: When the user asks about configuration, use get_mission_info and then summarize the answer.
+Do NOT just dump the raw tool output - provide a concise, helpful response.
 """
 
 
@@ -297,7 +308,107 @@ INSTRUCTION TO OPTIMIZER: You MUST call the tool: {tool_to_use}
 """
 
 
-COORDINATOR_TOOLS = [analyze_mission_request, request_optimization]
+@tool
+def get_mission_info() -> str:
+    """
+    Get current mission configuration details.
+
+    Use this tool to answer questions about drone configurations, targets,
+    airports, SAMs, fuel budgets, and current state of the mission.
+
+    Returns:
+        Detailed mission information including all drone configs and environment data.
+    """
+    state = get_state()
+    env = state.get("environment", {})
+    configs = state.get("drone_configs", {})
+    routes = state.get("routes", {})
+    allocation = state.get("allocation", {})
+
+    # Environment details
+    airports = env.get("airports", [])
+    targets = env.get("targets", [])
+    sams = env.get("sams", [])
+
+    lines = [
+        "=" * 60,
+        "CURRENT MISSION CONFIGURATION",
+        "=" * 60,
+        "",
+        "ENVIRONMENT:",
+        f"  Airports: {len(airports)}",
+    ]
+
+    for ap in airports:
+        ap_id = ap.get("id", ap.get("label", "?"))
+        lines.append(f"    - {ap_id}: ({ap.get('x', 0):.1f}, {ap.get('y', 0):.1f})")
+
+    lines.append(f"  Targets: {len(targets)}")
+    total_priority = 0
+    for t in targets:
+        t_id = t.get("id", t.get("label", "?"))
+        priority = t.get("priority", t.get("value", 5))
+        total_priority += priority
+        lines.append(f"    - {t_id}: priority={priority}, pos=({t.get('x', 0):.1f}, {t.get('y', 0):.1f})")
+
+    lines.append(f"  Total Priority Points: {total_priority}")
+    lines.append(f"  SAMs/NFZs: {len(sams)}")
+    for sam in sams:
+        pos = sam.get("pos", [0, 0])
+        lines.append(f"    - Range: {sam.get('range', 0)}, pos=({pos[0]:.1f}, {pos[1]:.1f})")
+
+    lines.append("")
+    lines.append("DRONE CONFIGURATIONS:")
+
+    if not configs:
+        lines.append("  (No drone configurations set)")
+    else:
+        for did in sorted(configs.keys()):
+            cfg = configs[did]
+            enabled = cfg.get("enabled", did == "1")
+            fuel = cfg.get("fuelBudget", cfg.get("fuel_budget", 200))
+            airport = cfg.get("homeAirport", cfg.get("home_airport", "A1"))
+            accessible = cfg.get("accessibleTargets", cfg.get("accessible_targets", []))
+
+            status = "ENABLED" if enabled else "DISABLED"
+            lines.append(f"  D{did} [{status}]:")
+            lines.append(f"    - Home Airport: {airport}")
+            lines.append(f"    - Fuel Budget: {fuel}")
+            if accessible:
+                lines.append(f"    - Accessible Targets: {', '.join(accessible)}")
+            else:
+                lines.append(f"    - Accessible Targets: ALL")
+
+    # Current solution state
+    lines.append("")
+    lines.append("CURRENT SOLUTION STATE:")
+
+    if allocation:
+        lines.append("  Target Allocation:")
+        for did in sorted(allocation.keys()):
+            tgts = allocation[did]
+            lines.append(f"    D{did}: {', '.join(tgts) if tgts else '(none)'}")
+    else:
+        lines.append("  Target Allocation: Not computed yet")
+
+    if routes:
+        lines.append("  Routes Computed:")
+        for did in sorted(routes.keys()):
+            route_data = routes[did]
+            route = route_data.get("route", [])
+            dist = route_data.get("distance", 0)
+            points = route_data.get("total_points", 0)
+            lines.append(f"    D{did}: {' -> '.join(route)} (dist={dist:.1f}, points={points})")
+    else:
+        lines.append("  Routes: Not computed yet")
+
+    lines.append("")
+    lines.append("=" * 60)
+
+    return "\n".join(lines)
+
+
+COORDINATOR_TOOLS = [analyze_mission_request, request_optimization, get_mission_info]
 
 
 # ============================================================================
@@ -1548,8 +1659,8 @@ def create_multi_agent_workflow():
         else:
             agent_messages = [system] + list(messages)
 
-        # Force tool call - use {"type": "any"} for Anthropic
-        coordinator_llm = llm.bind_tools(COORDINATOR_TOOLS, tool_choice={"type": "any"})
+        # Let LLM decide whether to call a tool or respond directly
+        coordinator_llm = llm.bind_tools(COORDINATOR_TOOLS, tool_choice="auto")
         response = coordinator_llm.invoke(agent_messages)
 
         return {"messages": [response], "phase": AgentPhase.UNDERSTANDING}
@@ -1684,7 +1795,8 @@ def create_multi_agent_workflow():
             last = messages[-1]
             if hasattr(last, "tool_calls") and last.tool_calls:
                 return "coordinator_tools"
-        return "allocator"  # Go to allocator after coordinator
+        # No tool call = direct response (question answered), end workflow
+        return END
 
     def after_coordinator_tools(state: MissionState) -> str:
         """After coordinator tools, route based on which tool was called."""
@@ -1697,6 +1809,9 @@ def create_multi_agent_workflow():
                 # If optimization was requested, go directly to optimizer
                 if "OPTIMIZATION REQUEST DETECTED" in content:
                     return "optimizer"
+                # If mission info was requested, go back to coordinator to formulate response
+                if "CURRENT MISSION CONFIGURATION" in content:
+                    return "coordinator"  # Let coordinator summarize and respond
                 break
 
         # Default: go to allocator for new solve requests
@@ -1776,11 +1891,12 @@ def create_multi_agent_workflow():
     # Add edges
     workflow.add_conditional_edges("coordinator", after_coordinator, {
         "coordinator_tools": "coordinator_tools",
-        "allocator": "allocator"
+        END: END
     })
     workflow.add_conditional_edges("coordinator_tools", after_coordinator_tools, {
         "allocator": "allocator",
-        "optimizer": "optimizer"
+        "optimizer": "optimizer",
+        "coordinator": "coordinator"  # For answering questions with get_mission_info
     })
 
     workflow.add_conditional_edges("allocator", after_allocator, {
@@ -1994,7 +2110,21 @@ def _extract_results(
             if route:
                 response_lines.append(f"ROUTE_D{did}: {','.join(route)}")
 
-    response_text = "\n".join(response_lines)
+        response_text = "\n".join(response_lines)
+    else:
+        # No routes - extract coordinator's direct response from messages
+        messages = state.get("messages", [])
+        response_text = ""
+        for msg in reversed(messages):
+            if hasattr(msg, "content") and msg.content and not hasattr(msg, "tool_calls"):
+                # Found an AI response without tool calls
+                response_text = msg.content
+                break
+            elif hasattr(msg, "content") and msg.content:
+                response_text = msg.content
+                break
+        if not response_text:
+            response_text = "No response generated"
 
     # Calculate totals and build trajectories using SAM-avoiding paths
     targets = {str(t.get("id", t.get("label"))): t for t in env.get("targets", [])}
