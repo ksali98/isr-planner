@@ -2,26 +2,47 @@
 Orienteering Solver Interface for ISR Editor
 Provides interface to the external orienteering solver
 """
+import sys
+from pathlib import Path
 import numpy as np
+
+# Add the solver directory to Python path for local imports
+_solver_dir = Path(__file__).parent
+if str(_solver_dir) not in sys.path:
+    sys.path.insert(0, str(_solver_dir))
 
 
 class OrienteeringSolverInterface:
     """Interface to the orienteering solver"""
-    
+
     def __init__(self):
         self.solver = None
         self._import_solver()
-    
+
     def _import_solver(self):
         """Import the orienteering solver module"""
+        # Try multiple import paths for Docker vs local development
         try:
+            # Direct import (works when solver dir is in path)
             from orienteering_with_matrix import solve_orienteering_with_matrix
             self.solver = solve_orienteering_with_matrix
             print("✅ Orienteering solver loaded successfully")
         except ImportError:
-            print("❌ Error: Could not import orienteering solver")
-            print("Please ensure orienteering_with_matrix.py exists")
-            self.solver = None
+            try:
+                # Docker path: webapp.editor.solver.orienteering_with_matrix
+                from webapp.editor.solver.orienteering_with_matrix import solve_orienteering_with_matrix
+                self.solver = solve_orienteering_with_matrix
+                print("✅ Orienteering solver loaded (Docker path)")
+            except ImportError:
+                try:
+                    # Local dev path: isr_web.webapp.editor.solver.orienteering_with_matrix
+                    from isr_web.webapp.editor.solver.orienteering_with_matrix import solve_orienteering_with_matrix
+                    self.solver = solve_orienteering_with_matrix
+                    print("✅ Orienteering solver loaded (local path)")
+                except ImportError:
+                    print("❌ Error: Could not import orienteering solver")
+                    print("Please ensure orienteering_with_matrix.py exists")
+                    self.solver = None
     
     def solve(self, env_data, fuel_budget):
         """

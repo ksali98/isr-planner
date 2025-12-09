@@ -30,6 +30,7 @@ RUN touch /app/__init__.py && \
     touch /app/webapp/__init__.py && \
     touch /app/webapp/editor/__init__.py && \
     touch /app/webapp/editor/solver/__init__.py && \
+    touch /app/webapp/editor/solver/orienteering/__init__.py && \
     touch /app/path_planning_core/__init__.py
 
 # Set Python path
