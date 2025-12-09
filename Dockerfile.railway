@@ -21,7 +21,7 @@ COPY server/ /app/server/
 COPY webapp/ /app/webapp/
 COPY path_planning_core/ /app/path_planning_core/
 
-# Create __init__.py files for proper imports
+# Create __init__.py files for proper imports (only for dirs that don't have them)
 RUN touch /app/__init__.py && \
     touch /app/server/__init__.py && \
     touch /app/server/agents/__init__.py && \
@@ -30,7 +30,6 @@ RUN touch /app/__init__.py && \
     touch /app/webapp/__init__.py && \
     touch /app/webapp/editor/__init__.py && \
     touch /app/webapp/editor/solver/__init__.py && \
-    touch /app/webapp/editor/solver/orienteering/__init__.py && \
     touch /app/path_planning_core/__init__.py
 
 # Set Python path
