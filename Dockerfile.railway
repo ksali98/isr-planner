@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY server/ /app/server/
 COPY webapp/ /app/webapp/
+COPY path_planning_core/ /app/path_planning_core/
 
 # Create __init__.py files for proper imports
 RUN touch /app/__init__.py

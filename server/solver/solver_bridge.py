@@ -16,8 +16,18 @@ root_path = Path(__file__).resolve().parents[3]
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
 
+# Add /app path for Docker deployment
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
+
 # Use the modular solver - import directly to avoid __init__.py pulling in matplotlib
-from isr_web.webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface  # type: ignore
+# Try importing from different paths (Docker vs local)
+try:
+    # Docker path: /app/webapp/editor/solver/...
+    from webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
+except ImportError:
+    # Local development path: isr_web/webapp/editor/solver/...
+    from isr_web.webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface  # type: ignore
 
 # Import new solver components
 from .sam_distance_matrix import (
