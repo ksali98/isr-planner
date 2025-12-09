@@ -13,7 +13,7 @@ numReplicas = 1
 # Health check (increased timeout for Python app startup)
 healthcheckPath = "/health"
 healthcheckTimeout = 300
-startCommand = "python -m uvicorn server.main:app --host 0.0.0.0 --port $PORT"
+# Note: Using Dockerfile CMD instead of startCommand for proper $PORT expansion
 
 # Restart policy
 restartPolicyType = "ON_FAILURE"
