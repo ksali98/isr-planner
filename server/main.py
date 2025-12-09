@@ -13,12 +13,11 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from .agents.graph import workflow  # <-- our LangGraph workflow (GPT-based)
-from .agents.isr_agent_multi_v2 import (
-    run_isr_agent,  # <-- Multi-agent system (Coordinator + Allocator + Router)
+# Use v3 multi-agent system (with mandatory tool calls)
+from .agents.isr_agent import run_isr_agent
+# Memory functions (shared across all agent versions)
+from .agents.agent_memory import (
     load_memory,
-)
-# Memory functions from single-agent (shares same agent_memory.json)
-from .agents.isr_agent import (
     add_memory,
     clear_memory,
     delete_memory,
@@ -957,10 +956,12 @@ async def agent_chat(req: AgentChatRequest):
     try:
         # Use the new ISR agent with Claude and tools
         # Pass drone_configs and sequences so agent knows all constraints
+        # Use req.drone_configs if provided, else extract from env
+        drone_configs = req.drone_configs or req.env.get("drone_configs")
         result = run_isr_agent(
             env=req.env,
             user_query=req.message,
-            drone_configs=req.drone_configs,
+            drone_configs=drone_configs,
             sequences=req.sequences
         )
 
