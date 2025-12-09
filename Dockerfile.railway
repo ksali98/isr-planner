@@ -39,9 +39,8 @@ ENV PYTHONPATH=/app
 ENV PORT=8893
 EXPOSE $PORT
 
-# Health check (increased start-period for slow startup)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:$PORT/health || exit 1
+# Railway provides PORT at runtime, remove HEALTHCHECK (Railway handles it via healthcheckPath)
+# The Dockerfile HEALTHCHECK doesn't have access to runtime PORT variable
 
-# Run the application - Railway provides $PORT
-CMD python -m uvicorn server.main:app --host 0.0.0.0 --port $PORT
+# Run the application - Railway provides $PORT at runtime
+CMD ["sh", "-c", "python -m uvicorn server.main:app --host 0.0.0.0 --port ${PORT:-8893}"]
