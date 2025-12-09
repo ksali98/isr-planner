@@ -60,12 +60,20 @@ if "/app" not in sys.path:
     sys.path.insert(0, "/app")
 
 # Try importing from different paths (Docker vs local)
+OrienteeringSolverInterface = None
 try:
     # Docker path: /app/webapp/editor/solver/...
     from webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
-except ImportError:
-    # Local development path: isr_web/webapp/editor/solver/...
-    from isr_web.webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
+    print("✅ OrienteeringSolverInterface loaded (Docker path)")
+except ImportError as e:
+    print(f"⚠️ Docker import failed: {e}")
+    try:
+        # Local development path: isr_web/webapp/editor/solver/...
+        from isr_web.webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
+        print("✅ OrienteeringSolverInterface loaded (local path)")
+    except ImportError as e2:
+        print(f"⚠️ Local import failed: {e2}")
+        print("❌ OrienteeringSolverInterface not available - orienteering features disabled")
 
 from ..solver.target_allocator import (
     allocate_targets as _allocate_targets_impl,
