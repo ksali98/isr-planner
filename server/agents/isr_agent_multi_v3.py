@@ -466,11 +466,16 @@ The tools use the Held-Karp algorithm which finds globally optimal TSP solutions
 _solver = None
 
 def get_solver():
-    """Get or create solver singleton."""
+    """Get or create solver singleton. Returns None if solver not available."""
     global _solver
-    if _solver is None:
+    if _solver is None and OrienteeringSolverInterface is not None:
         _solver = OrienteeringSolverInterface()
     return _solver
+
+
+def is_solver_available() -> bool:
+    """Check if the orienteering solver is available."""
+    return OrienteeringSolverInterface is not None
 
 
 @tool
@@ -491,6 +496,9 @@ def solve_all_routes() -> str:
 
     if not allocation:
         return "ERROR: No allocation found. Allocation must happen first."
+
+    if not is_solver_available():
+        return "ERROR: Route optimization solver is not available in this deployment. The orienteering solver requires additional dependencies (matplotlib/tkinter) that are not installed in the cloud environment. Please use the manual route planning features instead."
 
     # Build matrix data for solver
     matrix_data = None
