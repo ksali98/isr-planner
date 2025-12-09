@@ -10,9 +10,12 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     curl \
-    python3-tk \
-    tk-dev \
+    tk \
+    libtk8.6 \
     && rm -rf /var/lib/apt/lists/*
+
+# Set matplotlib to use non-GUI backend (Agg) to avoid tkinter issues
+ENV MPLBACKEND=Agg
 
 # Copy requirements first (for caching)
 COPY requirements.txt .
