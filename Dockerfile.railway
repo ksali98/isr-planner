@@ -43,4 +43,5 @@ EXPOSE $PORT
 # The Dockerfile HEALTHCHECK doesn't have access to runtime PORT variable
 
 # Run the application - Railway provides $PORT at runtime
-CMD ["sh", "-c", "python -m uvicorn server.main:app --host 0.0.0.0 --port ${PORT:-8893}"]
+# Use shell form (not exec form) so environment variables are expanded
+CMD python -m uvicorn server.main:app --host 0.0.0.0 --port ${PORT:-8893}
