@@ -50,12 +50,22 @@ legacy_path = Path(__file__).resolve().parents[3] / "legacy" / "isr_legacy_all"
 if str(legacy_path) not in sys.path:
     sys.path.insert(0, str(legacy_path))
 
-# Add root path
+# Add root path for local development (isr_projects)
 root_path = Path(__file__).resolve().parents[3]
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
 
-from isr_web.webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
+# Add /app path for Docker deployment
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
+
+# Try importing from different paths (Docker vs local)
+try:
+    # Docker path: /app/webapp/editor/solver/...
+    from webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
+except ImportError:
+    # Local development path: isr_web/webapp/editor/solver/...
+    from isr_web.webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
 
 from ..solver.target_allocator import (
     allocate_targets as _allocate_targets_impl,
