@@ -22,3 +22,9 @@ matplotlib>=3.9.0
 
 # Utilities
 requests>=2.32.0
+
+# Database
+supabase>=2.0.0
+
+# Anthropic SDK (explicit)
+anthropic>=0.40.0
