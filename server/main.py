@@ -88,8 +88,16 @@ class ApplySequenceResponse(BaseModel):
     error: Optional[str] = None
 
 
-ROOT = Path(__file__).resolve().parents[1]        # isr_web/
-WEBAPP = ROOT / "webapp"
+# Support both local development and Docker deployment paths
+if Path("/app/webapp").exists():
+    # Docker deployment
+    ROOT = Path("/app")
+    WEBAPP = ROOT / "webapp"
+else:
+    # Local development
+    ROOT = Path(__file__).resolve().parents[1]        # isr_web/
+    WEBAPP = ROOT / "webapp"
+
 ENV_PATH = ROOT / "environment.json"
 AI_SOLUTION_PATH = ROOT / "ai_solution.json"
 MISSION_PATH = ROOT / "mission_solution.json"

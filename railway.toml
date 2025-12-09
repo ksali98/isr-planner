@@ -10,9 +10,9 @@ dockerfilePath = "Dockerfile.railway"
 # Number of instances
 numReplicas = 1
 
-# Health check
+# Health check (increased timeout for Python app startup)
 healthcheckPath = "/health"
-healthcheckTimeout = 30
+healthcheckTimeout = 120
 
 # Restart policy
 restartPolicyType = "ON_FAILURE"

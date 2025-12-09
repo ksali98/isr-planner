@@ -22,11 +22,15 @@ COPY webapp/ /app/webapp/
 COPY path_planning_core/ /app/path_planning_core/
 
 # Create __init__.py files for proper imports
-RUN touch /app/__init__.py
-RUN touch /app/server/__init__.py
-RUN touch /app/webapp/__init__.py
-RUN touch /app/webapp/editor/__init__.py
-RUN touch /app/webapp/editor/solver/__init__.py
+RUN touch /app/__init__.py && \
+    touch /app/server/__init__.py && \
+    touch /app/server/agents/__init__.py && \
+    touch /app/server/solver/__init__.py && \
+    touch /app/server/database/__init__.py && \
+    touch /app/webapp/__init__.py && \
+    touch /app/webapp/editor/__init__.py && \
+    touch /app/webapp/editor/solver/__init__.py && \
+    touch /app/path_planning_core/__init__.py
 
 # Set Python path
 ENV PYTHONPATH=/app
@@ -35,8 +39,8 @@ ENV PYTHONPATH=/app
 ENV PORT=8893
 EXPOSE $PORT
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+# Health check (increased start-period for slow startup)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:$PORT/health || exit 1
 
 # Run the application - Railway provides $PORT
