@@ -24,6 +24,10 @@ root_path = Path(__file__).resolve().parents[3]
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
 
+# Add /app for Docker deployment
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
+
 # Import SAM navigation components - use boundary_navigation for proper SAM avoidance
 boundary_plan_path = None
 wrap_sams = None

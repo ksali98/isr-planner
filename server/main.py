@@ -34,9 +34,12 @@ from .solver.solver_bridge import (
 from .solver.trajectory_planner import ISRTrajectoryPlanner
 
 # Import polygon wrapping for visualization (same as delivery planner)
+# Add paths for both local dev and Docker deployment
 project_root = Path(__file__).parent.parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
 from path_planning_core.sam_wrapping import wrap_sams
 
 class SolveRequest(BaseModel):

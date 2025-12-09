@@ -19,6 +19,9 @@ import os
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+# Add /app for Docker deployment
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
 
 from path_planning_core.boundary_navigation import plan_path as boundary_plan_path
 

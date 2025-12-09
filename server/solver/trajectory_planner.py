@@ -17,6 +17,9 @@ project_root = os.path.dirname(
 )
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
+# Add /app for Docker deployment
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
 
 # Import boundary navigation directly - uses proper tangent-arc-tangent method
 from path_planning_core.boundary_navigation import plan_path as boundary_plan_path
