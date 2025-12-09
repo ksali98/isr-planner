@@ -35,8 +35,21 @@ class AgentState(dict):
 
 # ---------- LLM client ----------
 
-# Uses OPENAI_API_KEY from environment
-_client = OpenAI()
+# Lazy initialization - only create client when needed
+_client = None
+
+def _get_openai_client():
+    """Get OpenAI client (lazy initialization)."""
+    global _client
+    if _client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "OPENAI_API_KEY environment variable is not set. "
+                "This GPT-based agent requires OpenAI API access."
+            )
+        _client = OpenAI(api_key=api_key)
+    return _client
 
 
 def _summarize_env(env: Optional[Dict[str, Any]]) -> str:
@@ -151,7 +164,8 @@ def planner_agent(state: AgentState) -> AgentState:
 
     llm_messages: List[BaseMessage] = [system_message, context_message] + messages
 
-    resp = _client.chat.completions.create(
+    client = _get_openai_client()
+    resp = client.chat.completions.create(
         model="gpt-4.1-mini",  # user can change this
         messages=[m.to_dict() for m in llm_messages],
         temperature=0.3,
