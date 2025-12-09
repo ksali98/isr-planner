@@ -22,12 +22,20 @@ if "/app" not in sys.path:
 
 # Use the modular solver - import directly to avoid __init__.py pulling in matplotlib
 # Try importing from different paths (Docker vs local)
+OrienteeringSolverInterface = None
 try:
     # Docker path: /app/webapp/editor/solver/...
     from webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
-except ImportError:
-    # Local development path: isr_web/webapp/editor/solver/...
-    from isr_web.webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface  # type: ignore
+    print("✅ OrienteeringSolverInterface loaded (Docker path)")
+except ImportError as e:
+    print(f"⚠️ Docker import failed: {e}")
+    try:
+        # Local development path: isr_web/webapp/editor/solver/...
+        from isr_web.webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface  # type: ignore
+        print("✅ OrienteeringSolverInterface loaded (local path)")
+    except ImportError as e2:
+        print(f"⚠️ Local import failed: {e2}")
+        print("❌ OrienteeringSolverInterface not available - orienteering features disabled")
 
 # Import new solver components
 from .sam_distance_matrix import (
@@ -42,10 +50,14 @@ from .trajectory_planner import ISRTrajectoryPlanner
 # Import polygon wrapping for visualization
 from path_planning_core.sam_wrapping import wrap_sams
 
-# Single global solver instance
-print("📦 Initializing OrienteeringSolverInterface...", flush=True)
-_solver = OrienteeringSolverInterface()
-print("📦 Solver interface initialized", flush=True)
+# Single global solver instance (only if interface is available)
+_solver = None
+if OrienteeringSolverInterface is not None:
+    print("📦 Initializing OrienteeringSolverInterface...", flush=True)
+    _solver = OrienteeringSolverInterface()
+    print("📦 Solver interface initialized", flush=True)
+else:
+    print("⚠️ OrienteeringSolverInterface not available - solver bridge will have limited functionality", flush=True)
 
 # Cached distance matrix for current environment
 _cached_env_hash: Optional[str] = None
