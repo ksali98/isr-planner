@@ -47,18 +47,18 @@ class OrienteeringSolverInterface:
     def solve(self, env_data, fuel_budget):
         """
         Solve the orienteering problem for the given environment
-        
+
         Args:
             env_data: Dictionary containing environment data
                 - airports: List of airport dictionaries
-                - targets: List of target dictionaries  
+                - targets: List of target dictionaries
                 - sams: List of SAM dictionaries
                 - distance_matrix: Precomputed distance matrix
                 - matrix_labels: Labels for matrix rows/columns
                 - start_airport: Starting airport ID
                 - end_airport: Ending airport ID
             fuel_budget: Maximum fuel/distance allowed
-            
+
         Returns:
             Solution dictionary with:
                 - route: List of waypoint IDs in order
@@ -68,18 +68,82 @@ class OrienteeringSolverInterface:
         """
         if self.solver is None:
             raise RuntimeError("Orienteering solver not available")
-        
-        # Ensure required parameters are in env_data
-        env_data["fuel_budget"] = fuel_budget
-        
-        # Call the external solver
-        solution = self.solver(env_data, fuel_cap=fuel_budget)
-        
+
+        # Extract start position from airports
+        airports = env_data.get("airports", [])
+        start_airport_id = env_data.get("start_airport", "A1")
+        end_airport_id = env_data.get("end_airport", start_airport_id)
+
+        # Find start airport position
+        start = None
+        for airport in airports:
+            if airport.get("id") == start_airport_id:
+                start = {"x": airport["x"], "y": airport["y"]}
+                break
+
+        if start is None and airports:
+            # Fallback to first airport
+            start = {"x": airports[0]["x"], "y": airports[0]["y"]}
+        elif start is None:
+            start = {"x": 0, "y": 0}
+
+        # Build goals list from targets
+        targets = env_data.get("targets", [])
+        goals = []
+        for target in targets:
+            goals.append({
+                "x": target["x"],
+                "y": target["y"],
+                "label": target.get("id", target.get("label", f"T{len(goals)+1}")),
+                "priority": target.get("priority", 1)
+            })
+
+        # Call the external solver with correct signature
+        solution = self.solver(
+            start=start,
+            goals=goals,
+            score_matrix=env_data.get("distance_matrix"),
+            max_distance=fuel_budget
+        )
+
+        # Transform result to expected format
+        route = []
+        visited_targets = solution.get("visited_goals", [])
+
+        # Build route: start -> visited targets -> end
+        route.append(start_airport_id)
+        route.extend(visited_targets)
+        if end_airport_id and end_airport_id != "-":
+            route.append(end_airport_id)
+
+        # Calculate total distance from path
+        path = solution.get("path", [])
+        total_distance = 0.0
+        for i in range(len(path) - 1):
+            p1, p2 = path[i], path[i+1]
+            dist = np.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
+            total_distance += dist
+
+        # Calculate total points
+        target_map = {t.get("id", t.get("label")): t for t in targets}
+        total_points = sum(
+            target_map.get(tid, {}).get("priority", 1)
+            for tid in visited_targets
+            if tid in target_map
+        )
+
+        result = {
+            "route": route,
+            "distance": total_distance,
+            "total_points": total_points,
+            "visited_targets": visited_targets
+        }
+
         # Validate solution doesn't exceed fuel budget
-        if solution['distance'] > fuel_budget:
-            print(f"⚠️ Solution exceeds fuel budget: {solution['distance']:.1f} > {fuel_budget}")
-        
-        return solution
+        if result['distance'] > fuel_budget:
+            print(f"⚠️ Solution exceeds fuel budget: {result['distance']:.1f} > {fuel_budget}")
+
+        return result
     
     def find_valid_fuel_solution(self, env_data, fuel_budget, max_iterations=10):
         """
