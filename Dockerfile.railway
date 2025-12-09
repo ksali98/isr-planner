@@ -23,6 +23,9 @@ COPY webapp/ /app/webapp/
 # Create __init__.py files for proper imports
 RUN touch /app/__init__.py
 RUN touch /app/server/__init__.py
+RUN touch /app/webapp/__init__.py
+RUN touch /app/webapp/editor/__init__.py
+RUN touch /app/webapp/editor/solver/__init__.py
 
 # Set Python path
 ENV PYTHONPATH=/app
