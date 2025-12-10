@@ -518,17 +518,45 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
         # Build solver environment
         if solver and dist_matrix:
             try:
-                # Build matrix data
-                labels = list(dist_matrix.keys())
-                matrix = [[dist_matrix[f].get(t, 1000) for t in labels] for f in labels]
+                # --- Build FILTERED matrix data ---
+                all_labels = list(dist_matrix.keys())
 
-                # Filter targets to only those allocated
-                targets = [t for t in env.get("targets", [])
-                          if str(t.get("id", t.get("label"))) in target_ids]
+                # For this drone, we only care about its home airport + its allocated targets
+                requested_labels = [home_airport] + list(target_ids)
+
+                # Keep only labels that actually exist in the distance matrix
+                labels = [lab for lab in requested_labels if lab in all_labels]
+
+                if not labels or home_airport not in labels:
+                    print(
+                        f"⚠️ [ROUTE_OPTIMIZER] No valid labels for D{did} "
+                        f"(home={home_airport}, targets={target_ids})",
+                        file=sys.stderr,
+                    )
+                    routes[did] = {
+                        "route": [home_airport],
+                        "distance": 0.0,
+                        "total_points": 0,
+                        "visited_targets": [],
+                    }
+                    continue
+
+                # Build submatrix only over these labels
+                matrix = [
+                    [dist_matrix[r].get(c, 1000) for c in labels]
+                    for r in labels
+                ]
+
+                # Filter targets to only those allocated (env target dicts)
+                targets = [
+                    t for t in env.get("targets", [])
+                    if str(t.get("id", t.get("label"))) in target_ids
+                ]
 
                 solver_env = {
                     "airports": env.get("airports", []),
                     "targets": targets,
+                    # NOTE: the interface will convert 'matrix' -> 'distance_matrix'
                     "matrix": matrix,
                     "matrix_labels": labels,
                     "start_airport": home_airport,
