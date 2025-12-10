@@ -44,100 +44,85 @@ class OrienteeringSolverInterface:
                 print("❌ Error: Could not import REAL orienteering solver")
                 print("   The solver should be at: orienteering_with_matrix.py (project root)")
                 self.solver = None
+                
+class OrienteeringSolverInterface:
+    def __init__(self):
+        self.solver = None
+        self._import_solver()
+
+    def _import_solver(self):
+        """Import the REAL orienteering solver (Held-Karp DP algorithm)."""
+        # The REAL solver is at project root: orienteering_with_matrix.py
+        try:
+            # Docker path: /app/orienteering_with_matrix.py
+            from orienteering_with_matrix import solve_orienteering_with_matrix
+            self.solver = solve_orienteering_with_matrix
+            print("✅ REAL Orienteering solver loaded (Held-Karp DP)")
+        except ImportError as e1:
+            print(f"⚠️ Direct import failed: {e1}")
+            try:
+                from isr_web.orienteering_with_matrix import solve_orienteering_with_matrix
+                self.solver = solve_orienteering_with_matrix
+                print("✅ REAL Orienteering solver loaded (from isr_web.orienteering_with_matrix)")
+            except ImportError as e2:
+                print(f"⚠️ Local import failed: {e2}")
+                print("❌ Error: Could not import REAL orienteering solver")
+                print("   The solver should be at: orienteering_with_matrix.py (project root)")
+                self.solver = None
 
     def solve(self, env_data, fuel_budget):
         """
-        Solve the orienteering problem using Held-Karp DP algorithm.
+        Call the REAL Held–Karp orienteering solver.
 
-        Args:
-            env_data: Dictionary containing environment data
-                - airports: List of airport dictionaries with id, x, y
-                - targets: List of target dictionaries with id, x, y, priority
-                - sams: List of SAM dictionaries (optional)
-                - distance_matrix: 2D distance matrix (list of lists)
-                - matrix_labels: Labels for matrix rows/columns
-                - start_airport: Starting airport ID
-                - end_airport: Ending airport ID
-            fuel_budget: Maximum fuel/distance allowed
-
-        Returns:
-            Solution dictionary with:
-                - route: List of waypoint IDs in order
-                - distance: Total distance of route
-                - total_points: Total priority points collected
-                - visited_targets: List of visited target IDs
+        env_data is expected to contain:
+          - airports: list of airport dicts
+          - targets: list of target dicts
+          - distance_matrix: full matrix (airports + targets), or 'matrix'
+          - matrix_labels: labels for rows/cols of the matrix, or 'labels'
+          - start_airport: ID of the starting airport (e.g., "A1")
+          - end_airport: ID of the ending airport (default = start_airport)
+          - mode: "return" or "open" (optional)
         """
         if self.solver is None:
             raise RuntimeError("Orienteering solver not available - check imports")
 
-        # Build environment dict in the format the REAL solver expects
         airports = env_data.get("airports", [])
         targets = env_data.get("targets", [])
+
         start_airport_id = env_data.get("start_airport", "A1")
         end_airport_id = env_data.get("end_airport", start_airport_id)
+        mode = env_data.get("mode", "return")
 
-        # The REAL solver expects 'matrix' key, not 'distance_matrix'
-        matrix = env_data.get("distance_matrix", env_data.get("matrix", []))
-        labels = env_data.get("matrix_labels", env_data.get("labels", []))
+        # The REAL solver expects 'distance_matrix' and 'matrix_labels'
+        matrix = env_data.get("distance_matrix") or env_data.get("matrix")
+        labels = env_data.get("matrix_labels") or env_data.get("labels")
 
-        # Build solver environment
+        if matrix is None or labels is None:
+            raise ValueError(
+                "OrienteeringInterface.solve: distance_matrix and matrix_labels "
+                "must be provided in env_data."
+            )
+
+        # Build environment for the REAL solver
         solver_env = {
             "airports": airports,
             "targets": targets,
-            "matrix": matrix,
+            "distance_matrix": matrix,   # REQUIRED by /app/orienteering_with_matrix.py
             "matrix_labels": labels,
             "start_airport": start_airport_id,
             "end_airport": end_airport_id,
-            "fuel_budget": fuel_budget,
         }
 
-        # Determine mode based on start/end airports
-        if end_airport_id == start_airport_id or end_airport_id == "-":
-            mode = "return"  # Round trip
-            end_id = None
-        else:
-            mode = "end"  # Fixed endpoint
-            end_id = end_airport_id
-
-        print(f"🧠 Calling REAL solver with mode={mode}, fuel_cap={fuel_budget}")
-        print(f"   Start: {start_airport_id}, End: {end_airport_id or start_airport_id}")
-        print(f"   Targets: {len(targets)}, Matrix size: {len(matrix)}x{len(matrix[0]) if matrix else 0}")
-
-        # Call the REAL Held-Karp solver
+        # Call the real Held–Karp solver
         solution = self.solver(
             env=solver_env,
             start_id=start_airport_id,
             mode=mode,
             fuel_cap=fuel_budget,
-            end_id=end_id
+            end_id=end_airport_id,
         )
 
-        # The REAL solver returns:
-        # {
-        #     "sequence": "A1 T2 T5 A1",
-        #     "route": ["A1", "T2", "T5", "A1"],
-        #     "distance": 123.4,
-        #     "total_points": 15,
-        #     "visited_targets": ["T2", "T5"],
-        #     "start_airport": "A1",
-        #     "end_airport": "A1"
-        # }
-
-        result = {
-            "route": solution.get("route", [start_airport_id]),
-            "distance": solution.get("distance", 0.0),
-            "total_points": solution.get("total_points", 0),
-            "visited_targets": solution.get("visited_targets", [])
-        }
-
-        print(f"✅ Solver result: {len(result['visited_targets'])} targets, "
-              f"{result['total_points']} points, {result['distance']:.1f} distance")
-
-        # Validate solution doesn't exceed fuel budget
-        if result['distance'] > fuel_budget:
-            print(f"⚠️ WARNING: Solution exceeds fuel budget: {result['distance']:.1f} > {fuel_budget}")
-
-        return result
+        return solution
 
     def find_valid_fuel_solution(self, env_data, fuel_budget, max_iterations=10):
         """
