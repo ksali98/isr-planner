@@ -432,20 +432,104 @@ def _exit_tangent_continues_toward_goal(
     Check if exiting from tangent_vertex toward goal continues forward.
 
     The drone arrives at tangent_vertex from the polygon boundary (prev_vertex).
-    Check if going from tangent_vertex to goal continues in roughly the same direction
-    (doesn't reverse).
+    Check if going from tangent_vertex to goal continues in roughly the same
+    direction (doesn't reverse).
+
+    We use the sign of the dot product between:
+      - arrival_vec: prev_vertex -> tangent_vertex
+      - exit_vec:    tangent_vertex -> goal
+
+    If dot < 0, angle > 90 degrees => reversal => REJECT.
     """
     # Arrival direction (from previous polygon vertex to tangent)
-    arrival_vec = (tangent_vertex[0] - prev_vertex[0], tangent_vertex[1] - prev_vertex[1])
+    arrival_vec = (
+        tangent_vertex[0] - prev_vertex[0],
+        tangent_vertex[1] - prev_vertex[1],
+    )
     # Exit direction (from tangent to goal)
-    exit_vec = (goal[0] - tangent_vertex[0], goal[1] - tangent_vertex[1])
+    exit_vec = (
+        goal[0] - tangent_vertex[0],
+        goal[1] - tangent_vertex[1],
+    )
 
     dot = _dot_product(arrival_vec, exit_vec)
 
     if debug:
-        print(f"    Exit direction check: arrival={arrival_vec}, exit={exit_vec}, dot={dot:.2f}")
+        print(
+            f"    Exit direction check: arrival={arrival_vec}, "
+            f"exit={exit_vec}, dot={dot:.2f}"
+        )
 
-    return dot >= 0  # Allow up to 90 degree turn
+    # dot < 0 → angle > 90° → reversal → reject
+    return dot >= 0.0
+
+def _entry_tangent_continues_forward(
+    start: Point,
+    first_vertex: Point,
+    second_vertex: Point,
+    debug: bool = False
+) -> bool:
+    """
+    Check if ENTERING the polygon boundary continues forward.
+
+    We compare:
+      - arrival_vec:  start -> first_vertex (entry direction)
+      - boundary_vec: first_vertex -> second_vertex (direction of boundary walk)
+
+    If the dot product is negative, the entry would reverse direction
+    (angle > 90°) and must be rejected.
+    """
+    arrival_vec = (
+        first_vertex[0] - start[0],
+        first_vertex[1] - start[1],
+    )
+    boundary_vec = (
+        second_vertex[0] - first_vertex[0],
+        second_vertex[1] - first_vertex[1],
+    )
+
+    dot = _dot_product(arrival_vec, boundary_vec)
+
+    if debug:
+        print(
+            f"    Entry direction check: arrival={arrival_vec}, "
+            f"boundary={boundary_vec}, dot={dot:.2f}"
+        )
+
+    # dot < 0 → angle > 90° → reversal → reject
+    return dot >= 0.0
+
+def _entry_tangent_continues_forward(
+    start: Point,
+    first_vertex: Point,
+    second_vertex: Point,
+    debug: bool = False
+) -> bool:
+    """
+    Ensure that when we ENTER the polygon boundary we do not reverse direction.
+
+    We look at:
+      - arrival_vec: from start to first boundary vertex (entry),
+      - boundary_vec: from first vertex to second vertex (direction of travel on boundary).
+
+    If the dot product is negative, we are turning back on ourselves
+    (angle > 90°) -> reject.
+    """
+    arrival_vec = (first_vertex[0] - start[0],
+                   first_vertex[1] - start[1])
+    boundary_vec = (second_vertex[0] - first_vertex[0],
+                    second_vertex[1] - first_vertex[1])
+
+    dot = _dot_product(arrival_vec, boundary_vec)
+
+    if debug:
+        print(
+            f"    Entry direction check: arrival={arrival_vec}, "
+            f"boundary={boundary_vec}, dot={dot:.2f}"
+        )
+
+    # dot < 0 -> angle > 90° -> reversal -> reject
+    return dot >= 0.0
 
 
 def _find_first_visible_exit(
@@ -490,7 +574,6 @@ def _find_first_visible_exit(
         print(f"    No visible exit found after walking entire polygon")
     return -1, []
 
-
 def _navigate_around_single_polygon(
     start: Point,
     goal: Point,
@@ -500,22 +583,29 @@ def _navigate_around_single_polygon(
     """
     Navigate from start to goal around a single convex polygon.
 
-    CRITICAL CHANGE: Always try BOTH directions (CW and CCW) from each tangent
-    and pick the SHORTEST valid path. The user explicitly requested:
-    "The drone should calculate both and use the shorter distance."
+    CRITICAL BEHAVIOR (per user requirements):
+    - Never enter the polygon interior (SAM zone).
+    - When ENTERING the boundary: do not reverse direction.
+    - When EXITING the boundary: do not reverse direction.
+    - Try both tangents (left/right) and both directions (CW/CCW),
+      then pick the SHORTEST valid path.
 
     Algorithm:
-    1. Find two tangent vertices from start (left and right)
-    2. For each tangent that doesn't fly AWAY from goal:
-       - Try BOTH CW and CCW directions
-       - For each direction, walk until first vertex that can see goal
-       - Record all valid paths
-    3. Pick the shortest valid path among ALL candidates
-
-    Returns (path, distance, method)
+      1. Find the two tangent vertices from start (left and right).
+      2. For each start tangent that does NOT fly away from the goal:
+           - Try CW and CCW walks along the boundary to find the first
+             vertex that can see the goal.
+           - For each arc candidate:
+               * Enforce entry-direction check (no reversal at entry).
+               * Enforce exit-direction check (no reversal at exit).
+               * Build full path start → arc → goal.
+               * Keep only paths that pass polygon intersection validation.
+      3. If no candidates, run a broader fallback search.
+      4. Return the shortest valid path.
     """
     n = len(polygon)
     if n < 3:
+        # Degenerate polygon – just go direct
         return [start, goal], _distance(start, goal), "direct (degenerate polygon)"
 
     # Find tangent vertices from start
@@ -523,92 +613,153 @@ def _navigate_around_single_polygon(
 
     if debug:
         print(f"  Start: {start}, Goal: {goal}")
-        print(f"  Start tangents: left={start_left_idx} at {polygon[start_left_idx]}, right={start_right_idx} at {polygon[start_right_idx]}")
+        print(
+            f"  Start tangents: left={start_left_idx} at {polygon[start_left_idx]}, "
+            f"right={start_right_idx} at {polygon[start_right_idx]}"
+        )
 
-    candidate_paths = []
+    candidate_paths: List[Tuple[List[Point], float, str]] = []
 
-    # Try each start tangent
-    for start_tangent_idx, tangent_name in [(start_left_idx, "left"), (start_right_idx, "right")]:
+    # Try each start tangent: left and right
+    for start_tangent_idx, tangent_name in [
+        (start_left_idx, "left"),
+        (start_right_idx, "right"),
+    ]:
         tangent_vertex = polygon[start_tangent_idx]
 
-        # CRITICAL: Reject tangents that cause the drone to fly AWAY from the goal
-        if not _tangent_continues_toward_goal(start, tangent_vertex, goal, debug=debug):
+        # Reject tangents that cause the drone to fly AWAY from the goal
+        if not _tangent_continues_toward_goal(
+            start, tangent_vertex, goal, debug=debug
+        ):
             if debug:
-                print(f"  REJECTED {tangent_name} tangent (idx={start_tangent_idx}): would fly away from goal")
+                print(
+                    f"  REJECTED {tangent_name} tangent (idx={start_tangent_idx}): "
+                    f"would fly away from goal"
+                )
             continue
 
         if debug:
             print(f"  Trying {tangent_name} tangent (idx={start_tangent_idx})")
 
-        # TRY BOTH DIRECTIONS - always calculate both and pick shorter
-        for direction in ['cw', 'ccw']:
-            exit_idx, arc = _find_first_visible_exit(polygon, start_tangent_idx, direction, goal, debug=debug)
+        # TRY BOTH DIRECTIONS - CW and CCW
+        for direction in ["cw", "ccw"]:
+            exit_idx, arc = _find_first_visible_exit(
+                polygon, start_tangent_idx, direction, goal, debug=debug
+            )
 
             if exit_idx == -1:
                 if debug:
-                    print(f"    No visible exit found walking {direction.upper()} from {tangent_name} tangent")
+                    print(
+                        f"    No visible exit found walking "
+                        f"{direction.upper()} from {tangent_name} tangent"
+                    )
                 continue
 
-            # CRITICAL: Check if exit direction causes backtracking
-            # The drone arrives at the exit vertex from the previous vertex in the arc
-            # Check that exiting toward goal doesn't reverse direction
+            # --- ENTRY ANGLE CHECK ---
+            # We require at least 2 vertices to define the boundary direction.
             if len(arc) >= 2:
-                prev_vertex = arc[-2]  # Second-to-last vertex in arc
-                exit_vertex = arc[-1]  # Last vertex = exit point
-                if not _exit_tangent_continues_toward_goal(exit_vertex, goal, prev_vertex, debug=debug):
+                first_vertex = arc[0]
+                second_vertex = arc[1]
+                if not _entry_tangent_continues_forward(
+                    start, first_vertex, second_vertex, debug=debug
+                ):
                     if debug:
-                        print(f"    REJECTED {direction.upper()} via {tangent_name}: exit would reverse direction")
+                        print(
+                            f"    REJECTED {direction.upper()} via {tangent_name}: "
+                            f"entry would reverse direction"
+                        )
                     continue
 
-            # Build the full path
+            # --- EXIT ANGLE CHECK ---
+            if len(arc) >= 2:
+                prev_vertex = arc[-2]   # second-to-last boundary vertex
+                exit_vertex = arc[-1]   # exit vertex
+                if not _exit_tangent_continues_toward_goal(
+                    exit_vertex, goal, prev_vertex, debug=debug
+                ):
+                    if debug:
+                        print(
+                            f"    REJECTED {direction.upper()} via {tangent_name}: "
+                            f"exit would reverse direction"
+                        )
+                    continue
+
+            # Build the full candidate path: start → arc → goal
             path = [start] + arc + [goal]
             length = _path_length(path)
-            method = f"{direction.upper()} via {tangent_name} tangent, exit at idx {exit_idx}"
+            method = (
+                f"{direction.upper()} via {tangent_name} tangent, exit at idx {exit_idx}"
+            )
 
-            # Validate the path doesn't cross the polygon
+            # Validate the path doesn't cross / enter the polygon
             if _validate_path(path, [polygon]):
                 candidate_paths.append((path, length, method))
                 if debug:
-                    print(f"    Valid path: {method}, length={length:.2f}, waypoints={len(path)}")
+                    print(
+                        f"    Valid path: {method}, length={length:.2f}, "
+                        f"waypoints={len(path)}"
+                    )
             elif debug:
                 print(f"    Invalid path: {method} - crosses polygon")
 
+    # If nothing survived the strict checks, try a broader fallback
     if not candidate_paths:
         if debug:
-            print(f"  No valid paths found! Trying all combinations as fallback...")
+            print(
+                "  No valid paths found under strict rules. "
+                "Trying all combinations as fallback..."
+            )
 
-        # Fallback: try both directions from both start tangents (even rejected ones)
-        for start_tangent_idx, tangent_name in [(start_left_idx, "left"), (start_right_idx, "right")]:
-            for direction in ['cw', 'ccw']:
-                exit_idx, arc = _find_first_visible_exit(polygon, start_tangent_idx, direction, goal, debug=debug)
+        for start_tangent_idx, tangent_name in [
+            (start_left_idx, "left"),
+            (start_right_idx, "right"),
+        ]:
+            for direction in ["cw", "ccw"]:
+                exit_idx, arc = _find_first_visible_exit(
+                    polygon, start_tangent_idx, direction, goal, debug=debug
+                )
 
-                if exit_idx == -1:
+                if exit_idx == -1 or not arc:
                     continue
 
                 path = [start] + arc + [goal]
                 length = _path_length(path)
-                method = f"FALLBACK {direction.upper()} via {tangent_name}, exit at idx {exit_idx}"
+                method = (
+                    f"FALLBACK {direction.upper()} via {tangent_name}, "
+                    f"exit at idx {exit_idx}"
+                )
 
                 if _validate_path(path, [polygon]):
                     candidate_paths.append((path, length, method))
+                    if debug:
+                        print(
+                            f"    Fallback valid path: {method}, "
+                            f"length={length:.2f}, waypoints={len(path)}"
+                        )
+                elif debug:
+                    print(f"    Fallback invalid path: {method} - crosses polygon")
 
+    # Still nothing? Report failure clearly.
     if not candidate_paths:
         if debug:
-            print(f"  No valid paths found even with fallback!")
-        return [], float('inf'), "INVALID: no valid path around polygon"
+            print("  No valid paths found even with fallback!")
+        return [], float("inf"), "INVALID: no valid path around polygon"
 
     # Pick the shortest valid path
-    best_path, best_length, best_method = min(candidate_paths, key=lambda x: x[1])
+    best_path, best_length, best_method = min(
+        candidate_paths, key=lambda x: x[1]
+    )
 
     if debug:
         print(f"  Best path: {best_method}, length={best_length:.2f}")
         # Also show all candidates for debugging
-        print(f"  All candidates:")
+        print("  All candidates:")
         for path, length, method in sorted(candidate_paths, key=lambda x: x[1]):
-            print(f"    - {method}: {length:.2f} ({len(path)} waypoints)")
+            print(
+                f"    - {method}: {length:.2f} ({len(path)} waypoints)"
+            )
 
     return best_path, best_length, best_method
-
 
 # ---------- Multi-Polygon Navigation using Visibility Graph ----------
 
@@ -701,7 +852,6 @@ def _build_visibility_graph(
                 graph[b].append((a, dist))
 
     return graph
-
 
 def _dijkstra(
     graph: Dict[Point, List[Tuple[Point, float]]],
@@ -850,7 +1000,6 @@ def _segment_enters_polygon(a: Point, b: Point, polygon: Polygon, n_samples: int
                 return True
 
     return False
-
 
 def _validate_path(path: List[Point], polygons: List[Polygon], debug: bool = False) -> bool:
     """
