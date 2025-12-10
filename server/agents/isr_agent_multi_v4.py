@@ -865,25 +865,129 @@ def run_multi_agent_v4(
     Args:
         user_message: The user's request
         environment: Environment data (airports, targets, sams)
-        drone_configs: Drone configurations
+        drone_configs: Drone configurations from the UI
         distance_matrix: Optional precomputed distance matrix
 
     Returns:
         Result dictionary with response, routes, trajectories, etc.
     """
     print(f"\n{'='*60}", file=sys.stderr)
-    print(f"[v4] Processing: {user_message[:50]}...", file=sys.stderr)
+    print(f"[v4] Processing: {user_message[:80]}...", file=sys.stderr)
     print(f"{'='*60}", file=sys.stderr)
     sys.stderr.flush()
 
-    # Build initial state
+    # ------------------------------------------------------------------
+    # 1) Normalize inputs
+    # ------------------------------------------------------------------
+    env: Dict[str, Any] = environment or {}
+    ui_configs: Dict[str, Any] = drone_configs or {}
+
+    # Translate UI configs into what v4 expects:
+    # UI:  enabled, fuel_budget, start_airport, end_airport, target_access:{a..e}
+    # v4:  enabled, fuelBudget, home_airport, accessible_targets:['A','B',...]
+    normalized_configs: Dict[str, Dict[str, Any]] = {}
+
+    for did, cfg in ui_configs.items():
+        if cfg is None:
+            continue
+
+        # Make a shallow copy so we don't mutate the original
+        nc: Dict[str, Any] = dict(cfg)
+
+        # Ensure ID is a string like "1", "2", ...
+        did_str = str(did)
+
+        # Fuel budget: accept both "fuelBudget" and "fuel_budget"
+        fuel_budget = (
+            cfg.get("fuelBudget")
+            if cfg.get("fuelBudget") is not None
+            else cfg.get("fuel_budget")
+        )
+        if fuel_budget is not None:
+            nc["fuelBudget"] = fuel_budget
+
+        # Home airport: map from start_airport if not already set
+        home_ap = (
+            cfg.get("homeAirport")
+            or cfg.get("home_airport")
+            or cfg.get("start_airport")
+            or cfg.get("startAirport")
+        )
+        if home_ap:
+            nc["home_airport"] = home_ap
+
+        # Accessible targets: build list from target_access dict if present
+        if "accessible_targets" not in nc and "accessibleTargets" not in nc:
+            ta = cfg.get("target_access")
+            if isinstance(ta, dict):
+                accessible = [str(k).upper() for k, v in ta.items() if v]
+                nc["accessible_targets"] = accessible
+
+        normalized_configs[did_str] = nc
+
+    # ------------------------------------------------------------------
+    # 2) Build / compute distance matrix (so the HK solver can run)
+    # ------------------------------------------------------------------
+    dist_matrix: Dict[str, Dict[str, float]]
+
+    if distance_matrix:
+        # Use provided matrix if given
+        dist_matrix = distance_matrix
+    else:
+        sams = env.get("sams", [])
+        try:
+            if sams:
+                print("🎯 [v4] Computing SAM-aware distance matrix...", file=sys.stderr)
+                dist_data = calculate_sam_aware_matrix(env)
+                labels = dist_data.get("labels", [])
+                matrix = dist_data.get("matrix", [])
+                dist_matrix = {}
+                for i, from_id in enumerate(labels):
+                    dist_matrix[from_id] = {}
+                    for j, to_id in enumerate(labels):
+                        dist_matrix[from_id][to_id] = float(matrix[i][j])
+            else:
+                print("📏 [v4] Computing Euclidean distance matrix...", file=sys.stderr)
+                # Simple Euclidean fallback (similar to v3)
+                waypoints: Dict[str, Tuple[float, float]] = {}
+
+                for airport in env.get("airports", []):
+                    aid = airport.get("id", airport.get("label", "A1"))
+                    waypoints[str(aid)] = (
+                        float(airport.get("x", 0.0)),
+                        float(airport.get("y", 0.0)),
+                    )
+
+                for target in env.get("targets", []):
+                    tid = target.get("id", target.get("label", "T?"))
+                    waypoints[str(tid)] = (
+                        float(target.get("x", 0.0)),
+                        float(target.get("y", 0.0)),
+                    )
+
+                dist_matrix = {}
+                for from_id, (x1, y1) in waypoints.items():
+                    dist_matrix[from_id] = {}
+                    for to_id, (x2, y2) in waypoints.items():
+                        if from_id == to_id:
+                            dist_matrix[from_id][to_id] = 0.0
+                        else:
+                            dist = math.hypot(x2 - x1, y2 - y1)
+                            dist_matrix[from_id][to_id] = float(dist)
+        except Exception as e:
+            print(f"⚠️ [v4] Failed to compute distance matrix: {e}", file=sys.stderr)
+            dist_matrix = {}
+
+    # ------------------------------------------------------------------
+    # 3) Build initial mission state for the v4 workflow
+    # ------------------------------------------------------------------
     initial_state: MissionState = {
         "messages": [HumanMessage(content=user_message)],
-        "environment": environment,
-        "drone_configs": drone_configs,
-        "distance_matrix": distance_matrix,
+        "environment": env,
+        "drone_configs": normalized_configs,
+        "distance_matrix": dist_matrix,
         "user_request": user_message,
-        "request_type": "optimize",
+        "request_type": "optimize",  # default; strategist can refine
         "commands": None,
         "strategy_analysis": None,
         "allocation_reasoning": None,
@@ -896,8 +1000,10 @@ def run_multi_agent_v4(
         "error": None,
     }
 
-    # Build and run workflow
-    workflow = build_reasoning_workflow()
+    # ------------------------------------------------------------------
+    # 4) Run the multi-agent workflow
+    # ------------------------------------------------------------------
+    workflow = get_workflow()
 
     try:
         final_state = workflow.invoke(initial_state)
@@ -907,32 +1013,42 @@ def run_multi_agent_v4(
             "response": f"Error processing request: {str(e)}",
             "routes": {},
             "total_points": 0,
-            "total_fuel": 0,
+            "total_fuel": 0.0,
             "trajectories": {},
         }
 
-    # Extract results
-    routes = final_state.get("routes", {})
+    # ------------------------------------------------------------------
+    # 5) Extract routes, compute totals and trajectories
+    # ------------------------------------------------------------------
+    routes = final_state.get("routes", {}) or {}
     response_text = final_state.get("final_response", "No response generated")
 
-    # Calculate totals
     total_points = 0
     total_fuel = 0.0
-    trajectories = {}
+    trajectories: Dict[str, List[List[float]]] = {}
 
     for did, route_data in routes.items():
-        total_points += route_data.get("total_points", 0)
-        total_fuel += route_data.get("distance", 0)
+        if not isinstance(route_data, dict):
+            continue
 
-        # Build trajectory (simplified - just waypoint coordinates)
-        route = route_data.get("route", [])
-        traj_points = []
+        points = route_data.get("total_points", 0) or 0
+        distance = route_data.get("distance", 0.0) or 0.0
+
+        total_points += points
+        total_fuel += distance
+
+        # Build trajectory as a list of [x, y] waypoints
+        route = route_data.get("route", []) or []
+        traj_points: List[List[float]] = []
         for wp_id in route:
-            pos = get_waypoint_position(wp_id, environment)
-            if pos:
+            pos = get_waypoint_position(str(wp_id), env)
+            if pos is not None:
                 traj_points.append(pos)
-        trajectories[f"D{did}"] = traj_points
+        trajectories[str(did)] = traj_points
 
+    # ------------------------------------------------------------------
+    # 6) Return unified result
+    # ------------------------------------------------------------------
     return {
         "response": response_text,
         "routes": routes,
@@ -941,8 +1057,11 @@ def run_multi_agent_v4(
         "trajectories": trajectories,
         "allocation": final_state.get("allocation", {}),
         "suggestions": final_state.get("suggestions", []),
+        "strategy_analysis": final_state.get("strategy_analysis"),
+        "allocation_reasoning": final_state.get("allocation_reasoning"),
+        "route_analysis": final_state.get("route_analysis"),
+        "critic_review": final_state.get("critic_review"),
     }
-
 
 def get_waypoint_position(wp_id: str, env: Dict[str, Any]) -> Optional[List[float]]:
     """Get position of a waypoint by ID."""
