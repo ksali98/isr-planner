@@ -6,6 +6,10 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
+# Copy Held–Karp orienteering solver to container root so
+# `from orienteering_with_matrix import ...` works.
+COPY orienteering_with_matrix.py /app/orienteering_with_matrix.py
+
 # Install system dependencies (including tkinter for matplotlib)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
@@ -44,9 +48,5 @@ ENV PYTHONPATH=/app
 ENV PORT=8893
 EXPOSE $PORT
 
-# Railway provides PORT at runtime, remove HEALTHCHECK (Railway handles it via healthcheckPath)
-# The Dockerfile HEALTHCHECK doesn't have access to runtime PORT variable
-
 # Run the application - Railway provides $PORT at runtime
-# Use shell form (not exec form) so environment variables are expanded
 CMD python -m uvicorn server.main:app --host 0.0.0.0 --port ${PORT:-8893}
