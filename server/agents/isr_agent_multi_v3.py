@@ -307,7 +307,6 @@ Requested optimization: {opt_type}
 INSTRUCTION TO OPTIMIZER: You MUST call the tool: {tool_to_use}
 """
 
-
 @tool
 def get_mission_info() -> str:
     """
@@ -317,7 +316,8 @@ def get_mission_info() -> str:
     airports, SAMs, fuel budgets, and current state of the mission.
 
     Returns:
-        Detailed mission information including all drone configs and environment data.
+        Detailed mission information including all drone configs, environment data,
+        and derived metrics/geometry useful for reasoning.
     """
     state = get_state()
     env = state.get("environment", {})
@@ -325,20 +325,21 @@ def get_mission_info() -> str:
     routes = state.get("routes", {})
     allocation = state.get("allocation", {})
 
-    # Environment details
     airports = env.get("airports", [])
     targets = env.get("targets", [])
     sams = env.get("sams", [])
 
-    lines = [
-        "=" * 60,
-        "CURRENT MISSION CONFIGURATION",
-        "=" * 60,
-        "",
-        "ENVIRONMENT:",
-        f"  Airports: {len(airports)}",
-    ]
+    lines: List[str] = []
+    lines.append("=" * 60)
+    lines.append("MISSION INFO SNAPSHOT")
+    lines.append("=" * 60)
+    lines.append("")
 
+    # ------------------------------------------------------------
+    # ENVIRONMENT SUMMARY
+    # ------------------------------------------------------------
+    lines.append("ENVIRONMENT:")
+    lines.append(f"  Airports: {len(airports)}")
     for ap in airports:
         ap_id = ap.get("id", ap.get("label", "?"))
         lines.append(f"    - {ap_id}: ({ap.get('x', 0):.1f}, {ap.get('y', 0):.1f})")
@@ -349,43 +350,76 @@ def get_mission_info() -> str:
         t_id = t.get("id", t.get("label", "?"))
         priority = t.get("priority", t.get("value", 5))
         total_priority += priority
-        lines.append(f"    - {t_id}: priority={priority}, pos=({t.get('x', 0):.1f}, {t.get('y', 0):.1f})")
+        lines.append(
+            f"    - {t_id}: priority={priority}, type={t.get('type', '?')}, "
+            f"pos=({t.get('x', 0):.1f}, {t.get('y', 0):.1f})"
+        )
 
-    lines.append(f"  Total Priority Points: {total_priority}")
-    lines.append(f"  SAMs/NFZs: {len(sams)}")
-    for sam in sams:
-        pos = sam.get("pos", [0, 0])
-        lines.append(f"    - Range: {sam.get('range', 0)}, pos=({pos[0]:.1f}, {pos[1]:.1f})")
+    lines.append(f"  Total Priority Points (all targets): {total_priority}")
 
+    if sams:
+        lines.append(f"  SAM Sites: {len(sams)}")
+        for sam in sams:
+            pos = sam.get("pos", [sam.get("x", 0), sam.get("y", 0)])
+            lines.append(
+                f"    - id={sam.get('id', '?')}, range={sam.get('range', 0)}, "
+                f"pos=({pos[0]:.1f}, {pos[1]:.1f})"
+            )
+    else:
+        lines.append("  SAM Sites: none defined")
+
+    # ------------------------------------------------------------
+    # DRONE CONFIGURATIONS
+    # ------------------------------------------------------------
     lines.append("")
     lines.append("DRONE CONFIGURATIONS:")
 
     if not configs:
         lines.append("  (No drone configurations set)")
     else:
-        for did in sorted(configs.keys()):
+        for did in sorted(
+            configs.keys(),
+            key=lambda x: int(str(x)) if str(x).isdigit() else str(x),
+        ):
             cfg = configs[did]
-            enabled = cfg.get("enabled", did == "1")
+            enabled = cfg.get("enabled", str(did) == "1")
             fuel = cfg.get("fuelBudget", cfg.get("fuel_budget", 200))
-            airport = cfg.get("homeAirport", cfg.get("home_airport", "A1"))
+            home_ap = cfg.get("homeAirport", cfg.get("home_airport", "A1"))
+            end_ap = cfg.get("end_airport", cfg.get("endAirport", home_ap))
             accessible = cfg.get("accessibleTargets", cfg.get("accessible_targets", []))
+            frozen_segments = cfg.get("frozen_segments", [])
 
             status = "ENABLED" if enabled else "DISABLED"
             lines.append(f"  D{did} [{status}]:")
-            lines.append(f"    - Home Airport: {airport}")
+            lines.append(f"    - Home Airport: {home_ap}")
+            lines.append(f"    - End Airport: {end_ap}")
             lines.append(f"    - Fuel Budget: {fuel}")
             if accessible:
-                lines.append(f"    - Accessible Targets: {', '.join(accessible)}")
+                lines.append(
+                    "    - Accessible Target Types: "
+                    + ", ".join(str(a) for a in accessible)
+                )
             else:
-                lines.append(f"    - Accessible Targets: ALL")
+                lines.append("    - Accessible Target Types: ALL")
+            if frozen_segments:
+                fs_desc = ", ".join(
+                    f"{seg.get('from','?')}->{seg.get('to','?')}"
+                    for seg in frozen_segments
+                )
+                lines.append(f"    - Frozen Segments: {fs_desc}")
 
-    # Current solution state
+    # ------------------------------------------------------------
+    # CURRENT SOLUTION STATE
+    # ------------------------------------------------------------
     lines.append("")
     lines.append("CURRENT SOLUTION STATE:")
 
     if allocation:
         lines.append("  Target Allocation:")
-        for did in sorted(allocation.keys()):
+        for did in sorted(
+            allocation.keys(),
+            key=lambda x: int(str(x)) if str(x).isdigit() else str(x),
+        ):
             tgts = allocation[did]
             lines.append(f"    D{did}: {', '.join(tgts) if tgts else '(none)'}")
     else:
@@ -393,19 +427,112 @@ def get_mission_info() -> str:
 
     if routes:
         lines.append("  Routes Computed:")
-        for did in sorted(routes.keys()):
+        for did in sorted(
+            routes.keys(),
+            key=lambda x: int(str(x)) if str(x).isdigit() else str(x),
+        ):
             route_data = routes[did]
             route = route_data.get("route", [])
-            dist = route_data.get("distance", 0)
+            dist = route_data.get("distance", route_data.get("fuel_used", 0))
             points = route_data.get("total_points", 0)
-            lines.append(f"    D{did}: {' -> '.join(route)} (dist={dist:.1f}, points={points})")
+            feasible = route_data.get("feasible", True)
+            route_str = " -> ".join(route) if route else "(empty)"
+            lines.append(
+                f"    D{did}: {route_str} "
+                f"(dist={float(dist):.1f}, points={points}, feasible={feasible})"
+            )
     else:
         lines.append("  Routes: Not computed yet")
+
+    # ------------------------------------------------------------
+    # DERIVED METRICS & GEOMETRY (from mission_tools)
+    # ------------------------------------------------------------
+    try:
+        # Build a minimal Solution object for analysis
+        solution = {
+            "routes": routes or {},
+            "unassigned_targets": state.get("unassigned_targets", []),
+            "total_points": state.get("total_points", 0),
+            "total_fuel": state.get("total_fuel", 0.0),
+        }
+
+        metrics = compute_solution_metrics(env, solution, configs)
+        geometry = analyze_solution_geometry(env, solution, configs)
+
+        lines.append("")
+        lines.append("METRICS SUMMARY:")
+        lines.append(
+            f"  Total Points Collected: {metrics['total_points']} "
+            f"(of {metrics['total_possible_points']}, "
+            f"coverage={metrics['points_coverage']*100:.1f}%)"
+        )
+        lines.append(
+            f"  Total Fuel Used (all drones): {metrics['total_fuel']:.1f}"
+        )
+
+        per_drone = metrics.get("per_drone", {})
+        for did in sorted(
+            per_drone.keys(),
+            key=lambda x: int(str(x)) if str(x).isdigit() else str(x),
+        ):
+            md = per_drone[did]
+            lines.append(
+                f"    D{did}: points={md['points']}, "
+                f"fuel_used={md['fuel_used']:.1f}, "
+                f"fuel_budget={md['fuel_budget']:.1f}, "
+                f"fuel_margin={md['fuel_margin']:.1f}, "
+                f"unvisited_accessible_targets="
+                f"{len(md['unvisited_accessible_targets'])}"
+            )
+
+        lines.append("")
+        lines.append("GEOMETRIC ANALYSIS:")
+        crossings = geometry.get("crossings", [])
+        acute_angles = geometry.get("acute_angles", [])
+        frozen_out = geometry.get("frozen_segments", [])
+
+        lines.append(
+            f"  Crossings (non-frozen segments): {len(crossings)}"
+        )
+        if crossings:
+            max_show = min(5, len(crossings))
+            for c in crossings[:max_show]:
+                lines.append(
+                    "    Crossing: "
+                    f"D{c['drone1']} {c['segment1']['from']}->{c['segment1']['to']} "
+                    f"with D{c['drone2']} {c['segment2']['from']}->{c['segment2']['to']} "
+                    f"(frozen_involved={c['involves_frozen_segment']})"
+                )
+
+        lines.append(
+            f"  Acute Angles (< threshold) at targets: {len(acute_angles)}"
+        )
+        if acute_angles:
+            max_show = min(5, len(acute_angles))
+            for a in acute_angles[:max_show]:
+                lines.append(
+                    f"    D{a['drone']} at {a['target']}: "
+                    f"incoming {a['incoming']['from']}->{a['incoming']['to']}, "
+                    f"outgoing {a['outgoing']['from']}->{a['outgoing']['to']}, "
+                    f"angle={a['angle_degrees']:.1f}°"
+                )
+
+        if frozen_out:
+            lines.append("  Frozen Segments (per drone):")
+            for fs in frozen_out:
+                lines.append(
+                    f"    D{fs['drone']}: {fs['from']}->{fs['to']}"
+                )
+    except Exception as e:
+        # Metrics are helpful but non-critical; do not let errors break the tool
+        lines.append("")
+        lines.append(f"(Warning: metrics/geometry analysis failed: {e})")
 
     lines.append("")
     lines.append("=" * 60)
 
     return "\n".join(lines)
+
 
 
 COORDINATOR_TOOLS = [analyze_mission_request, request_optimization, get_mission_info]
