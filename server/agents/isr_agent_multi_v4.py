@@ -859,6 +859,7 @@ def run_multi_agent_v4(
     drone_configs: Dict[str, Any],
     distance_matrix: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+     print("### V4: run_multi_agent_v4 (isr_agent_multi_v4.py) CALLED ###", flush=True)
     """
     Run the v4 reasoning-based multi-agent system.
 
