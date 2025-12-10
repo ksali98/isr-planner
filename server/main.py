@@ -15,6 +15,8 @@ from pydantic import BaseModel
 from .agents.graph import workflow  # <-- our LangGraph workflow (GPT-based)
 # Use v3 multi-agent system (with mandatory tool calls)
 from .agents.isr_agent import run_isr_agent
+# Use v4 reasoning-based multi-agent system
+from .agents.isr_agent_multi_v4 import run_multi_agent_v4
 # Memory functions (shared across all agent versions)
 from .agents.agent_memory import (
     load_memory,
@@ -989,6 +991,66 @@ async def agent_chat(req: AgentChatRequest):
         traceback.print_exc()
         return AgentChatResponse(
             reply=f"Error running agent: {str(e)}",
+            route=None,
+            routes=None,
+            trajectories=None,
+            points=None,
+            fuel=None,
+        )
+@app.post("/api/agents/chat-v4", response_model=AgentChatResponse)
+async def agent_chat_v4(req: AgentChatRequest):
+    """
+    ISR Agent v4 endpoint using the reasoning-based multi-agent system.
+
+    Same input as agent_chat, but uses run_multi_agent_v4 under the hood.
+    """
+    try:
+        # Get drone configs from the request or from the environment
+        drone_configs = req.drone_configs or req.env.get("drone_configs") or {}
+
+        # Call the v4 multi-agent planner
+        result = run_multi_agent_v4(
+            user_message=req.message,
+            environment=req.env,
+            drone_configs=drone_configs,
+            distance_matrix=None,
+        )
+
+        # v4 returns routes in the form:
+        #   {
+        #     "1": { "route": ["A1","T3","A1"], "distance": 123.4, "total_points": 25 },
+        #     "2": { "route": [...], ... },
+        #     ...
+        #   }
+        raw_routes = result.get("routes") or {}
+        routes_for_ui: Dict[str, List[str]] = {}
+
+        for did, route_info in raw_routes.items():
+            # Normal case: route_info is a dict with a "route" key
+            if isinstance(route_info, dict):
+                routes_for_ui[str(did)] = route_info.get("route", []) or []
+            # Fallback: if it's already a list, just use it
+            elif isinstance(route_info, list):
+                routes_for_ui[str(did)] = route_info
+            else:
+                routes_for_ui[str(did)] = []
+
+        # Legacy single route (D1) for older UI helpers
+        legacy_route = routes_for_ui.get("1")
+
+        return AgentChatResponse(
+            reply=result.get("response", "(No v4 agent reply)"),
+            route=legacy_route,
+            routes=routes_for_ui,
+            trajectories=result.get("trajectories"),
+            points=result.get("total_points"),
+            fuel=result.get("total_fuel"),
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return AgentChatResponse(
+            reply=f"Error running v4 agent: {str(e)}",
             route=None,
             routes=None,
             trajectories=None,

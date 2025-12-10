@@ -2270,7 +2270,7 @@ async function sendAgentMessage() {
   if (btnSend) btnSend.disabled = true;
 
   try {
-    const response = await fetch("/api/agents/chat", {
+    const response = await fetch("/api/agents/chat-v4", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
