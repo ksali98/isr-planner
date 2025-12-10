@@ -951,6 +951,7 @@ def api_coverage_stats(req: CoverageStatsRequest):
 
 @app.post("/api/agents/chat", response_model=AgentChatResponse)
 async def agent_chat(req: AgentChatRequest):
+    print(">>> /api/agents/chat (v3 endpoint) HIT <<<", flush=True)
     """
     ISR Agent endpoint using Claude with tool-calling.
 
@@ -999,6 +1000,7 @@ async def agent_chat(req: AgentChatRequest):
         )
 @app.post("/api/agents/chat-v4", response_model=AgentChatResponse)
 async def agent_chat_v4(req: AgentChatRequest):
+    print(">>> /api/agents/chat-v4 (v4 endpoint) HIT <<<", flush=True)
     """
     ISR Agent v4 endpoint using the reasoning-based multi-agent system.
 
