@@ -1047,7 +1047,7 @@ def run_multi_agent_v4(
         }
 
     # ------------------------------------------------------------------
-    # 5) Extract routes, compute totals and trajectories
+    # 5) Extract routes, compute totals and SAM-aware trajectories
     # ------------------------------------------------------------------
     routes = final_state.get("routes", {}) or {}
     response_text = final_state.get("final_response", "No response generated")
@@ -1055,6 +1055,33 @@ def run_multi_agent_v4(
     total_points = 0
     total_fuel = 0.0
     trajectories: Dict[str, List[List[float]]] = {}
+
+    # Build waypoint positions from environment (airports + targets)
+    waypoint_positions: Dict[str, List[float]] = {}
+
+    for airport in env.get("airports", []):
+        aid = str(airport.get("id", airport.get("label")))
+        waypoint_positions[aid] = [
+            float(airport.get("x", 0.0)),
+            float(airport.get("y", 0.0)),
+        ]
+
+    for target in env.get("targets", []):
+        tid = str(target.get("id", target.get("label")))
+        waypoint_positions[tid] = [
+            float(target.get("x", 0.0)),
+            float(target.get("y", 0.0)),
+        ]
+
+    sams = env.get("sams", []) or []
+    trajectory_planner: Optional[ISRTrajectoryPlanner] = None
+
+    if sams:
+        try:
+            trajectory_planner = ISRTrajectoryPlanner(sams)
+        except Exception as e:
+            print(f"⚠️ [v4] Failed to initialize ISRTrajectoryPlanner: {e}", file=sys.stderr)
+            trajectory_planner = None
 
     for did, route_data in routes.items():
         if not isinstance(route_data, dict):
@@ -1066,13 +1093,31 @@ def run_multi_agent_v4(
         total_points += points
         total_fuel += distance
 
-        # Build trajectory as a list of [x, y] waypoints
         route = route_data.get("route", []) or []
-        traj_points: List[List[float]] = []
-        for wp_id in route:
-            pos = get_waypoint_position(str(wp_id), env)
-            if pos is not None:
-                traj_points.append(pos)
+        route_ids = [str(wp_id) for wp_id in route]
+
+        # Default: straight-line fallback
+        def _straight_line_traj() -> List[List[float]]:
+            traj: List[List[float]] = []
+            for wp_id in route_ids:
+                pos = get_waypoint_position(wp_id, env)
+                if pos is not None:
+                    traj.append(pos)
+            return traj
+
+        if trajectory_planner is not None and waypoint_positions:
+            try:
+                traj_points = trajectory_planner.generate_trajectory(
+                    route_ids,
+                    waypoint_positions,
+                    drone_id=str(did),
+                )
+            except Exception as e:
+                print(f"⚠️ [v4] Trajectory planner error for D{did}: {e}", file=sys.stderr)
+                traj_points = _straight_line_traj()
+        else:
+            traj_points = _straight_line_traj()
+
         trajectories[str(did)] = traj_points
 
     # ------------------------------------------------------------------
