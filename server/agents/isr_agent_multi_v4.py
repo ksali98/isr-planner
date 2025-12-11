@@ -339,7 +339,7 @@ MANDATORY REQUIREMENTS:
 
 AVAILABLE ALLOCATION STRATEGIES:
 You have 5 allocation algorithms available, should you choose to use them:
-- "efficient": Maximize priority/fuel ratio using auction-based algorithm (RECOMMENDED)
+- "efficient": Maximize priority/fuel ratio using auction-based algorithm
 - "greedy": Assign highest priority targets to nearest capable drone
 - "balanced": Distribute targets evenly by count across drones
 - "geographic": Minimize detours based on drone corridors
