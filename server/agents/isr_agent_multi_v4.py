@@ -292,9 +292,12 @@ def strategist_node(state: MissionState) -> Dict[str, Any]:
 
     set_state(state)
 
+    user_request = state.get("user_request", "")
+    print(f"📝 [STRATEGIST] User request: '{user_request}'", file=sys.stderr)
+    sys.stderr.flush()
+
     llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
 
-    user_request = state.get("user_request", "")
     mission_context = build_mission_context(state)
     current_solution = build_current_solution_context(state)
 
@@ -312,22 +315,64 @@ Analyze this request and provide your strategic assessment.
 """
 
     messages = [HumanMessage(content=analysis_prompt)]
-    response = llm.invoke(messages)
 
-    analysis = response.content
-    print(f"📋 [STRATEGIST] Analysis complete", file=sys.stderr)
+    # Attempt LLM call with error handling
+    analysis = None
+    llm_success = False
+    error_message = None
+
+    try:
+        print(f"🌐 [STRATEGIST] Calling Anthropic API...", file=sys.stderr)
+        sys.stderr.flush()
+
+        response = llm.invoke(messages)
+
+        print(f"✅ [STRATEGIST] API call successful", file=sys.stderr)
+        sys.stderr.flush()
+
+        analysis = response.content
+        llm_success = True
+
+        # Log first 200 chars of response for debugging
+        preview = analysis[:200] if len(analysis) > 200 else analysis
+        print(f"📄 [STRATEGIST] Response preview: {preview}...", file=sys.stderr)
+        sys.stderr.flush()
+
+    except Exception as e:
+        error_message = str(e)
+        print(f"❌ [STRATEGIST] API call FAILED: {error_message}", file=sys.stderr)
+        sys.stderr.flush()
+
+        # Fallback analysis if LLM fails
+        analysis = f"""API call failed: {error_message}
+
+REQUEST_TYPE: optimize
+
+Defaulting to optimization mode due to API failure.
+"""
+
+    print(f"📋 [STRATEGIST] Analysis complete (LLM success: {llm_success})", file=sys.stderr)
+    sys.stderr.flush()
 
     # Parse request type from analysis
     request_type = "optimize"  # default
     if "REQUEST_TYPE: question" in analysis.lower():
         request_type = "question"
+        print(f"🔍 [STRATEGIST] Detected REQUEST_TYPE: question", file=sys.stderr)
     elif "REQUEST_TYPE: command" in analysis.lower():
         request_type = "command"
+        print(f"🔍 [STRATEGIST] Detected REQUEST_TYPE: command", file=sys.stderr)
+    else:
+        print(f"⚠️  [STRATEGIST] No REQUEST_TYPE found in response, defaulting to: optimize", file=sys.stderr)
+
+    sys.stderr.flush()
 
     return {
         "messages": [AIMessage(content=f"[STRATEGIST]\n{analysis}")],
         "strategy_analysis": analysis,
         "request_type": request_type,
+        "llm_success": llm_success,
+        "llm_error": error_message,
     }
 
 
@@ -408,10 +453,39 @@ Remember: Explain WHY each drone gets its targets.
 """
 
     messages = [HumanMessage(content=allocation_prompt)]
-    response = llm.invoke(messages)
 
-    reasoning = response.content
-    print(f"📋 [ALLOCATOR] Reasoning complete", file=sys.stderr)
+    # Attempt LLM call with error handling
+    reasoning = None
+    llm_success = False
+    error_message = None
+
+    try:
+        print(f"🌐 [ALLOCATOR] Calling Anthropic API...", file=sys.stderr)
+        sys.stderr.flush()
+
+        response = llm.invoke(messages)
+
+        print(f"✅ [ALLOCATOR] API call successful", file=sys.stderr)
+        sys.stderr.flush()
+
+        reasoning = response.content
+        llm_success = True
+
+        # Log first 200 chars of response for debugging
+        preview = reasoning[:200] if len(reasoning) > 200 else reasoning
+        print(f"📄 [ALLOCATOR] Response preview: {preview}...", file=sys.stderr)
+        sys.stderr.flush()
+
+    except Exception as e:
+        error_message = str(e)
+        print(f"❌ [ALLOCATOR] API call FAILED: {error_message}", file=sys.stderr)
+        sys.stderr.flush()
+
+        # Fallback to algorithmic allocation if LLM fails
+        reasoning = "API call failed. Using fallback algorithmic allocation."
+
+    print(f"📋 [ALLOCATOR] Reasoning complete (LLM success: {llm_success})", file=sys.stderr)
+    sys.stderr.flush()
 
     # Parse allocation from response
     allocation = parse_allocation_from_reasoning(reasoning, state)
