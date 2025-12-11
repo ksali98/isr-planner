@@ -73,6 +73,7 @@ class AgentChatResponse(BaseModel):
     points: Optional[int] = None       # Total points
     fuel: Optional[float] = None       # Total fuel used
     allocations: Optional[Dict[str, List[str]]] = None  # Target allocations per drone {"1": ["T1","T2"], ...}
+    allocation_strategy: Optional[str] = None  # Strategy used by allocator (efficient/greedy/balanced/etc.)
 
 
 class ApplySequenceRequest(BaseModel):
@@ -988,6 +989,7 @@ async def agent_chat(req: AgentChatRequest):
             points=result.get("points"),
             fuel=result.get("fuel"),
             allocations=result.get("allocation"),  # Target allocations
+            allocation_strategy=result.get("allocation_strategy"),  # Strategy used
         )
     except Exception as e:
         import traceback
@@ -1000,6 +1002,7 @@ async def agent_chat(req: AgentChatRequest):
             points=None,
             fuel=None,
             allocations=None,
+            allocation_strategy=None,
         )
 @app.post("/api/agents/chat-v4", response_model=AgentChatResponse)
 async def agent_chat_v4(req: AgentChatRequest):
@@ -1045,6 +1048,7 @@ async def agent_chat_v4(req: AgentChatRequest):
 
         # Extract allocations from result
         allocations = result.get("allocation") or {}
+        allocation_strategy = result.get("allocation_strategy", "unknown")
 
         return AgentChatResponse(
             reply=result.get("response", "(No v4 agent reply)"),
@@ -1054,6 +1058,7 @@ async def agent_chat_v4(req: AgentChatRequest):
             points=result.get("total_points"),
             fuel=result.get("total_fuel"),
             allocations=allocations,
+            allocation_strategy=allocation_strategy,
         )
     except Exception as e:
         import traceback
@@ -1066,6 +1071,7 @@ async def agent_chat_v4(req: AgentChatRequest):
             points=None,
             fuel=None,
             allocations=None,
+            allocation_strategy=None,
         )
 
 

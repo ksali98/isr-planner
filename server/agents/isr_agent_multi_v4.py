@@ -358,6 +358,8 @@ ALLOCATION APPROACH:
 Briefly explain allocation decisions for each drone.
 
 OUTPUT FORMAT:
+STRATEGY_USED: [name of strategy you chose: efficient/greedy/balanced/geographic/exclusive]
+
 ALLOCATION_REASONING:
 - D1 gets [targets] because [reason]
 - D2 gets [targets] because [reason]
@@ -406,10 +408,28 @@ Remember: Explain WHY each drone gets its targets.
     # Parse allocation from response
     allocation = parse_allocation_from_reasoning(reasoning, state)
 
+    # Parse strategy used from reasoning
+    strategy_used = "unknown"
+    for line in reasoning.split("\n"):
+        if "STRATEGY_USED:" in line.upper():
+            # Extract strategy name after the colon
+            parts = line.split(":")
+            if len(parts) >= 2:
+                strategy_used = parts[1].strip().lower()
+                # Remove any extra text, keep only the strategy name
+                for strat in ["efficient", "greedy", "balanced", "geographic", "exclusive"]:
+                    if strat in strategy_used:
+                        strategy_used = strat
+                        break
+            break
+
+    print(f"📋 [ALLOCATOR] Strategy used: {strategy_used}", file=sys.stderr)
+
     return {
         "messages": [AIMessage(content=f"[ALLOCATOR]\n{reasoning}")],
         "allocation_reasoning": reasoning,
         "allocation": allocation,
+        "allocation_strategy": strategy_used,
     }
 
 
@@ -1161,6 +1181,7 @@ def run_multi_agent_v4(
         "total_fuel": total_fuel,
         "trajectories": trajectories,
         "allocation": final_state.get("allocation", {}),
+        "allocation_strategy": final_state.get("allocation_strategy", "unknown"),
         "suggestions": final_state.get("suggestions", []),
         "strategy_analysis": final_state.get("strategy_analysis"),
         "allocation_reasoning": final_state.get("allocation_reasoning"),

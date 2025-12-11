@@ -1260,7 +1260,7 @@ function updateStatsFromRoutes() {
   setText("stat-mission-pf", missionPf.toFixed(2));
 }
 
-function updateAllocationDisplay(allocations) {
+function updateAllocationDisplay(allocations, strategy) {
   const container = $("allocation-display");
   if (!container) return;
 
@@ -1298,7 +1298,9 @@ function updateAllocationDisplay(allocations) {
     return;
   }
 
-  html += `<div style="color: #60a5fa; margin-top: 4px;">Total: ${totalAllocated}/${totalTargets} targets</div>`;
+  // Add strategy in parentheses if available
+  const strategyText = strategy ? ` (${strategy})` : '';
+  html += `<div style="color: #60a5fa; margin-top: 4px;">Total: ${totalAllocated}/${totalTargets} targets${strategyText}</div>`;
   container.innerHTML = html;
 }
 
@@ -1705,6 +1707,7 @@ async function runPlanner() {
     state.routes = data.routes || {};
     state.wrappedPolygons = data.wrapped_polygons || [];
     state.allocations = data.allocations || {};
+    state.allocationStrategy = data.allocation_strategy || null;
 
     // Debug: Log what allocations we received
     console.log("🎯 data.allocations from server:", data.allocations);
@@ -1712,7 +1715,7 @@ async function runPlanner() {
     appendDebugLine("🎯 Allocations received: " + JSON.stringify(data.allocations));
 
     // Display allocations in Env tab
-    updateAllocationDisplay(state.allocations);
+    updateAllocationDisplay(state.allocations, state.allocationStrategy);
 
     const cur = state.currentDroneForSeq;
     const curSeq = state.sequences[cur] || "";
