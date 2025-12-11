@@ -431,6 +431,11 @@ def parse_allocation_from_reasoning(reasoning: str, state: MissionState) -> Dict
         elif in_result and line.startswith("TRADE") or line.startswith("==="):
             in_result = False
 
+    # Log what we parsed
+    print(f"📋 [ALLOCATOR] Parsed allocation: {allocation}", file=sys.stderr)
+    total_allocated = sum(len(targets) for targets in allocation.values())
+    print(f"📋 [ALLOCATOR] Total targets allocated: {total_allocated}", file=sys.stderr)
+
     # If parsing failed, fall back to algorithmic allocation
     if all(len(v) == 0 for v in allocation.values()):
         print("⚠️ [ALLOCATOR] Parsing failed, using fallback allocation", file=sys.stderr)
@@ -445,6 +450,18 @@ def parse_allocation_from_reasoning(reasoning: str, state: MissionState) -> Dict
             set_allocator_matrix(matrix_data)
 
         allocation = _allocate_targets_impl(env, configs, "efficient", matrix_data)
+        print(f"📋 [ALLOCATOR] Fallback allocation: {allocation}", file=sys.stderr)
+
+    # Final validation: check if all targets are allocated
+    env = state.get("environment", {})
+    all_targets = {str(t["id"]) for t in env.get("targets", [])}
+    allocated_targets = set()
+    for targets in allocation.values():
+        allocated_targets.update(targets)
+
+    missing_targets = all_targets - allocated_targets
+    if missing_targets:
+        print(f"⚠️ [ALLOCATOR] WARNING: {len(missing_targets)} targets NOT allocated: {sorted(missing_targets)}", file=sys.stderr)
 
     return allocation
 
