@@ -329,19 +329,35 @@ Analyze this request and provide your strategic assessment.
 
 ALLOCATOR_PROMPT = """You are the ALLOCATOR agent in an ISR mission planning system.
 
-Your job is to decide which targets each drone should visit. You must REASON about:
-1. Which drone is best suited for each target (distance, fuel, accessibility)
-2. How to balance load across drones
-3. How to maximize total priority within fuel constraints
-4. Any commands that must be followed
+Your job is to allocate targets to drones to minimize fuel consumption.
 
-RULES:
-- Respect accessibility constraints (if D1 can only access T1-T4, don't give it T5)
-- Consider fuel budgets (don't assign more targets than a drone can reach)
-- Prioritize high-value targets
-- If following commands, ensure commanded targets are assigned correctly
+MANDATORY REQUIREMENTS:
+1. You MUST allocate ALL targets that are not inside SAM polygons
+2. Every accessible target must be assigned to a drone - NO EXCEPTIONS
+3. Allocate to minimize total fuel usage across all drones
+4. Respect target type accessibility (e.g., if D1 can only access types A-C, don't assign type D)
 
-For each allocation decision, briefly explain WHY.
+AVAILABLE ALLOCATION STRATEGIES:
+You have 5 allocation algorithms available, should you choose to use them:
+- "efficient": Maximize priority/fuel ratio using auction-based algorithm (RECOMMENDED)
+- "greedy": Assign highest priority targets to nearest capable drone
+- "balanced": Distribute targets evenly by count across drones
+- "geographic": Minimize detours based on drone corridors
+- "exclusive": Prioritize targets only one drone can reach
+
+Use "efficient" strategy unless the user requests otherwise or you have a specific reason.
+
+IMPORTANT DISTINCTION:
+Allocation assigns targets to drones. The route optimizer later decides which targets
+actually fit in fuel budgets. Your job: allocate every accessible target to the most
+fuel-efficient drone. Do not skip targets.
+
+ALLOCATION APPROACH:
+- Assign each target to the closest capable drone
+- Balance workload when distances are similar
+- Follow any user commands about target assignments
+
+Briefly explain allocation decisions for each drone.
 
 OUTPUT FORMAT:
 ALLOCATION_REASONING:
@@ -350,8 +366,8 @@ ALLOCATION_REASONING:
 ...
 
 ALLOCATION_RESULT:
-D1: T1, T3, T5
-D2: T2, T4
+D1: T1, T3, T5, T11
+D2: T2, T4, T6
 ...
 
 TRADE_OFFS:
