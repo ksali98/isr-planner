@@ -20,6 +20,8 @@ const state = {
 
   droneConfigs: {},          // { "1": {enabled, fuel_budget, start_airport, end_airport, target_access}, ... }
 
+  missionId: null,
+
   solveAbortController: null, // AbortController for canceling solver requests
 
   // Editing-related
@@ -1332,19 +1334,22 @@ function attachIOHandlers() {
         // 2. Raw format with drone_configs: { airports: [...], drone_configs: {...}, ... }
         // 3. Old format: { airports: [...], ... } (no drone_configs)
         if (data.environment) {
-          // Wrapped format from old API export
           state.env = data.environment;
         } else {
-          // Raw format
           state.env = data;
         }
 
         state.envFilename = file.name;
+
+        // NEW: reset mission-related state
+        state.missionId = null;
+
         // Clear old routes and trajectories when importing new environment
         state.routes = {};
         state.sequences = {};
         state.trajectoryVisible = {};
         // Stop any running animation
+
         if (state.animation.animationId) {
           cancelAnimationFrame(state.animation.animationId);
           state.animation.animationId = null;
@@ -1776,6 +1781,10 @@ async function initialLoadEnv() {
     }
     state.env = data.environment || null;
     state.envFilename = data.filename || null;
+    // NEW: reset mission-related state when a new env is loaded
+    state.missionId = null;
+    state.routes = {};
+    state.sequences = {};
     if (state.envFilename) {
       $("env-filename").textContent = state.envFilename;
     }
@@ -2281,10 +2290,17 @@ async function sendAgentMessage() {
         env: state.env,
         sequences: state.sequences,
         drone_configs: state.droneConfigs,
+        mission_id: state.missionId,   // <-- NEW
       }),
     });
 
     const data = await response.json();
+
+    // NEW: store mission_id returned by backend, if any
+    if (data.mission_id) {
+      state.missionId = data.mission_id;
+      appendDebugLine("Current mission_id: " + state.missionId);
+    }
 
     // Debug: log the response to see what we're getting
     console.log("Agent response:", data);
@@ -2292,7 +2308,7 @@ async function sendAgentMessage() {
     if (data.routes) {
       appendDebugLine("Agent routes: " + JSON.stringify(data.routes));
     }
-
+    
     // Update the Q&A block with the response
     const responseArea = qaBlock.querySelector(".qa-response");
     if (data.reply) {
