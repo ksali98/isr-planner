@@ -345,8 +345,6 @@ You have 5 allocation algorithms available, should you choose to use them:
 - "geographic": Minimize detours based on drone corridors
 - "exclusive": Prioritize targets only one drone can reach
 
-Use "efficient" strategy unless the user requests otherwise or you have a specific reason.
-
 IMPORTANT DISTINCTION:
 Allocation assigns targets to drones. The route optimizer later decides which targets
 actually fit in fuel budgets. Your job: allocate every accessible target to the most
