@@ -213,38 +213,222 @@ def build_mission_context(state: MissionState) -> str:
     lines.append("=" * 60)
     return "\n".join(lines)
 
+def compute_mission_metrics(
+    env: Dict[str, Any],
+    routes: Dict[str, Any],
+    allocations: Dict[str, List[str]],
+    drone_configs: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Compute numerical mission metrics for the current solution.
 
-def build_current_solution_context(state: MissionState) -> str:
-    """Build context about the current solution state."""
-    allocation = state.get("allocation", {})
-    routes = state.get("routes", {})
+    Returns:
+        {
+            "per_drone": {
+                "1": {
+                    "route": [...],
+                    "fuel_used": float,
+                    "fuel_budget": float,
+                    "fuel_margin": float,
+                    "points": int,
+                    "visited_targets": ["T1", "T3", ...],
+                },
+                "2": { ... },
+                ...
+            },
+            "total_fuel": float,
+            "total_points": int,
+            "visited_targets": ["T1", "T2", ...],
+            "unvisited_targets": ["T5", ...],
+        }
+    """
+    targets_by_id = {t["id"]: t for t in env.get("targets", [])}
+    all_target_ids = set(targets_by_id.keys())
 
-    if not allocation and not routes:
-        return "CURRENT SOLUTION: None computed yet"
+    per_drone: Dict[str, Any] = {}
+    total_fuel = 0.0
+    total_points = 0
+    visited_targets: set[str] = set()
 
-    lines = ["CURRENT SOLUTION:"]
+    for did_raw, route_info in (routes or {}).items():
+        did = str(did_raw)
 
+        if isinstance(route_info, dict):
+            route = route_info.get("route") or []
+            # HK wrapper may use "total_points" or "points"
+            points = int(route_info.get("total_points", route_info.get("points", 0)) or 0)
+            distance = float(route_info.get("distance", 0.0) or 0.0)
+        else:
+            # Fallback for legacy formats
+            route = route_info or []
+            points = 0
+            distance = 0.0
+
+        # Targets visited on this route (ignore airports)
+        visited_on_route = [node for node in route if isinstance(node, str) and node.startswith("T")]
+        visited_targets.update(visited_on_route)
+
+        fuel_used = distance
+        cfg = drone_configs.get(did) or drone_configs.get(int(did)) or {}
+        fuel_budget = float(cfg.get("fuel_budget", fuel_used))
+        fuel_margin = fuel_budget - fuel_used
+
+        per_drone[did] = {
+            "route": route,
+            "fuel_used": fuel_used,
+            "fuel_budget": fuel_budget,
+            "fuel_margin": fuel_margin,
+            "points": points,
+            "visited_targets": visited_on_route,
+        }
+
+        total_fuel += fuel_used
+        total_points += points
+
+    unvisited_targets = sorted(all_target_ids - visited_targets)
+
+    return {
+        "per_drone": per_drone,
+        "total_fuel": total_fuel,
+        "total_points": total_points,
+        "visited_targets": sorted(visited_targets),
+        "unvisited_targets": unvisited_targets,
+    }
+
+def build_current_solution_context(state: Dict[str, Any]) -> str:
+    """
+    Build a textual summary of the CURRENT solution for the LLM.
+
+    Uses mission_metrics when available (fuel, margins, points, unvisited).
+    """
+    routes = state.get("routes") or {}
+    allocation = state.get("allocation") or {}
+    metrics = state.get("mission_metrics") or {}
+
+    if not routes:
+        return "CURRENT SOLUTION: None computed yet.\n\n"
+
+    lines: List[str] = []
+    lines.append("CURRENT SOLUTION SUMMARY:")
+
+    total_points = metrics.get("total_points")
+    total_fuel = metrics.get("total_fuel")
+    per_drone = metrics.get("per_drone") or {}
+    unvisited = metrics.get("unvisited_targets") or []
+
+    # Totals
+    if total_points is not None and total_fuel is not None:
+        lines.append(f"- Total points collected: {total_points}")
+        lines.append(f"- Total fuel used: {total_fuel:.1f}")
+    else:
+        # Fallback if metrics missing
+        lines.append("- Total points collected: (not available)")
+        lines.append("- Total fuel used: (not available)")
+
+    # Unvisited
+    if unvisited:
+        lines.append(f"- Unvisited targets: {', '.join(unvisited)}")
+    else:
+        lines.append("- All targets are visited.")
+
+    # Per-drone metrics
+    if per_drone:
+        lines.append("")
+        lines.append("PER-DRONE BREAKDOWN:")
+        # Sort by drone id numerically when possible
+        for did in sorted(per_drone.keys(), key=lambda d: int(d)):
+            d = per_drone[did]
+            fuel_used = d.get("fuel_used", 0.0) or 0.0
+            fuel_budget = d.get("fuel_budget", 0.0) or 0.0
+            fuel_margin = d.get("fuel_margin", 0.0)
+            points = d.get("points", 0) or 0
+            n_targets = len(d.get("visited_targets", []))
+
+            lines.append(
+                f"- D{did}: fuel_used={fuel_used:.1f}, "
+                f"fuel_budget={fuel_budget:.1f}, "
+                f"margin={fuel_margin:.1f}, "
+                f"points={points}, targets={n_targets}"
+            )
+
+    # Allocation summary (optional, but helpful)
     if allocation:
-        lines.append("  Allocation:")
-        for did in sorted(allocation.keys()):
-            tgts = allocation[did]
-            lines.append(f"    D{did}: {', '.join(tgts) if tgts else '(none)'}")
+        lines.append("")
+        lines.append("ALLOCATION SUMMARY (targets per drone):")
+        for did in sorted(allocation.keys(), key=lambda d: int(d)):
+            tlist = allocation[did]
+            lines.append(f"- D{did}: {len(tlist)} targets → {', '.join(tlist)}")
 
-    if routes:
-        lines.append("  Routes:")
-        total_fuel = 0
-        total_points = 0
-        for did in sorted(routes.keys()):
-            route_data = routes[did]
-            route = route_data.get("route", [])
-            dist = route_data.get("distance", 0)
-            points = route_data.get("total_points", 0)
-            total_fuel += dist
-            total_points += points
-            lines.append(f"    D{did}: {' → '.join(route)} (fuel={dist:.0f}, points={points})")
-        lines.append(f"  TOTALS: fuel={total_fuel:.0f}, points={total_points}")
-
+    lines.append("")  # final blank line
     return "\n".join(lines)
+
+def compute_mission_metrics(
+    env: Dict[str, Any],
+    routes: Dict[str, Any],
+    allocations: Dict[str, List[str]],
+    drone_configs: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Compute numerical mission metrics:
+
+    - per-drone fuel usage and margins
+    - per-drone points collected
+    - total fuel / points
+    - visited vs unvisited targets
+    """
+    targets = {t["id"]: t for t in env.get("targets", [])}
+    all_target_ids = set(targets.keys())
+
+    per_drone = {}
+    total_fuel = 0.0
+    total_points = 0
+    visited_targets = set()
+
+    for did, route_info in (routes or {}).items():
+        # v4 routes normally look like: {"route": [...], "distance": float, "points": int}
+        if isinstance(route_info, dict):
+            route = route_info.get("route") or []
+            distance = float(route_info.get("distance", 0.0))
+            points = int(route_info.get("points", 0))
+        else:
+            # Fallback if some legacy format leaks through
+            route = route_info or []
+            distance = 0.0
+            points = 0
+
+        # Determine visited targets from route (skip airports)
+        visited_on_route = [node for node in route if node.startswith("T")]
+        visited_targets.update(visited_on_route)
+
+        # Fuel usage = distance (1:1 by design)
+        fuel_used = distance
+
+        # Fuel budget and margin
+        cfg = drone_configs.get(str(did)) or drone_configs.get(did) or {}
+        budget = float(cfg.get("fuel_budget", distance))
+        margin = budget - fuel_used
+
+        per_drone[did] = {
+            "route": route,
+            "fuel_used": fuel_used,
+            "fuel_budget": budget,
+            "fuel_margin": margin,
+            "points": points,
+            "visited_targets": visited_on_route,
+        }
+
+        total_fuel += fuel_used
+        total_points += points
+
+    unvisited_targets = sorted(all_target_ids - visited_targets)
+
+    return {
+        "per_drone": per_drone,
+        "total_fuel": total_fuel,
+        "total_points": total_points,
+        "visited_targets": sorted(visited_targets),
+        "unvisited_targets": unvisited_targets,
+    }
 
 
 # ============================================================================
@@ -844,18 +1028,35 @@ Review this solution and provide your assessment.
 # RESPONDER AGENT - Formulates final answer
 # ============================================================================
 
-RESPONDER_PROMPT = """You are the RESPONDER agent in an ISR mission planning system.
+RESPONDER_PROMPT = """
+You are the ISR Mission Responder for the v4 multi-agent ISR planner.
 
-Your job is to formulate the final response to the user. This should:
-1. Directly answer their question or confirm the solution
-2. Include key reasoning (concise, not verbose)
-3. Mention any important suggestions from the critic
-4. Be professional and helpful
+Your role:
+- Answer the user's questions using ONLY the stored mission context and the CURRENT SOLUTION SUMMARY.
+- You never recompute routes unless explicitly instructed by the user (e.g., "recompute", "optimize", "rerun", "generate a new plan").
 
-For QUESTIONS: Give a clear, direct answer
-For SOLUTIONS: Summarize routes, total points, fuel usage, and any notable trade-offs
+When a mission solution exists (routes found):
+- ALWAYS cite specific **numbers** from the provided state:
+  - fuel usage per drone
+  - fuel budget and fuel margin (budget - used)
+  - points collected per drone and total points
+  - total fuel used across all drones
+  - count of visited vs unvisited targets
+  - list of unvisited targets, if any
+- ALWAYS leverage the numeric metrics in `mission_metrics`.
 
-Keep it concise but complete.
+When answering:
+- Be **precise**, **concise**, and **numerical**.
+- Prefer clear statements and bullet points over vague text.
+- If the user asks a comparative or evaluative question, always compare using numeric values.
+- If the mission has unvisited targets, describe them explicitly.
+- Never generalize or use fluff language ("likely", "maybe", "probably") when numbers exist.
+
+When NO solution exists yet (routes empty):
+- Clearly state that no mission plan exists.
+- Suggest generating a plan first.
+
+Follow the user's constraints exactly (e.g., "do not recompute routes").
 """
 
 
@@ -1192,10 +1393,39 @@ def run_multi_agent_v4(
             "total_fuel": 0.0,
             "trajectories": {},
         }
+       # ---------------------------------------------------------------
+    # RUN THE V4 REASONING GRAPH
+    # ---------------------------------------------------------------
+    final_state = app.invoke(initial_state)
 
-    # ------------------------------------------------------------------
-    # 5) Extract routes, compute totals and SAM-aware trajectories
-    # ------------------------------------------------------------------
+    # Extract routes + allocation from agent workflow
+    routes = final_state.get("routes") or {}
+    allocation = final_state.get("allocation") or {}
+
+    # ---------------------------------------------------------------
+    # 5) Compute mission metrics (fuel, margins, points, unvisited)
+    # ---------------------------------------------------------------
+    mission_metrics = {}
+    if routes:
+        try:
+            mission_metrics = compute_mission_metrics(
+                env=env,
+                routes=routes,
+                allocations=allocation,
+                drone_configs=normalized_configs,
+            )
+        except Exception as e:
+            print(f"[v4] Error computing mission metrics: {e}", flush=True)
+            mission_metrics = {}
+
+    # Attach metrics for Strategist / Responder
+    final_state["mission_metrics"] = mission_metrics
+    final_state["total_points"] = mission_metrics.get("total_points")
+    final_state["total_fuel"] = mission_metrics.get("total_fuel")
+
+    # ---------------------------------------------------------------
+    # 6) Extract routes & compute trajectories (existing logic)
+    # ---------------------------------------------------------------
     routes = final_state.get("routes", {}) or {}
     response_text = final_state.get("final_response", "No response generated")
 
@@ -1203,9 +1433,8 @@ def run_multi_agent_v4(
     total_fuel = 0.0
     trajectories: Dict[str, List[List[float]]] = {}
 
-    # Build waypoint positions from environment (airports + targets)
+    # Build waypoint index
     waypoint_positions: Dict[str, List[float]] = {}
-
     for airport in env.get("airports", []):
         aid = str(airport.get("id", airport.get("label")))
         waypoint_positions[aid] = [
@@ -1230,6 +1459,7 @@ def run_multi_agent_v4(
             print(f"⚠️ [v4] Failed to initialize ISRTrajectoryPlanner: {e}", file=sys.stderr)
             trajectory_planner = None
 
+    # Generate trajectories drone-by-drone
     for did, route_data in routes.items():
         if not isinstance(route_data, dict):
             continue
@@ -1243,38 +1473,37 @@ def run_multi_agent_v4(
         route = route_data.get("route", []) or []
         route_ids = [str(wp_id) for wp_id in route]
 
-        # Default: straight-line fallback
         def _straight_line_traj() -> List[List[float]]:
-            traj: List[List[float]] = []
+            traj = []
             for wp_id in route_ids:
                 pos = get_waypoint_position(wp_id, env)
                 if pos is not None:
                     traj.append(pos)
             return traj
 
-        if trajectory_planner is not None and waypoint_positions:
+        if trajectory_planner and waypoint_positions:
             try:
-                traj_points = trajectory_planner.generate_trajectory(
+                traj_pts = trajectory_planner.generate_trajectory(
                     route_ids,
                     waypoint_positions,
                     drone_id=str(did),
                 )
             except Exception as e:
                 print(f"⚠️ [v4] Trajectory planner error for D{did}: {e}", file=sys.stderr)
-                traj_points = _straight_line_traj()
+                traj_pts = _straight_line_traj()
         else:
-            traj_points = _straight_line_traj()
+            traj_pts = _straight_line_traj()
 
-        trajectories[str(did)] = traj_points
+        trajectories[str(did)] = traj_pts
 
-    # ------------------------------------------------------------------
-    # 6) Return unified result
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # 7) Return unified V4 result (NOW INCLUDING mission_metrics)
+    # ---------------------------------------------------------------
     return {
         "response": response_text,
         "routes": routes,
-        "total_points": total_points,
-        "total_fuel": total_fuel,
+        "total_points": mission_metrics.get("total_points", total_points),
+        "total_fuel": mission_metrics.get("total_fuel", total_fuel),
         "trajectories": trajectories,
         "allocation": final_state.get("allocation", {}),
         "allocation_strategy": final_state.get("allocation_strategy", "unknown"),
@@ -1283,30 +1512,5 @@ def run_multi_agent_v4(
         "allocation_reasoning": final_state.get("allocation_reasoning"),
         "route_analysis": final_state.get("route_analysis"),
         "critic_review": final_state.get("critic_review"),
+        "mission_metrics": mission_metrics,
     }
-
-def get_waypoint_position(wp_id: str, env: Dict[str, Any]) -> Optional[List[float]]:
-    """Get position of a waypoint by ID."""
-    for airport in env.get("airports", []):
-        aid = airport.get("id", airport.get("label"))
-        if aid == wp_id:
-            return [float(airport["x"]), float(airport["y"])]
-
-    for target in env.get("targets", []):
-        tid = target.get("id", target.get("label"))
-        if tid == wp_id:
-            return [float(target["x"]), float(target["y"])]
-
-    return None
-
-
-# Singleton workflow for FastAPI
-_workflow = None
-
-
-def get_workflow():
-    """Get or create the v4 workflow singleton."""
-    global _workflow
-    if _workflow is None:
-        _workflow = build_reasoning_workflow()
-    return _workflow
