@@ -360,48 +360,37 @@ TRADE_OFFS:
 
 
 def allocator_node(state: MissionState) -> Dict[str, Any]:
-    """Allocator performs target allocation using the algorithmic allocator."""
-    print("\n🎯 [ALLOCATOR] Running allocation with 'efficient' strategy...", file=sys.stderr)
+    """Allocator reasons about and performs target allocation."""
+    print("\n🎯 [ALLOCATOR] Reasoning about allocation...", file=sys.stderr)
     sys.stderr.flush()
 
     set_state(state)
 
-    # Use the proven algorithmic allocator (same as Run Planner)
-    env = state.get("environment", {})
-    configs = state.get("drone_configs", {})
-    dist_matrix = state.get("distance_matrix")
+    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
 
-    # Convert distance matrix to format expected by allocator
-    matrix_data = None
-    if dist_matrix:
-        labels = list(dist_matrix.keys())
-        matrix = [[dist_matrix[f].get(t, 1000) for t in labels] for f in labels]
-        matrix_data = {"labels": labels, "matrix": matrix}
-        set_allocator_matrix(matrix_data)
+    mission_context = build_mission_context(state)
+    strategy_analysis = state.get("strategy_analysis", "No strategy analysis available")
 
-    # Use "efficient" strategy by default (maximizes priority/distance ratio)
-    allocation = _allocate_targets_impl(env, configs, "efficient", matrix_data)
+    allocation_prompt = f"""
+{ALLOCATOR_PROMPT}
 
-    # Generate reasoning about the allocation for transparency
-    reasoning_lines = ["ALLOCATION COMPLETE", "=" * 40, ""]
-    reasoning_lines.append("Strategy: Efficient (maximizes priority/distance ratio)")
-    reasoning_lines.append("")
-    reasoning_lines.append("ALLOCATION RESULT:")
+{mission_context}
 
-    total_allocated = 0
-    for did in sorted(allocation.keys(), key=lambda x: int(x)):
-        targets = allocation[did]
-        total_allocated += len(targets)
-        if targets:
-            reasoning_lines.append(f"D{did}: {', '.join(targets)}")
-        else:
-            reasoning_lines.append(f"D{did}: (none)")
+STRATEGIST'S ANALYSIS:
+{strategy_analysis}
 
-    reasoning_lines.append("")
-    reasoning_lines.append(f"Total targets allocated: {total_allocated}")
-    reasoning = "\n".join(reasoning_lines)
+Based on this context, determine the optimal target allocation.
+Remember: Explain WHY each drone gets its targets.
+"""
 
-    print(f"📋 [ALLOCATOR] Allocated {total_allocated} targets using 'efficient' strategy", file=sys.stderr)
+    messages = [HumanMessage(content=allocation_prompt)]
+    response = llm.invoke(messages)
+
+    reasoning = response.content
+    print(f"📋 [ALLOCATOR] Reasoning complete", file=sys.stderr)
+
+    # Parse allocation from response
+    allocation = parse_allocation_from_reasoning(reasoning, state)
 
     return {
         "messages": [AIMessage(content=f"[ALLOCATOR]\n{reasoning}")],
