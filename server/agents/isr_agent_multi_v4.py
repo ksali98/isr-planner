@@ -356,10 +356,11 @@ Defaulting to optimization mode due to API failure.
 
     # Parse request type from analysis
     request_type = "optimize"  # default
-    if "REQUEST_TYPE: question" in analysis.lower():
+    analysis_lower = analysis.lower()
+    if "request_type: question" in analysis_lower:
         request_type = "question"
         print(f"🔍 [STRATEGIST] Detected REQUEST_TYPE: question", file=sys.stderr)
-    elif "REQUEST_TYPE: command" in analysis.lower():
+    elif "request_type: command" in analysis_lower:
         request_type = "command"
         print(f"🔍 [STRATEGIST] Detected REQUEST_TYPE: command", file=sys.stderr)
     else:
