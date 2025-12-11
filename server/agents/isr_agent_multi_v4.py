@@ -1274,7 +1274,9 @@ def run_multi_agent_v4(
     # 1) Normalize inputs
     # ------------------------------------------------------------------
     env: Dict[str, Any] = environment or {}
-    ui_configs: Dict[str, Any] = drone_configs or {}
+
+    # UI-level configs passed in, or from env if not provided
+    ui_configs: Dict[str, Any] = drone_configs or env.get("drone_configs") or {}
 
     # Translate UI configs into what v4 expects:
     # UI:  enabled, fuel_budget, start_airport, end_airport, target_access:{a..e}
@@ -1421,7 +1423,8 @@ def run_multi_agent_v4(
             "total_fuel": 0.0,
             "trajectories": {},
         }
-       # ---------------------------------------------------------------
+    
+    # ---------------------------------------------------------------
     # RUN THE V4 REASONING GRAPH
     # ---------------------------------------------------------------
     final_state = app.invoke(initial_state)
