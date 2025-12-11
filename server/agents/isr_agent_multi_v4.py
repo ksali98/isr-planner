@@ -1410,7 +1410,7 @@ def run_multi_agent_v4(
     # ------------------------------------------------------------------
     # 4) Run the multi-agent workflow
     # ------------------------------------------------------------------
-    workflow = get_workflow()
+    workflow = build_reasoning_workflow()
 
     try:
         final_state = workflow.invoke(initial_state)
@@ -1422,8 +1422,15 @@ def run_multi_agent_v4(
             "total_points": 0,
             "total_fuel": 0.0,
             "trajectories": {},
+            "allocation": {},
+            "allocation_strategy": "unknown",
+            "suggestions": [],
+            "strategy_analysis": None,
+            "allocation_reasoning": None,
+            "route_analysis": None,
+            "critic_review": None,
+            "mission_metrics": {},
         }
-    
     # ---------------------------------------------------------------
     # RUN THE V4 REASONING GRAPH
     # ---------------------------------------------------------------
