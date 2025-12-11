@@ -1431,10 +1431,6 @@ def run_multi_agent_v4(
             "critic_review": None,
             "mission_metrics": {},
         }
-    # ---------------------------------------------------------------
-    # RUN THE V4 REASONING GRAPH
-    # ---------------------------------------------------------------
-    final_state = app.invoke(initial_state)
 
     # Extract routes + allocation from agent workflow
     routes = final_state.get("routes") or {}
