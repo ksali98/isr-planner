@@ -72,6 +72,7 @@ class AgentChatResponse(BaseModel):
     trajectories: Optional[Dict[str, List[List[float]]]] = None  # SAM-avoiding trajectories for drawing
     points: Optional[int] = None       # Total points
     fuel: Optional[float] = None       # Total fuel used
+    allocations: Optional[Dict[str, List[str]]] = None  # Target allocations per drone {"1": ["T1","T2"], ...}
 
 
 class ApplySequenceRequest(BaseModel):
@@ -986,6 +987,7 @@ async def agent_chat(req: AgentChatRequest):
             trajectories=result.get("trajectories"),  # SAM-avoiding trajectories
             points=result.get("points"),
             fuel=result.get("fuel"),
+            allocations=result.get("allocation"),  # Target allocations
         )
     except Exception as e:
         import traceback
@@ -997,6 +999,7 @@ async def agent_chat(req: AgentChatRequest):
             trajectories=None,
             points=None,
             fuel=None,
+            allocations=None,
         )
 @app.post("/api/agents/chat-v4", response_model=AgentChatResponse)
 async def agent_chat_v4(req: AgentChatRequest):
@@ -1040,6 +1043,9 @@ async def agent_chat_v4(req: AgentChatRequest):
         # Legacy single route (D1) for older UI helpers
         legacy_route = routes_for_ui.get("1")
 
+        # Extract allocations from result
+        allocations = result.get("allocation") or {}
+
         return AgentChatResponse(
             reply=result.get("response", "(No v4 agent reply)"),
             route=legacy_route,
@@ -1047,6 +1053,7 @@ async def agent_chat_v4(req: AgentChatRequest):
             trajectories=result.get("trajectories"),
             points=result.get("total_points"),
             fuel=result.get("total_fuel"),
+            allocations=allocations,
         )
     except Exception as e:
         import traceback
@@ -1058,6 +1065,7 @@ async def agent_chat_v4(req: AgentChatRequest):
             trajectories=None,
             points=None,
             fuel=None,
+            allocations=None,
         )
 
 
