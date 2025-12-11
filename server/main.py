@@ -4,6 +4,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,6 +64,7 @@ class AgentChatRequest(BaseModel):
     env: Dict[str, Any]
     sequences: Optional[Dict[str, str]] = None
     drone_configs: Optional[Dict[str, Any]] = None
+    mission_id: Optional[str] = None  # Existing mission to continue chatting about
 
 
 class AgentChatResponse(BaseModel):
@@ -74,6 +76,7 @@ class AgentChatResponse(BaseModel):
     fuel: Optional[float] = None       # Total fuel used
     allocations: Optional[Dict[str, List[str]]] = None  # Target allocations per drone {"1": ["T1","T2"], ...}
     allocation_strategy: Optional[str] = None  # Strategy used by allocator (efficient/greedy/balanced/etc.)
+    mission_id: Optional[str] = None   # Identifier of the mission whose solution this refers to
 
 
 class ApplySequenceRequest(BaseModel):
@@ -121,6 +124,14 @@ app.mount("/static", StaticFiles(directory=str(WEBAPP)), name="static")
 
 _current_env: Optional[Dict[str, Any]] = None
 _export_counter: int = 1  # Running number for export filenames
+
+# ----------------------------------------------------------------------------
+# Mission state store (in-memory; per-process)
+# ----------------------------------------------------------------------------
+
+MissionRecord = Dict[str, Any]
+MISSION_STORE: Dict[str, MissionRecord] = {}
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -1010,26 +1021,51 @@ async def agent_chat_v4(req: AgentChatRequest):
     """
     ISR Agent v4 endpoint using the reasoning-based multi-agent system.
 
-    Same input as agent_chat, but uses run_multi_agent_v4 under the hood.
+    - If mission_id is omitted: create/solve a new mission and return mission_id.
+    - If mission_id is provided: load existing mission state and allow
+      question-only interaction (no recompute unless the request asks for it).
     """
     try:
-        # Get drone configs from the request or from the environment
-        drone_configs = req.drone_configs or req.env.get("drone_configs") or {}
+        # -------------------------------
+        # 1. Resolve env & configs
+        # -------------------------------
+        env = req.env
+        drone_configs = req.drone_configs or env.get("drone_configs") or {}
 
-        # Call the v4 multi-agent planner
+        mission_id = req.mission_id
+        existing_solution: Optional[Dict[str, Any]] = None
+
+        # If mission_id exists, load stored mission snapshot
+        if mission_id and mission_id in MISSION_STORE:
+            mission = MISSION_STORE[mission_id]
+            # For consistency, prefer stored env/configs over incoming ones
+            env = mission.get("env", env)
+            drone_configs = mission.get("drone_configs", drone_configs)
+
+            existing_solution = {
+                "routes": mission.get("routes") or {},
+                "allocation": mission.get("allocation") or {},
+                # total_points/total_fuel are computed from routes when needed
+            }
+            print(f"[v4] Loaded existing mission {mission_id} from store", flush=True)
+        elif mission_id:
+            print(f"[v4] mission_id={mission_id} not found; treating as new mission", flush=True)
+            mission_id = None  # will create a new one below
+
+        # -------------------------------
+        # 2. Call the v4 multi-agent planner
+        # -------------------------------
         result = run_multi_agent_v4(
             user_message=req.message,
-            environment=req.env,
+            environment=env,
             drone_configs=drone_configs,
             distance_matrix=None,
+            existing_solution=existing_solution,
         )
 
-        # v4 returns routes in the form:
-        #   {
-        #     "1": { "route": ["A1","T3","A1"], "distance": 123.4, "total_points": 25 },
-        #     "2": { "route": [...], ... },
-        #     ...
-        #   }
+        # -------------------------------
+        # 3. Extract routes for the UI
+        # -------------------------------
         raw_routes = result.get("routes") or {}
         routes_for_ui: Dict[str, List[str]] = {}
 
@@ -1046,10 +1082,36 @@ async def agent_chat_v4(req: AgentChatRequest):
         # Legacy single route (D1) for older UI helpers
         legacy_route = routes_for_ui.get("1")
 
-        # Extract allocations from result
+        # Extract allocations and strategy
         allocations = result.get("allocation") or {}
         allocation_strategy = result.get("allocation_strategy", "unknown")
 
+        # -------------------------------
+        # 4. Persist/refresh mission state
+        # -------------------------------
+        # We only persist if there is some solution data.
+        has_solution = bool(raw_routes)
+
+        if has_solution:
+            if not mission_id:
+                mission_id = f"m_{uuid4().hex}"
+                print(f"[v4] Creating new mission {mission_id}", flush=True)
+            else:
+                print(f"[v4] Updating mission {mission_id}", flush=True)
+
+            MISSION_STORE[mission_id] = {
+                "env": env,
+                "drone_configs": drone_configs,
+                "routes": raw_routes,
+                "allocation": allocations,
+                "total_points": result.get("total_points"),
+                "total_fuel": result.get("total_fuel"),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+
+        # -------------------------------
+        # 5. Build response
+        # -------------------------------
         return AgentChatResponse(
             reply=result.get("response", "(No v4 agent reply)"),
             route=legacy_route,
@@ -1059,8 +1121,23 @@ async def agent_chat_v4(req: AgentChatRequest):
             fuel=result.get("total_fuel"),
             allocations=allocations,
             allocation_strategy=allocation_strategy,
+            mission_id=mission_id,
         )
     except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return AgentChatResponse(
+            reply=f"Error running v4 agent: {str(e)}",
+            route=None,
+            routes=None,
+            trajectories=None,
+            points=None,
+            fuel=None,
+            allocations=None,
+            allocation_strategy=None,
+            mission_id=None,
+        )
+
         import traceback
         traceback.print_exc()
         return AgentChatResponse(

@@ -1020,7 +1020,9 @@ def run_multi_agent_v4(
     environment: Dict[str, Any],
     drone_configs: Dict[str, Any],
     distance_matrix: Optional[Dict[str, Any]] = None,
+    existing_solution: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+
     print("### V4: run_multi_agent_v4 (isr_agent_multi_v4.py) CALLED ###", flush=True)
     """
     Run the v4 reasoning-based multi-agent system.
@@ -1162,6 +1164,17 @@ def run_multi_agent_v4(
         "final_response": None,
         "error": None,
     }
+
+    # If we are continuing an existing mission (Q&A only), seed the state with
+    # previously computed routes/allocation so agents can reason about them.
+    if existing_solution:
+        prev_routes = existing_solution.get("routes")
+        if prev_routes:
+            initial_state["routes"] = prev_routes
+
+        prev_allocation = existing_solution.get("allocation")
+        if prev_allocation:
+            initial_state["allocation"] = prev_allocation
 
     # ------------------------------------------------------------------
     # 4) Run the multi-agent workflow
