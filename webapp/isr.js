@@ -1869,7 +1869,7 @@ function attachTabSwitching() {
       btn.classList.add("active");
       const pane = document.getElementById(`tab-${tabId}`);
       if (pane) pane.classList.add("active");
-    });async function sendAgentMessage() 
+    });
   });
 }
 
