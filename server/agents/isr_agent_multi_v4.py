@@ -872,7 +872,8 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                 all_labels = list(dist_matrix.keys())
 
                 # For this drone, we only care about its home airport + its allocated targets
-                requested_labels = [home_airport] + list(target_ids)
+                # Include start airport, end airport, and all assigned targets
+                requested_labels = [home_airport, end_airport] + list(target_ids)
 
                 # Keep only labels that actually exist in the distance matrix
                 labels = [lab for lab in requested_labels if lab in all_labels]
