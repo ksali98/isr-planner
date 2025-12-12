@@ -14,6 +14,14 @@
 function $(id) {
   return document.getElementById(id);
 }
+
+// Add this:
+function setText(id, text) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = text == null ? "" : String(text);
+}
+
 // ----------------------------------------------------
 // Global state
 // ----------------------------------------------------
