@@ -1311,6 +1311,13 @@ def run_multi_agent_v4(
         )
         if home_ap:
             nc["home_airport"] = home_ap
+        # End airport: preserve UI end_airport if present
+        end_ap = (
+            cfg.get("endAirport")
+            or cfg.get("end_airport")
+        )
+        if end_ap:
+            nc["end_airport"] = end_ap
 
         # Accessible targets: build list from target_access dict if present
         if "accessible_targets" not in nc and "accessibleTargets" not in nc:
