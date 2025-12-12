@@ -595,6 +595,10 @@ def solve_mission_with_allocation(
         flexible_endpoint = (raw_end_id == "-")
         end_id = start_id if flexible_endpoint else raw_end_id  # Initial end for solve
 
+        # Debug logging
+        print(f"🔍 [Run Planner] D{did} config: {cfg}", flush=True)
+        print(f"🔍 [Run Planner] D{did} start_id={start_id}, raw_end_id={raw_end_id}, flexible={flexible_endpoint}, end_id={end_id}", flush=True)
+
         # Get this drone's assigned targets
         assigned_target_ids = set(allocations.get(did, []))
 
