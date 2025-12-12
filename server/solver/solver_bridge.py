@@ -705,6 +705,7 @@ def solve_mission_with_allocation(
             for try_airport in airports:
                 try_end_id = try_airport["id"]
                 env_for_solver["end_airport"] = try_end_id
+                env_for_solver["mode"] = "return" if try_end_id == start_id else "open"
                 try_sol = _solver.solve(env_for_solver, fuel_budget)
 
                 try_visited = try_sol.get("visited_targets", [])
@@ -730,6 +731,8 @@ def solve_mission_with_allocation(
             print(f"   🎯 Optimal endpoint: {end_id} ({best_points} pts, {best_distance:.1f} dist)", flush=True)
         else:
             env_for_solver["end_airport"] = end_id
+            env_for_solver["mode"] = "return" if end_id == start_id else "open"
+            print(f"   🎯 Solving with start={start_id}, end={end_id}, mode={env_for_solver['mode']}", flush=True)
             # Solve orienteering for this drone
             sol = _solver.solve(env_for_solver, fuel_budget)
 
