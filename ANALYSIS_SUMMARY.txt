@@ -1,0 +1,162 @@
+================================================================================
+DRONE CONFIGURATION FLOW ANALYSIS - EXECUTIVE SUMMARY
+================================================================================
+
+ANALYSIS COMPLETED: 2024-12-11
+
+Two comprehensive documents have been generated:
+1. DRONE_CONFIG_FLOW.md (Detailed analysis with code snippets)
+2. DRONE_CONFIG_QUICK_REF.md (Quick reference tables and checklists)
+
+================================================================================
+KEY FINDINGS
+================================================================================
+
+1. UI STATE STORAGE (webapp/isr.js)
+   - Location: state.droneConfigs (line 37)
+   - Structure: { "1": {enabled, fuel_budget, start_airport, end_airport, target_access}, ... }
+   - Initialization: initDroneConfigsFromEnv() (lines 1026-1105)
+   - Defaults: fuel_budget=150, start=A{id}, end=start, access=all types
+
+2. RUN PLANNER FLOW
+   - Frontend: runPlanner() sends POST /api/solve_with_allocation (line 1711)
+   - Payload: {env, drone_configs, allocation_strategy} (line 1738-1742)
+   - Backend: solve_with_allocation() in solver_bridge.py (line 477)
+   - Processing: Extracts configs per drone, applies defaults, calls solver
+
+3. AGENT V4 FLOW
+   - Frontend: sendAgentMessage() sends POST /api/agents/chat-v4 (line 2326)
+   - Payload: {message, env, drone_configs, mission_id} (lines 2351-2357)
+   - Backend: agent_chat_v4() → run_multi_agent_v4() (main.py:1019, isr_agent_multi_v4.py:1251)
+   - Key: Config normalization layer (isr_agent_multi_v4.py:1290-1333)
+     * start_airport → home_airport
+     * end_airport → end_airport (preserved)
+     * target_access → accessible_targets
+
+4. START_AIRPORT OVERRIDES (5 LOCATIONS)
+   1. webapp/isr.js:1010 - Auto-sync when airport deleted
+   2. webapp/isr.js:1094 - UI default (A{did} or first airport)
+   3. solver_bridge.py:589 - Solver default (A{did} or first airport)
+   4. isr_agent_multi_v4.py:1312 - Normalization (→ home_airport)
+   5. isr_agent_multi_v4.py:852 - Route optimizer reads home_airport
+
+5. END_AIRPORT HANDLING (7 LOCATIONS)
+   1. webapp/isr.js:993 - Dropdown includes "-" (flexible) option
+   2. webapp/isr.js:1019 - Auto-sync when airport deleted
+   3. webapp/isr.js:1020 - Default to first airport
+   4. solver_bridge.py:594 - Default to start_airport OR support "-"
+   5. solver_bridge.py:694-726 - Flexible endpoint: try all airports, pick best
+   6. isr_agent_multi_v4.py:1320 - Normalization (preserve if present)
+   7. isr_agent_multi_v4.py:853 - Route optimizer defaults to home_airport
+
+6. MODE DEFAULTS TO "return" (3 LOCATIONS)
+   1. solver_bridge.py:427 - mode = "return" if start==end else "open"
+   2. isr_agent_multi_v4.py:854 - mode = "return" if home==end else "open"
+   3. orienteering_interface.py - Default "return" if not specified
+   
+   KEY: Mode is COMPUTED from start==end, never stored in config
+
+7. CACHING LAYERS
+   
+   a) Distance Matrix Cache
+      - File: server/solver/solver_bridge.py (lines 62-63, 516-534)
+      - Implementation: Global _calculator instance (sam_distance_matrix.py)
+      - Cache Key: Environment hash (airports/targets/SAMs positions)
+      - Invalidation: Cleared on env hash mismatch
+      - Access: get_cached_matrix() (solver_bridge.py:519)
+   
+   b) Mission ID & Allocation Cache
+      - File: server/main.py (line 133: MISSION_STORE dict)
+      - Structure: MISSION_STORE[mission_id] = {env, drone_configs, routes, allocation, ...}
+      - Persistence: In-memory per process (lost on restart)
+      - Retrieval: Load for follow-up questions (lines 1039-1050)
+      - UI Storage: state.missionId (webapp/isr.js:2356, 2363-2365)
+
+================================================================================
+CRITICAL DECISION POINTS
+================================================================================
+
+1. Flexible Endpoint Logic (ONLY in solver_bridge)
+   - If end_airport == "-":
+     * Solver tries ALL airports as endpoints
+     * Picks endpoint with max points (or min distance if tied)
+   - NOTE: v4 Agent does NOT support flexible endpoints
+
+2. Config Normalization in v4 Agent
+   - UI field names (snake_case) → v4 field names (camelCase)
+   - start_airport → home_airport (mapping happens at line 1312)
+   - end_airport → end_airport (preserved as-is)
+   - Mismatch can cause issues if downstream code expects only one name
+
+3. Mode Computation (Not Configuration)
+   - Mode is NEVER stored in drone_configs
+   - Always computed: "return" if start==end, "open" otherwise
+   - No way to force "open" mode when start==end
+
+4. Mission State Invalidation
+   - Any config change triggers invalidateMission() (webapp/isr.js:81-89)
+   - Clears state.missionId → next agent call creates NEW mission
+   - Follow-up questions require SAME mission_id
+
+================================================================================
+ABSOLUTE FILE PATHS
+================================================================================
+
+UI Layer:
+  /Users/kamalali/isr-planner/webapp/isr.js
+
+API Endpoints:
+  /Users/kamalali/isr-planner/server/main.py
+
+Solver Core:
+  /Users/kamalali/isr-planner/server/solver/solver_bridge.py
+  /Users/kamalali/isr-planner/server/solver/sam_distance_matrix.py
+  /Users/kamalali/isr-planner/server/solver/target_allocator.py
+  /Users/kamalali/isr-planner/server/solver/trajectory_planner.py
+
+Agent v4:
+  /Users/kamalali/isr-planner/server/agents/isr_agent_multi_v4.py
+
+Orienteering Interface:
+  /Users/kamalali/isr-planner/webapp/editor/solver/orienteering_interface.py
+
+================================================================================
+VALIDATION CHECKLIST
+================================================================================
+
+Configuration Flow:
+  [✓] start_airport flows from UI → solver → used in route
+  [✓] end_airport flows from UI → solver → used in route (with flexible option)
+  [✓] fuel_budget flows from UI → solver → used as constraint
+  [✓] target_access flows from UI → solver → filters candidate targets
+  [✓] All defaults applied when config values missing
+
+Mode Handling:
+  [✓] Mode defaults to "return" when start==end
+  [✓] Mode switches to "open" when start!=end
+  [✓] Mode never read directly from config
+
+Caching:
+  [✓] Distance matrix cached with environment hash
+  [✓] Mission ID & allocation cached in MISSION_STORE
+  [✓] Distance matrix invalidated on env changes
+  [✓] Mission state invalidated on config changes
+
+Agent v4:
+  [✓] Config normalization maps UI fields to v4 fields
+  [✓] home_airport set from start_airport
+  [✓] end_airport preserved from config
+  [✓] Mode computed from home==end comparison
+
+================================================================================
+RECOMMENDED NEXT STEPS
+================================================================================
+
+1. Review DRONE_CONFIG_FLOW.md for detailed code references
+2. Use DRONE_CONFIG_QUICK_REF.md as lookup during debugging
+3. Set breakpoints at key override locations during testing
+4. Monitor debug outputs for config values at each stage
+5. Test flexible endpoint ("-") behavior thoroughly
+6. Verify mission persistence for multi-turn conversations
+
+================================================================================
