@@ -850,6 +850,8 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
 
         fuel_budget = cfg.get("fuelBudget", cfg.get("fuel_budget", 200))
         home_airport = cfg.get("homeAirport", cfg.get("home_airport", "A1"))
+        end_airport = cfg.get("endAirport", cfg.get("end_airport", home_airport))
+        mode = "return" if end_airport == home_airport else "open"
 
         if not target_ids:
             routes[did] = {
@@ -902,11 +904,11 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                 solver_env = {
                     "airports": env.get("airports", []),
                     "targets": targets,
-                    # NOTE: the interface will convert 'matrix' -> 'distance_matrix'
                     "matrix": matrix,
                     "matrix_labels": labels,
                     "start_airport": home_airport,
-                    "end_airport": home_airport,
+                    "end_airport": end_airport,
+                    "mode": mode,
                 }
 
                 solution = solver.solve(solver_env, fuel_budget)
