@@ -851,8 +851,8 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
         fuel_budget = cfg.get("fuelBudget", cfg.get("fuel_budget", 200))
         home_airport = cfg.get("home_airport", "A1")
         end_airport = cfg.get("end_airport", home_airport)
-        mode = "return" if end_airport == home_airport else "open"
-        
+        mode = "return" if end_airport == home_airport else "end"
+
         print(f"[v4][ROUTE_OPT] D{did} start={home_airport} end={end_airport} mode={mode}", flush=True)
 
         if not target_ids:
