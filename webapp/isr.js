@@ -1320,25 +1320,40 @@ function updateAllocationDisplay(allocations, strategy) {
 // ----------------------------------------------------
 // Import / Export
 // ----------------------------------------------------
+// ----------------------------------------------------
+// Import / Export
+// ----------------------------------------------------
 function attachIOHandlers() {
   const fileInput = $("file-input");
   const btnImport = $("btn-import");
   const btnExport = $("btn-export");
 
-  if (!fileInput || !btnImport || !btnExport) return;
+  // If there's no file input, we can't import anything
+  if (!fileInput) {
+    appendDebugLine("attachIOHandlers: no file-input element found; import disabled.");
+    return;
+  }
 
-  btnImport.addEventListener("click", () => {
-    fileInput.value = "";
-    fileInput.click();
-  });
+  // Wire up the Import button if present
+  if (btnImport) {
+    btnImport.addEventListener("click", () => {
+      fileInput.value = "";
+      fileInput.click();
+    });
+  } else {
+    appendDebugLine("attachIOHandlers: no btn-import element found; import button disabled.");
+  }
 
+  // File selection / JSON import
   fileInput.addEventListener("change", (evt) => {
-    const file = evt.target.files[0];
+    const file = evt.target.files && evt.target.files[0];
     if (!file) return;
+
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const data = JSON.parse(e.target.result);
+        const text = e.target.result;
+        const data = JSON.parse(text);
 
         // Handle different formats:
         // 1. Wrapped format: { environment: {...}, ... }
@@ -1360,28 +1375,46 @@ function attachIOHandlers() {
         state.sequences = {};
         state.trajectoryVisible = {};
 
-        // Stop any running animation
-        if (state.animation.animationId) {
-          cancelAnimationFrame(state.animation.animationId);
-          state.animation.animationId = null;
+        // Stop any running animation (guard in case animation object not yet initialized)
+        if (state.animation) {
+          if (state.animation.animationId) {
+            cancelAnimationFrame(state.animation.animationId);
+            state.animation.animationId = null;
+          }
+          state.animation.active = false;
+          state.animation.drones = {};
         }
-        state.animation.active = false;
-        state.animation.drones = {};
-        $("env-filename").textContent = file.name;
+
+        // Update filename label
+        const envNameEl = $("env-filename");
+        if (envNameEl) {
+          envNameEl.textContent = file.name;
+        }
+
         appendDebugLine(`Imported environment from ${file.name}`);
+
         // Initialize drone configs (will use saved configs from env if present)
         initDroneConfigsFromEnv();
-        // Calculate SAM wrapping for imported environment
+
+        // Recompute SAM wrapping client-side and redraw
         updateSamWrappingClientSide();
         drawEnvironment();
       } catch (err) {
+        appendDebugLine("Error parsing JSON: " + err);
+        console.error("Error parsing JSON:", err);
         alert("Error parsing JSON: " + err);
       }
     };
+
     reader.readAsText(file);
   });
 
-  btnExport.addEventListener("click", exportEnvironment);
+  // Wire up Export button if present
+  if (btnExport) {
+    btnExport.addEventListener("click", exportEnvironment);
+  } else {
+    appendDebugLine("attachIOHandlers: no btn-export element found; export disabled.");
+  }
 }
 
 // ----------------------------------------------------
