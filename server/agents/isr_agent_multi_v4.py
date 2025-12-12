@@ -849,9 +849,11 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
             continue
 
         fuel_budget = cfg.get("fuelBudget", cfg.get("fuel_budget", 200))
-        home_airport = cfg.get("homeAirport", cfg.get("home_airport", "A1"))
-        end_airport = cfg.get("endAirport", cfg.get("end_airport", home_airport))
+        home_airport = cfg.get("home_airport", "A1")
+        end_airport = cfg.get("end_airport", home_airport)
         mode = "return" if end_airport == home_airport else "open"
+        
+        print(f"[v4][ROUTE_OPT] D{did} start={home_airport} end={end_airport} mode={mode}", flush=True)
 
         if not target_ids:
             routes[did] = {
@@ -900,6 +902,8 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                     t for t in env.get("targets", [])
                     if str(t.get("id", t.get("label"))) in target_ids
                 ]
+
+                print(f"[v4][ROUTE_OPT] D{did} home={home_airport} end={end_airport} mode={mode} cfg_end={cfg.get('end_airport')} cfg_keys={list(cfg.keys())}", flush=True)
 
                 solver_env = {
                     "airports": env.get("airports", []),
@@ -1311,15 +1315,17 @@ def run_multi_agent_v4(
             or cfg.get("start_airport")
             or cfg.get("startAirport")
         )
+
         if home_ap:
             nc["home_airport"] = home_ap
-        # End airport: preserve UI end_airport if present
+
+        # End airport: ALWAYS set (fallback to home_airport)
         end_ap = (
-            cfg.get("endAirport")
-            or cfg.get("end_airport")
+            cfg.get("end_airport")
+            or cfg.get("endAirport")
         )
-        if end_ap:
-            nc["end_airport"] = end_ap
+        # Use explicit end if provided; otherwise default to home airport
+        nc["end_airport"] = end_ap if end_ap else nc.get("home_airport", home_ap)
 
         # Accessible targets: build list from target_access dict if present
         if "accessible_targets" not in nc and "accessibleTargets" not in nc:

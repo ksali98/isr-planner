@@ -424,6 +424,8 @@ def solve_mission(
         )
         env_for_solver["start_airport"] = start_id
         env_for_solver["end_airport"] = end_id
+        env_for_solver["mode"] = "return" if end_id == start_id else "open"
+
 
         # Call your real orienteering solver
         solve_start = time.time()
