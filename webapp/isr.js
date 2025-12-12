@@ -20,7 +20,7 @@ const state = {
 
   droneConfigs: {},          // { "1": {enabled, fuel_budget, start_airport, end_airport, target_access}, ... }
 
-  missionId: null,
+  missionId: null,           // current v4 mission_id from the backend
 
   solveAbortController: null, // AbortController for canceling solver requests
 
@@ -55,15 +55,6 @@ const state = {
 // ----------------------------------------------------
 // Utility helpers
 // ----------------------------------------------------
-function $(id) {
-  return document.getElementById(id);
-}
-
-function setText(id, value) {
-  const el = $(id);
-  if (el) el.textContent = String(value);
-}
-
 function appendDebugLine(msg) {
   const pre = $("debug-output");
   if (!pre) return;
@@ -71,10 +62,21 @@ function appendDebugLine(msg) {
   pre.textContent = `[${now}] ${msg}\n` + pre.textContent;
 }
 
+function invalidateMission(reason) {
+  // Drop current mission so backend will treat next v4 call as a new mission
+  state.missionId = null;
+  state.routes = {};
+  state.trajectoryVisible = {};
+  if (reason) {
+    appendDebugLine("Mission invalidated: " + reason);
+  }
+}
+
 // ----------------------------------------------------
 // Client-side SAM wrapping (no server round-trip!)
 // ----------------------------------------------------
 function _sampleCircle(cx, cy, r, minSeg = 2.0) {
+
   if (r <= 0) return [[cx, cy]];
   let dtheta = minSeg / Math.max(r, 0.001);
   dtheta = Math.max(dtheta, Math.PI / 36); // 5 degrees
@@ -1098,24 +1100,31 @@ function attachConfigListeners() {
     if (cbEnabled) {
       cbEnabled.addEventListener("change", () => {
         state.droneConfigs[idStr].enabled = cbEnabled.checked;
+        invalidateMission(`Drone ${idStr} enabled changed`);
       });
     }
+
     if (fuelInput) {
       fuelInput.addEventListener("change", () => {
         const v = parseFloat(fuelInput.value || "0");
         state.droneConfigs[idStr].fuel_budget = isNaN(v) ? 0 : v;
         // Update stats to reflect new fuel budget
         updateStatsFromRoutes();
+        invalidateMission(`Drone ${idStr} fuel_budget changed`);
       });
     }
+
     if (startSel) {
       startSel.addEventListener("change", () => {
         state.droneConfigs[idStr].start_airport = startSel.value;
+        invalidateMission(`Drone ${idStr} start_airport changed`);
       });
     }
+
     if (endSel) {
       endSel.addEventListener("change", () => {
         state.droneConfigs[idStr].end_airport = endSel.value;
+        invalidateMission(`Drone ${idStr} end_airport changed`);
       });
     }
 
@@ -1124,10 +1133,12 @@ function attachConfigListeners() {
       if (!cb) return;
       cb.addEventListener("change", () => {
         state.droneConfigs[idStr].target_access[t] = cb.checked;
+        invalidateMission(`Drone ${idStr} target_access changed`);
       });
     });
   }
 }
+
 
 function attachSequenceBar() {
   const droneSel = $("sequence-drone-select");
@@ -1334,22 +1345,22 @@ function attachIOHandlers() {
         // 2. Raw format with drone_configs: { airports: [...], drone_configs: {...}, ... }
         // 3. Old format: { airports: [...], ... } (no drone_configs)
         if (data.environment) {
+          // Wrapped format from old API export
           state.env = data.environment;
         } else {
+          // Raw format
           state.env = data;
         }
 
         state.envFilename = file.name;
 
-        // NEW: reset mission-related state
+        // Reset mission when importing a new environment
         state.missionId = null;
-
-        // Clear old routes and trajectories when importing new environment
         state.routes = {};
         state.sequences = {};
         state.trajectoryVisible = {};
-        // Stop any running animation
 
+        // Stop any running animation
         if (state.animation.animationId) {
           cancelAnimationFrame(state.animation.animationId);
           state.animation.animationId = null;
@@ -1781,13 +1792,16 @@ async function initialLoadEnv() {
     }
     state.env = data.environment || null;
     state.envFilename = data.filename || null;
-    // NEW: reset mission-related state when a new env is loaded
-    state.missionId = null;
-    state.routes = {};
-    state.sequences = {};
     if (state.envFilename) {
       $("env-filename").textContent = state.envFilename;
     }
+
+    // Reset mission when loading a new environment from backend
+    state.missionId = null;
+    state.routes = {};
+    state.sequences = {};
+    state.trajectoryVisible = {};
+
     appendDebugLine("Loaded environment from backend.");
     initDroneConfigsFromEnv();
 
@@ -1822,7 +1836,7 @@ function attachTabSwitching() {
       btn.classList.add("active");
       const pane = document.getElementById(`tab-${tabId}`);
       if (pane) pane.classList.add("active");
-    });
+    });async function sendAgentMessage() 
   });
 }
 
