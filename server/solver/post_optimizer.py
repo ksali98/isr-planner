@@ -650,24 +650,54 @@ class TrajectorySwapOptimizer:
                 if not target_pos:
                     continue
 
-                # Get prev and next waypoints in current route
+                # Get immediate prev and next waypoints for fuel/insertion cost calculation
                 prev_wp = route[current_idx - 1] if current_idx > 0 else None
                 next_wp = route[current_idx + 1] if current_idx < len(route) - 1 else None
 
                 if not prev_wp or not next_wp:
                     continue
 
-                # Calculate CURRENT trajectory distance (distance from target to its current trajectory segment)
-                # Use waypoint positions (not trajectory polylines for now - simplified)
-                prev_pos = waypoint_positions.get(str(prev_wp))
-                next_pos = waypoint_positions.get(str(next_wp))
+                # Get prev and next TARGET waypoints (skip airports) for self-segment calculation
+                # Airports don't have self-segments and shouldn't be used as segment endpoints
+                prev_target_wp = None
+                prev_target_idx = None
+                for i in range(current_idx - 1, -1, -1):
+                    if str(route[i]).startswith("T"):
+                        prev_target_wp = route[i]
+                        prev_target_idx = i
+                        break
 
-                if not prev_pos or not next_pos:
+                next_target_wp = None
+                next_target_idx = None
+                for i in range(current_idx + 1, len(route)):
+                    if str(route[i]).startswith("T"):
+                        next_target_wp = route[i]
+                        next_target_idx = i
+                        break
+
+                # A target needs both a prev and next TARGET to have a self-segment
+                # Airports don't have self-segments
+                if not prev_target_wp or not next_target_wp:
                     continue
 
-                current_traj_distance = self._point_to_line_distance(target_pos, prev_pos, next_pos)
+                # Calculate CURRENT trajectory distance
+                # The self-segment is the line from prev_target to next_target (waypoint positions)
+                # This represents "what would the trajectory be if we removed this target"
+                prev_target_pos = waypoint_positions.get(str(prev_target_wp))
+                next_target_pos = waypoint_positions.get(str(next_target_wp))
 
-                # Calculate current insertion cost for fuel tracking
+                if not prev_target_pos or not next_target_pos:
+                    continue
+
+                current_traj_distance = self._point_to_line_distance(
+                    target_pos, prev_target_pos, next_target_pos
+                )
+
+                # Skip if self-segment distance is 0 (target is exactly on the line between prev and next)
+                if current_traj_distance == 0.0:
+                    continue
+
+                # Calculate current insertion cost for fuel tracking (uses immediate neighbors)
                 d1 = self._get_matrix_distance(str(prev_wp), str(wp_id))
                 d2 = self._get_matrix_distance(str(wp_id), str(next_wp))
                 d3 = self._get_matrix_distance(str(prev_wp), str(next_wp))
@@ -709,6 +739,11 @@ class TrajectorySwapOptimizer:
 
                         seg_start_id = str(other_route[j])
                         seg_end_id = str(other_route[j + 1])
+
+                        # CRITICAL: Only consider segments where seg_end is a TARGET
+                        # Skip segments ending at airports to prevent inserting targets after end airport
+                        if not str(seg_end_id).startswith("T"):
+                            continue
 
                         seg_start_pos = waypoint_positions.get(seg_start_id)
                         seg_end_pos = waypoint_positions.get(seg_end_id)
