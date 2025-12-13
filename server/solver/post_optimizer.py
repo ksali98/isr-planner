@@ -784,9 +784,11 @@ class TrajectorySwapOptimizer:
                                     break
 
                         # Find end waypoint in trajectory
+                        # Search AFTER start waypoint to handle return-to-base routes (e.g., A1→...→A1)
                         end_wp_pos = waypoint_positions.get(seg_end_id)
-                        if end_wp_pos:
-                            for ti, tv in enumerate(other_trajectory):
+                        if end_wp_pos and start_traj_idx is not None:
+                            for ti in range(start_traj_idx + 1, len(other_trajectory)):
+                                tv = other_trajectory[ti]
                                 if abs(tv[0] - end_wp_pos[0]) < 0.001 and abs(tv[1] - end_wp_pos[1]) < 0.001:
                                     end_traj_idx = ti
                                     break
