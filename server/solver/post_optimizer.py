@@ -766,9 +766,9 @@ class TrajectorySwapOptimizer:
                         seg_start_id = str(other_route[j])
                         seg_end_id = str(other_route[j + 1])
 
-                        # Skip segments ending at airports
-                        if str(seg_end_id).startswith("A"):
-                            continue
+                        # Note: We DON'T skip segments ending at airports
+                        # Targets can be inserted into T→A segments (they go between T and A)
+                        # The insertion point (j+1) places them correctly before the ending airport
 
                         # Find trajectory indices for this route segment
                         # We need to check all trajectory vertices between these route waypoints
