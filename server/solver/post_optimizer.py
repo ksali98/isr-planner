@@ -553,23 +553,23 @@ class TrajectorySwapOptimizer:
         priority_constraints: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Reassign targets to drones with closer trajectories.
+        Reassign targets to drones with closer trajectories using SAM-avoiding trajectory segments.
 
-        GOAL: Minimize fuel usage by moving targets closer to trajectory paths
-
-        Algorithm:
-        1. For each target, calculate distance to its current trajectory segment
-        2. Find ALL other trajectory segments (same or different drones)
-        3. If a closer segment exists, move target there
-        4. Can move within same drone (reposition) or to different drone
-        5. Respects frozen segments, fuel budgets, and capabilities
+        Algorithm (Swap Closer):
+        1. For each target in a trajectory:
+           - Calculate SSD (Self Segment Distance) from trajectory vertices
+           - If SSD = 0: SKIP (NO SSD NO MOVEMENT rule)
+           - If SSD > 0: Search for better segments within radius SSD
+        2. Find all trajectory segments (OS) within circle of radius SSD
+        3. For each OS where OSD < SSD:
+           - Check if segment can accept target (capability, fuel, not frozen)
+        4. Move target to segment with minimum OSD (if any valid ones exist)
 
         Args:
             solution: Current solution with routes for each drone
             env: Environment dict with targets, airports, sams
             drone_configs: Drone configurations with capabilities
             priority_constraints: Optional priority constraints string
-                                  e.g., "D1,D2: priority>=6; D3,D4: priority<6"
 
         Returns:
             Optimized solution with targets moved to closer trajectories
@@ -590,6 +590,8 @@ class TrajectorySwapOptimizer:
         # Copy routes for modification, including trajectories and frozen segments
         optimized_routes = {}
         drone_trajectories = {}  # Store the actual SAM-avoiding trajectories
+        target_to_traj_index = {}  # Map target_id to (drone_id, traj_vertex_index)
+
         for did, route_data in solution.get("routes", {}).items():
             optimized_routes[did] = {
                 "route": list(route_data.get("route", [])),
@@ -603,6 +605,22 @@ class TrajectorySwapOptimizer:
             traj = route_data.get("trajectory", [])
             if traj:
                 drone_trajectories[did] = [(float(p[0]), float(p[1])) for p in traj]
+
+                # Build mapping from targets to trajectory vertex indices
+                route = route_data.get("route", [])
+                traj_idx = 0
+                for wp_id in route:
+                    if str(wp_id).startswith("T"):
+                        # Find this target's position in trajectory
+                        wp_pos = waypoint_positions.get(str(wp_id))
+                        if wp_pos:
+                            # Scan trajectory to find matching vertex
+                            for i in range(traj_idx, len(drone_trajectories[did])):
+                                if abs(drone_trajectories[did][i][0] - wp_pos[0]) < 0.001 and \
+                                   abs(drone_trajectories[did][i][1] - wp_pos[1]) < 0.001:
+                                    target_to_traj_index[str(wp_id)] = (did, i)
+                                    traj_idx = i + 1
+                                    break
             else:
                 drone_trajectories[did] = []
 
@@ -617,18 +635,18 @@ class TrajectorySwapOptimizer:
 
         for pass_num in range(num_passes):
             print(f"\n  📍 Pass {pass_num + 1}/{num_passes}")
+
             # Collect all targets to check in this pass
-            # We need a snapshot because routes will change during the pass
             targets_to_check = []
             for current_drone, route_data in optimized_routes.items():
                 route = route_data["route"]
-                for i, wp_id in enumerate(route):
+                for wp_id in route:
                     if str(wp_id).startswith("T"):
-                        targets_to_check.append((current_drone, wp_id))
+                        targets_to_check.append(wp_id)
 
             # Check each target once in this pass
-            for original_drone, wp_id in targets_to_check:
-                # Find current location of this target (may have moved)
+            for wp_id in targets_to_check:
+                # Find current location of this target
                 current_drone = None
                 current_idx = None
                 for did, route_data in optimized_routes.items():
@@ -644,11 +662,11 @@ class TrajectorySwapOptimizer:
                 route = optimized_routes[current_drone]["route"]
                 frozen_segments = optimized_routes[current_drone]["frozen_segments"]
 
-                # Skip if target is in a frozen segment (cannot move from frozen)
+                # Skip if target is in a frozen segment
                 if current_idx > 0 and (current_idx - 1) in frozen_segments:
-                    continue  # Target is in frozen segment route[i-1]->route[i]
+                    continue
                 if current_idx < len(route) - 1 and current_idx in frozen_segments:
-                    continue  # Target is in frozen segment route[i]->route[i+1]
+                    continue
 
                 target = target_by_id.get(str(wp_id))
                 if not target:
@@ -658,120 +676,133 @@ class TrajectorySwapOptimizer:
                 if not target_pos:
                     continue
 
-                # Get immediate prev and next waypoints
-                prev_wp = route[current_idx - 1] if current_idx > 0 else None
-                next_wp = route[current_idx + 1] if current_idx < len(route) - 1 else None
+                # Get prev and next waypoints in route (not trajectory)
+                # This is simpler and works for most cases
+                if current_idx == 0 or current_idx == len(route) - 1:
+                    continue  # Target at start or end, cannot have self-segment
 
-                if not prev_wp or not next_wp:
-                    continue
+                prev_wp = route[current_idx - 1]
+                next_wp = route[current_idx + 1]
 
-                # Calculate CURRENT trajectory distance
-                # The self-segment is the line from prev waypoint to next waypoint
-                # This represents "what would the trajectory be if we removed this target"
                 prev_pos = waypoint_positions.get(str(prev_wp))
                 next_pos = waypoint_positions.get(str(next_wp))
 
                 if not prev_pos or not next_pos:
                     continue
 
-                current_traj_distance = self._point_to_line_distance(
-                    target_pos, prev_pos, next_pos
-                )
+                # Calculate SSD: Self Segment Distance
+                ssd = self._point_to_line_distance(target_pos, prev_pos, next_pos)
 
-                print(f"    🎯 {wp_id}: self-traj-dist={current_traj_distance:.2f} (from line {prev_wp}→{next_wp})")
+                print(f"    🎯 {wp_id}: SSD={ssd:.2f} (route segment {prev_wp}→{next_wp})")
 
-                # Calculate current insertion cost for fuel tracking
-                d1 = self._get_matrix_distance(str(prev_wp), str(wp_id))
-                d2 = self._get_matrix_distance(str(wp_id), str(next_wp))
-                d3 = self._get_matrix_distance(str(prev_wp), str(next_wp))
-                current_insertion_cost = d1 + d2 - d3
+                # CRITICAL: NO SSD NO MOVEMENT
+                if ssd == 0.0:
+                    print(f"       ⏭️  SKIP: SSD=0, no movement allowed")
+                    continue
 
-                # Find ALL other trajectory segments (including same drone, different positions)
+                # Search for segments within circle of radius SSD
                 best_drone = None
-                best_segment = None
-                best_traj_distance = current_traj_distance
+                best_route_segment = None
+                best_osd = float('inf')
                 best_insertion_cost = float('inf')
 
+                # Check all route segments in all drones
                 for other_drone, other_route_data in optimized_routes.items():
                     other_route = other_route_data["route"]
                     other_frozen = other_route_data["frozen_segments"]
 
-                    # Check drone capability (skip if same drone, we'll check positions)
+                    # Check drone capability
                     if other_drone != current_drone:
                         other_cfg = drone_configs.get(other_drone, {})
                         if not target_allowed_for_drone(target, other_drone, other_cfg, priority_filters):
                             continue
 
-                    # Check fuel budget for receiving drone
-                    other_fuel_budget = other_route_data.get("fuel_budget", 0)
-                    if other_fuel_budget <= 0:
-                        other_cfg = drone_configs.get(other_drone, {})
-                        other_fuel_budget = other_cfg.get("fuel_budget", 200)
-
-                    other_current_distance = self._calculate_route_distance(other_route)
-
-                    # Check each segment in this drone's route
+                    # Check each segment in route
                     for j in range(len(other_route) - 1):
-                        # Skip frozen segments (cannot insert into frozen)
                         if j in other_frozen:
                             continue
 
-                        # Skip current position (same drone, same segment)
-                        if other_drone == current_drone and j == current_idx - 1:
-                            continue
+                        # Skip current target's adjacent segments
+                        # Don't allow inserting into the segment immediately before or after the target
+                        if other_drone == current_drone:
+                            if j == current_idx - 1:  # Segment: prev→target
+                                continue
+                            if j == current_idx:  # Segment: target→next
+                                continue
 
                         seg_start_id = str(other_route[j])
                         seg_end_id = str(other_route[j + 1])
 
-                        # CRITICAL: Only consider segments where seg_end is a TARGET
-                        # Skip segments ending at airports to prevent inserting targets after end airport
-                        if not str(seg_end_id).startswith("T"):
+                        # Skip segments ending at airports
+                        if str(seg_end_id).startswith("A"):
                             continue
 
+                        # Get positions of route waypoints
                         seg_start_pos = waypoint_positions.get(seg_start_id)
                         seg_end_pos = waypoint_positions.get(seg_end_id)
 
                         if not seg_start_pos or not seg_end_pos:
                             continue
 
-                        # Calculate trajectory distance to this segment
-                        traj_distance = self._point_to_line_distance(target_pos, seg_start_pos, seg_end_pos)
+                        # Quick distance check: is segment within circle of radius SSD?
+                        # Use bounding box approximation for speed
+                        min_x = min(seg_start_pos[0], seg_end_pos[0]) - ssd
+                        max_x = max(seg_start_pos[0], seg_end_pos[0]) + ssd
+                        min_y = min(seg_start_pos[1], seg_end_pos[1]) - ssd
+                        max_y = max(seg_start_pos[1], seg_end_pos[1]) + ssd
 
-                        # Calculate insertion cost at this position
+                        if not (min_x <= target_pos[0] <= max_x and min_y <= target_pos[1] <= max_y):
+                            continue  # Segment bounding box too far away
+
+                        # Calculate OSD: Other Segment Distance
+                        osd = self._point_to_line_distance(target_pos, seg_start_pos, seg_end_pos)
+
+                        # Debug: show segments being considered
+                        if osd < ssd:
+                            print(f"         📐 D{other_drone} segment {seg_start_id}→{seg_end_id}: OSD={osd:.2f} < SSD={ssd:.2f}")
+
+                        # CRITICAL: Only move if OSD < SSD (improvement required)
+                        if osd >= ssd:
+                            continue  # Not an improvement
+
+                        # Calculate insertion cost
                         d_start = self._get_matrix_distance(seg_start_id, str(wp_id))
                         d_end = self._get_matrix_distance(str(wp_id), seg_end_id)
                         d_direct = self._get_matrix_distance(seg_start_id, seg_end_id)
                         insertion_cost = d_start + d_end - d_direct
 
-                        # For different drones: check fuel budget
+                        # Check fuel budget
                         if other_drone != current_drone:
-                            # Removing from current drone frees fuel, adding to other uses fuel
-                            new_total_distance = other_current_distance + insertion_cost
-                            if new_total_distance > other_fuel_budget:
-                                continue  # Would exceed fuel budget
+                            other_fuel_budget = other_route_data.get("fuel_budget", 0)
+                            if other_fuel_budget <= 0:
+                                other_cfg = drone_configs.get(other_drone, {})
+                                other_fuel_budget = other_cfg.get("fuel_budget", 200)
 
-                        # For same drone: net cost is relative change
-                        # (removal from current position saves fuel, insertion at new position costs fuel)
+                            other_current_distance = self._calculate_route_distance(other_route)
+                            if other_current_distance + insertion_cost > other_fuel_budget:
+                                print(f"            ⛽ FUEL: D{other_drone} {seg_start_id}→{seg_end_id} exceeds budget ({other_current_distance:.1f}+{insertion_cost:.1f} > {other_fuel_budget:.1f})")
+                                continue
 
-                        # Only swap if trajectory distance is CLOSER
-                        if traj_distance < best_traj_distance:
-                            best_traj_distance = traj_distance
+                        # Track best option (minimum OSD)
+                        if osd < best_osd:
+                            print(f"            🔄 New best: D{other_drone} {seg_start_id}→{seg_end_id}, OSD={osd:.2f} (was {best_osd:.2f})")
+                            best_osd = osd
                             best_insertion_cost = insertion_cost
                             best_drone = other_drone
-                            best_segment = j + 1  # Insert after seg_start
+                            best_route_segment = j + 1  # Insert after seg_start
 
-                # If found a closer trajectory, swap
-                if best_drone and best_traj_distance < current_traj_distance:
-                    print(f"      ✅ SWAP: {wp_id} from D{current_drone} to D{best_drone}, dist {current_traj_distance:.2f}→{best_traj_distance:.2f}")
+                # If found a better segment, swap
+                if best_drone and best_osd < ssd:
+                    print(f"       ✅ SWAP: {wp_id} from D{current_drone} to D{best_drone}, SSD={ssd:.2f}→OSD={best_osd:.2f}")
 
                     # Record the swap
                     all_swaps.append({
                         "target": wp_id,
                         "from_drone": current_drone,
                         "to_drone": best_drone,
-                        "old_traj_dist": current_traj_distance,
-                        "new_traj_dist": best_traj_distance,
-                        "savings": current_traj_distance - best_traj_distance,
+                        "ssd": ssd,
+                        "osd": best_osd,
+                        "savings": ssd - best_osd,
                         "same_drone": (best_drone == current_drone),
                         "pass": pass_num + 1
                     })
@@ -779,8 +810,8 @@ class TrajectorySwapOptimizer:
                     # Remove from current route
                     optimized_routes[current_drone]["route"].remove(wp_id)
 
-                    # Insert into new route (or new position in same route)
-                    optimized_routes[best_drone]["route"].insert(best_segment, wp_id)
+                    # Insert into new route
+                    optimized_routes[best_drone]["route"].insert(best_route_segment, wp_id)
 
         # Recalculate metrics for all routes
         for did, route_data in optimized_routes.items():

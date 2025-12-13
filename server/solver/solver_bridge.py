@@ -531,11 +531,14 @@ def solve_mission_with_allocation(
                 print("⏳ Calculating SAM-aware distance matrix (no cache available)...", flush=True)
             dist_data = calculate_sam_aware_matrix(env)
             _cached_env_hash = current_hash  # Update hash after calculation
-        set_allocator_matrix(dist_data)
-        set_optimizer_matrix(dist_data)
     else:
         # Use simple Euclidean distances
         dist_data = _build_distance_matrix(airports, targets)
+
+    # Always set distance matrices for allocator and optimizer
+    # Even Euclidean distances are needed for fuel budget calculations
+    set_allocator_matrix(dist_data)
+    set_optimizer_matrix(dist_data)
 
     # Step 2: Allocate targets to drones
     allocations = allocate_targets(
@@ -776,6 +779,7 @@ def solve_mission_with_allocation(
         "routes": routes_detail,
         "wrapped_polygons": wrapped_polygons,
         "allocations": allocations,  # initial allocator view
+        "distance_matrix": dist_data,  # Include distance matrix for downstream use
     }
 
     # Step 4: Post-optimize to include unvisited targets

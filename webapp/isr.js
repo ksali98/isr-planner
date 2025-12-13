@@ -1457,7 +1457,10 @@ function attachOptimizationHandlers() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            solution: { routes: state.routes },
+            solution: {
+              routes: state.routes,
+              distance_matrix: state.distanceMatrix
+            },
             env: state.env,
             drone_configs: droneConfigs
           })
@@ -1514,16 +1517,41 @@ function attachOptimizationHandlers() {
 
       try {
         const droneConfigs = state.droneConfigs;
+        // Debug: Log what we're sending to the backend
+        console.log("=== SWAP CLOSER REQUEST ===");
+        console.log("Current routes:", state.routes);
+        console.log("Distance matrix available:", !!state.distanceMatrix);
+        if (state.distanceMatrix) {
+          console.log("Distance matrix labels:", state.distanceMatrix.labels);
+        }
+
         const resp = await fetch("/api/trajectory_swap_optimize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            solution: { routes: state.routes },
+            solution: {
+              routes: state.routes,
+              distance_matrix: state.distanceMatrix
+            },
             env: state.env,
             drone_configs: droneConfigs
           })
         });
         const data = await resp.json();
+
+        // Debug: Log the complete response
+        console.log("=== SWAP CLOSER RESPONSE ===");
+        console.log("Success:", data.success);
+        console.log("Swaps made:", data.swaps_made);
+        console.log("Number of swaps:", (data.swaps_made || []).length);
+        if (data.swaps_made && data.swaps_made.length > 0) {
+          console.log("Swap details:");
+          data.swaps_made.forEach(swap => {
+            console.log(`  ${swap.target}: D${swap.from_drone} -> D${swap.to_drone}`);
+          });
+        }
+        console.log("Routes in response:", Object.keys(data.routes || {}));
+        console.log("Full response data:", data);
 
         if (data.success) {
           const swaps = data.swaps_made || [];
@@ -1773,6 +1801,7 @@ async function runPlanner() {
     state.wrappedPolygons = data.wrapped_polygons || [];
     state.allocations = data.allocations || {};
     state.allocationStrategy = data.allocation_strategy || null;
+    state.distanceMatrix = data.distance_matrix || null;
 
     // Debug: Log what allocations we received
     console.log("🎯 data.allocations from server:", data.allocations);

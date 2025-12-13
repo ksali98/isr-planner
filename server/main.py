@@ -57,6 +57,7 @@ class SolveResponse(BaseModel):
     sequences: Dict[str, str]
     wrapped_polygons: Optional[List[List[List[float]]]] = None
     allocations: Optional[Dict[str, List[str]]] = None
+    distance_matrix: Optional[Dict[str, Any]] = None
 
 
 class AgentChatRequest(BaseModel):
@@ -792,12 +793,16 @@ def solve_with_allocation(req: SolveWithAllocationRequest):
     # Extract allocations from result
     allocations = result.get("allocations", {})
 
+    # Extract distance matrix from result (needed for post-optimization)
+    distance_matrix = result.get("distance_matrix", {})
+
     return SolveResponse(
         success=True,
         routes=routes,
         sequences=sequences,
         wrapped_polygons=wrapped_polygons,
         allocations=allocations,
+        distance_matrix=distance_matrix,
     )
 
 
@@ -1235,31 +1240,43 @@ async def api_trajectory_swap_optimize(req: TrajectorySwapRequest):
     print(f"   Received routes: {list(req.solution.get('routes', {}).keys())}")
     print("="*60)
 
-    # Get the cached distance matrix for SAM-aware distances
-    cached_matrix = get_current_matrix()
-    if cached_matrix:
-        print(f"   Using cached distance matrix with {len(cached_matrix.get('labels', []))} labels")
+    # Use distance matrix from solution if available, else fall back to cache
+    distance_matrix = req.solution.get('distance_matrix')
+    if distance_matrix:
+        print(f"   Using distance matrix from solution with {len(distance_matrix.get('labels', []))} labels")
     else:
-        print("   WARNING: No cached distance matrix available!")
+        # Fall back to cached matrix
+        distance_matrix = get_current_matrix()
+        if distance_matrix:
+            print(f"   Using cached distance matrix with {len(distance_matrix.get('labels', []))} labels")
+        else:
+            print("   WARNING: No distance matrix available!")
 
     try:
         result = trajectory_swap_optimize(
             solution=req.solution,
             env=req.env,
             drone_configs=req.drone_configs,
-            distance_matrix=cached_matrix,
+            distance_matrix=distance_matrix,
         )
 
         # Log swaps made
         swaps = result.get("swaps_made", [])
+        print(f"\n🔄 TRAJECTORY SWAP OPTIMIZATION: Returning {len(swaps)} swaps to frontend")
         if swaps:
-            print(f"\n🔄 TRAJECTORY SWAP OPTIMIZATION: {len(swaps)} swaps made")
+            print(f"   Total swaps made: {len(swaps)}")
             for swap in swaps:
                 print(f"   {swap['target']}: Drone {swap['from_drone']} → Drone {swap['to_drone']} "
-                      f"(cost {swap.get('old_cost', 0):.1f} → {swap.get('new_cost', 0):.1f}, "
+                      f"(SSD {swap.get('ssd', 0):.1f} → OSD {swap.get('osd', 0):.1f}, "
                       f"savings {swap.get('savings', 0):.1f})")
         else:
-            print("\n🔄 TRAJECTORY SWAP OPTIMIZATION: No beneficial swaps found")
+            print("   No beneficial swaps found")
+
+        # Debug: Print route changes
+        print(f"\n📋 Routes being returned to frontend:")
+        for did, route_data in result.get("routes", {}).items():
+            route = route_data.get("route", [])
+            print(f"   D{did}: {' -> '.join(str(wp) for wp in route)}")
 
         return {
             "success": True,
@@ -1342,19 +1359,24 @@ async def api_insert_missed_optimize(req: InsertMissedRequest):
     print(f"   Received routes: {list(req.solution.get('routes', {}).keys())}")
     print("="*60)
 
-    # Get the cached distance matrix for SAM-aware distances
-    cached_matrix = get_current_matrix()
-    if cached_matrix:
-        print(f"   Using cached distance matrix with {len(cached_matrix.get('labels', []))} labels")
+    # Use distance matrix from solution if available, else fall back to cache
+    distance_matrix = req.solution.get('distance_matrix')
+    if distance_matrix:
+        print(f"   Using distance matrix from solution with {len(distance_matrix.get('labels', []))} labels")
     else:
-        print("   WARNING: No cached distance matrix available!")
+        # Fall back to cached matrix
+        distance_matrix = get_current_matrix()
+        if distance_matrix:
+            print(f"   Using cached distance matrix with {len(distance_matrix.get('labels', []))} labels")
+        else:
+            print("   WARNING: No distance matrix available!")
 
     try:
         result = post_optimize_solution(
             solution=req.solution,
             env=req.env,
             drone_configs=req.drone_configs,
-            distance_matrix=cached_matrix,
+            distance_matrix=distance_matrix,
         )
 
         # Count insertions by comparing routes
