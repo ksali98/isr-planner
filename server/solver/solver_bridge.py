@@ -694,41 +694,15 @@ def solve_mission_with_allocation(
         )
         env_for_solver["start_airport"] = start_id
 
-        # If flexible endpoint, try all airports and pick best result
+        # If flexible endpoint, use best_end mode to let solver choose optimal end
         if flexible_endpoint:
-            print(f"   🔄 Flexible endpoint: trying all {len(airports)} airports...", flush=True)
-            best_sol = None
-            best_points = -1
-            best_distance = float('inf')
-            best_end_id = start_id
-
-            for try_airport in airports:
-                try_end_id = try_airport["id"]
-                env_for_solver["end_airport"] = try_end_id
-                env_for_solver["mode"] = "return" if try_end_id == start_id else "end"
-                try_sol = _solver.solve(env_for_solver, fuel_budget)
-
-                try_visited = try_sol.get("visited_targets", [])
-                target_priorities = {t["id"]: int(t.get("priority", 1)) for t in candidate_targets}
-                try_points = sum(target_priorities.get(tid, 0) for tid in try_visited)
-                try_distance = float(try_sol.get("distance", 0.0))
-
-                # Pick solution with more points, or same points but shorter distance
-                is_better = (try_points > best_points or
-                            (try_points == best_points and try_distance < best_distance))
-
-                if is_better:
-                    best_sol = try_sol
-                    best_points = try_points
-                    best_distance = try_distance
-                    best_end_id = try_end_id
-                    print(f"      ✓ {try_end_id}: {try_points} pts, {try_distance:.1f} dist (new best)", flush=True)
-                else:
-                    print(f"      - {try_end_id}: {try_points} pts, {try_distance:.1f} dist", flush=True)
-
-            sol = best_sol
-            end_id = best_end_id  # Update end_id to the chosen optimal endpoint
-            print(f"   🎯 Optimal endpoint: {end_id} ({best_points} pts, {best_distance:.1f} dist)", flush=True)
+            print(f"   🔄 Flexible endpoint: solver will choose optimal end airport", flush=True)
+            env_for_solver["mode"] = "best_end"
+            # Don't set end_airport - let solver choose
+            sol = _solver.solve(env_for_solver, fuel_budget)
+            # Extract the end airport chosen by solver
+            end_id = sol.get("end_airport", start_id)
+            print(f"   🎯 Solver chose endpoint: {end_id}", flush=True)
         else:
             env_for_solver["end_airport"] = end_id
             env_for_solver["mode"] = "return" if end_id == start_id else "end"

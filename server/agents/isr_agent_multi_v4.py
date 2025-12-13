@@ -851,9 +851,17 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
         fuel_budget = cfg.get("fuelBudget", cfg.get("fuel_budget", 200))
         home_airport = cfg.get("home_airport", "A1")
         end_airport = cfg.get("end_airport", home_airport)
-        mode = "return" if end_airport == home_airport else "end"
 
-        print(f"[v4][ROUTE_OPT] D{did} start={home_airport} end={end_airport} mode={mode}", flush=True)
+        # Check for flexible endpoint ("-" means solver chooses optimal end)
+        flexible_endpoint = (end_airport == "-")
+        if flexible_endpoint:
+            mode = "best_end"
+        elif end_airport == home_airport:
+            mode = "return"
+        else:
+            mode = "end"
+
+        print(f"[v4][ROUTE_OPT] D{did} start={home_airport} end={end_airport} flexible={flexible_endpoint} mode={mode}", flush=True)
 
         if not target_ids:
             routes[did] = {
@@ -871,9 +879,14 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                 # --- Build FILTERED matrix data ---
                 all_labels = list(dist_matrix.keys())
 
-                # For this drone, we only care about its home airport + its allocated targets
-                # Include start airport, end airport, and all assigned targets
-                requested_labels = [home_airport, end_airport] + list(target_ids)
+                # Build requested labels based on mode
+                if flexible_endpoint:
+                    # For best_end mode, include ALL airports so solver can choose optimal end
+                    all_airport_ids = [a["id"] for a in env.get("airports", [])]
+                    requested_labels = all_airport_ids + list(target_ids)
+                else:
+                    # For fixed end, only include start, end, and targets
+                    requested_labels = [home_airport, end_airport] + list(target_ids)
 
                 # Keep only labels that actually exist in the distance matrix
                 labels = [lab for lab in requested_labels if lab in all_labels]
@@ -912,11 +925,19 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                     "matrix": matrix,
                     "matrix_labels": labels,
                     "start_airport": home_airport,
-                    "end_airport": end_airport,
                     "mode": mode,
                 }
 
+                # Only set end_airport if not flexible (best_end mode lets solver choose)
+                if not flexible_endpoint:
+                    solver_env["end_airport"] = end_airport
+
                 solution = solver.solve(solver_env, fuel_budget)
+
+                # Extract the actual end airport from solution (solver may have chosen it)
+                actual_end = solution.get("end_airport", end_airport if not flexible_endpoint else home_airport)
+                if flexible_endpoint:
+                    print(f"   🎯 [v4] Solver chose endpoint: {actual_end}", flush=True)
 
                 route = solution.get("route", [home_airport])
                 distance = solution.get("distance", 0)
