@@ -636,6 +636,9 @@ class TrajectorySwapOptimizer:
         for pass_num in range(num_passes):
             print(f"\n  📍 Pass {pass_num + 1}/{num_passes}")
 
+            # Collect ALL possible swap candidates in this pass
+            swap_candidates = []
+
             # Collect all targets to check in this pass
             targets_to_check = []
             for current_drone, route_data in optimized_routes.items():
@@ -644,7 +647,7 @@ class TrajectorySwapOptimizer:
                     if str(wp_id).startswith("T"):
                         targets_to_check.append(wp_id)
 
-            # Check each target once in this pass
+            # Evaluate each target to find its best swap option
             for wp_id in targets_to_check:
                 # Find current location of this target
                 current_drone = None
@@ -796,27 +799,55 @@ class TrajectorySwapOptimizer:
                             best_drone = other_drone
                             best_route_segment = j + 1  # Insert after seg_start
 
-                # If found a better segment, swap
+                # If found a better segment, add to candidates (don't execute yet)
                 if best_drone and best_osd < ssd:
-                    print(f"       ✅ SWAP: {wp_id} from D{current_drone} to D{best_drone}, SSD={ssd:.2f}→OSD={best_osd:.2f}")
+                    gain = ssd - best_osd
+                    print(f"       📋 Candidate: {wp_id} from D{current_drone} to D{best_drone}, gain={gain:.2f}")
 
-                    # Record the swap
-                    all_swaps.append({
+                    swap_candidates.append({
                         "target": wp_id,
                         "from_drone": current_drone,
                         "to_drone": best_drone,
+                        "from_idx": current_idx,
+                        "to_segment": best_route_segment,
                         "ssd": ssd,
                         "osd": best_osd,
-                        "savings": ssd - best_osd,
+                        "gain": gain,
                         "same_drone": (best_drone == current_drone),
-                        "pass": pass_num + 1
                     })
 
-                    # Remove from current route
-                    optimized_routes[current_drone]["route"].remove(wp_id)
+            # After evaluating ALL targets, pick the SINGLE best swap
+            if swap_candidates:
+                # Sort by gain (descending) and pick the best one
+                best_swap = max(swap_candidates, key=lambda x: x['gain'])
 
-                    # Insert into new route
-                    optimized_routes[best_drone]["route"].insert(best_route_segment, wp_id)
+                print(f"\n  🏆 Selected best swap: {best_swap['target']} from D{best_swap['from_drone']} to D{best_swap['to_drone']}, gain={best_swap['gain']:.2f}")
+
+                # Execute only this one swap
+                wp_id = best_swap['target']
+                from_drone = best_swap['from_drone']
+                to_drone = best_swap['to_drone']
+                to_segment = best_swap['to_segment']
+
+                # Remove from current route
+                optimized_routes[from_drone]["route"].remove(wp_id)
+
+                # Insert into new route
+                optimized_routes[to_drone]["route"].insert(to_segment, wp_id)
+
+                # Record the swap
+                all_swaps.append({
+                    "target": wp_id,
+                    "from_drone": from_drone,
+                    "to_drone": to_drone,
+                    "ssd": best_swap['ssd'],
+                    "osd": best_swap['osd'],
+                    "savings": best_swap['gain'],
+                    "same_drone": best_swap['same_drone'],
+                    "pass": pass_num + 1
+                })
+            else:
+                print(f"\n  ⏹️  No beneficial swaps found in this pass")
 
         # Recalculate metrics for all routes
         for did, route_data in optimized_routes.items():
