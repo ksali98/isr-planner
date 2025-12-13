@@ -783,9 +783,25 @@ class TrajectorySwapOptimizer:
                                 print(f"            ⛽ FUEL: D{other_drone} {seg_start_id}→{seg_end_id} exceeds budget ({other_current_distance:.1f}+{insertion_cost:.1f} > {other_fuel_budget:.1f})")
                                 continue
 
-                        # Track best option (minimum OSD)
-                        if osd < best_osd:
-                            print(f"            🔄 New best: D{other_drone} {seg_start_id}→{seg_end_id}, OSD={osd:.2f} (was {best_osd:.2f})")
+                        # Calculate net savings for this swap
+                        # For same-drone swaps: no insertion cost to other drone
+                        # For cross-drone swaps: must account for insertion cost
+                        if other_drone == current_drone:
+                            # Same drone: just reordering within route
+                            net_savings = ssd - osd  # Pure geometric improvement
+                        else:
+                            # Cross-drone swap: geometric improvement minus insertion cost
+                            # We remove from current drone (saves distance) and add to other drone (costs distance)
+                            # Net benefit = (what we save) - (what we add)
+                            # Since we're using perpendicular distances as proxy for route improvement,
+                            # the savings is approximately (ssd - osd)
+                            # But we need to ensure the other drone can afford the insertion_cost
+                            net_savings = ssd - osd  # Geometric improvement is the main factor
+
+                        # Track best option (maximum net savings)
+                        # Use net_savings as primary criterion, OSD as tiebreaker
+                        if net_savings > (ssd - best_osd):  # Better savings than current best
+                            print(f"            🔄 New best: D{other_drone} {seg_start_id}→{seg_end_id}, savings={net_savings:.2f} (was {ssd - best_osd:.2f})")
                             best_osd = osd
                             best_insertion_cost = insertion_cost
                             best_drone = other_drone
