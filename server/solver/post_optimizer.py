@@ -693,9 +693,7 @@ class TrajectorySwapOptimizer:
                 # Calculate SSD: Self Segment Distance
                 ssd = self._point_to_line_distance(target_pos, prev_pos, next_pos)
 
-                # Only log targets with significant SSD (skip trivial cases)
-                if ssd > 5.0:
-                    print(f"    🎯 {wp_id}: SSD={ssd:.2f} (route segment {prev_wp}→{next_wp})")
+                print(f"    🎯 {wp_id}: SSD={ssd:.2f} (route segment {prev_wp}→{next_wp})")
 
                 # CRITICAL: NO SSD NO MOVEMENT
                 if ssd == 0.0:
@@ -759,8 +757,7 @@ class TrajectorySwapOptimizer:
                         # Calculate OSD: Other Segment Distance
                         osd = self._point_to_line_distance(target_pos, seg_start_pos, seg_end_pos)
 
-                        # Debug: only show cross-drone candidates (skip same-drone for brevity)
-                        if osd < ssd and other_drone != current_drone:
+                        if osd < ssd:
                             print(f"         📐 D{other_drone} segment {seg_start_id}→{seg_end_id}: OSD={osd:.2f} < SSD={ssd:.2f}")
 
                         # CRITICAL: Only move if OSD < SSD (improvement required)
