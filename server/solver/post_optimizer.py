@@ -679,24 +679,36 @@ class TrajectorySwapOptimizer:
                 if not target_pos:
                     continue
 
-                # Get prev and next waypoints in route (not trajectory)
-                # This is simpler and works for most cases
-                if current_idx == 0 or current_idx == len(route) - 1:
-                    continue  # Target at start or end, cannot have self-segment
-
-                prev_wp = route[current_idx - 1]
-                next_wp = route[current_idx + 1]
-
-                prev_pos = waypoint_positions.get(str(prev_wp))
-                next_pos = waypoint_positions.get(str(next_wp))
-
-                if not prev_pos or not next_pos:
+                # Use actual trajectory vertices instead of route waypoints
+                # This correctly accounts for SAM-avoidance trajectory deviations
+                if str(wp_id) not in target_to_traj_index:
+                    print(f"    ⏭️  SKIP {wp_id}: Not found in trajectory index")
                     continue
 
-                # Calculate SSD: Self Segment Distance
+                traj_drone_id, traj_idx = target_to_traj_index[str(wp_id)]
+
+                # Ensure this target is still on the same drone
+                if traj_drone_id != current_drone:
+                    print(f"    ⏭️  SKIP {wp_id}: Drone mismatch (index:{traj_drone_id}, current:{current_drone})")
+                    continue
+
+                trajectory = drone_trajectories.get(current_drone)
+                if not trajectory or traj_idx == 0 or traj_idx >= len(trajectory) - 1:
+                    print(f"    ⏭️  SKIP {wp_id}: At trajectory boundary (idx={traj_idx}, len={len(trajectory) if trajectory else 0})")
+                    continue
+
+                # Get actual trajectory vertices immediately before/after this target
+                prev_pos = trajectory[traj_idx - 1]
+                next_pos = trajectory[traj_idx + 1]
+
+                # Calculate SSD: Self Segment Distance using trajectory vertices
                 ssd = self._point_to_line_distance(target_pos, prev_pos, next_pos)
 
-                print(f"    🎯 {wp_id}: SSD={ssd:.2f} (route segment {prev_wp}→{next_wp})")
+                # Get route waypoint IDs for logging
+                prev_wp = route[current_idx - 1] if current_idx > 0 else "?"
+                next_wp = route[current_idx + 1] if current_idx < len(route) - 1 else "?"
+
+                print(f"    🎯 {wp_id}: SSD={ssd:.2f} (trajectory vertices around {prev_wp}→{wp_id}→{next_wp})")
 
                 # CRITICAL: NO SSD NO MOVEMENT
                 if ssd == 0.0:
@@ -710,7 +722,7 @@ class TrajectorySwapOptimizer:
                 best_insertion_cost = float('inf')
                 best_net_savings = -float('inf')  # Track maximum gain (SSD - OSD)
 
-                # Check all route segments in all drones
+                # Check all trajectory segments in all drones
                 for other_drone, other_route_data in optimized_routes.items():
                     other_route = other_route_data["route"]
                     other_frozen = other_route_data["frozen_segments"]
@@ -721,13 +733,17 @@ class TrajectorySwapOptimizer:
                         if not target_allowed_for_drone(target, other_drone, other_cfg, priority_filters):
                             continue
 
-                    # Check each segment in route
+                    # Get trajectory for this drone
+                    other_trajectory = drone_trajectories.get(other_drone)
+                    if not other_trajectory or len(other_trajectory) < 2:
+                        continue
+
+                    # Check each route segment (between waypoints)
                     for j in range(len(other_route) - 1):
                         if j in other_frozen:
                             continue
 
                         # Skip current target's adjacent segments
-                        # Don't allow inserting into the segment immediately before or after the target
                         if other_drone == current_drone:
                             if j == current_idx - 1:  # Segment: prev→target
                                 continue
@@ -741,25 +757,57 @@ class TrajectorySwapOptimizer:
                         if str(seg_end_id).startswith("A"):
                             continue
 
-                        # Get positions of route waypoints
-                        seg_start_pos = waypoint_positions.get(seg_start_id)
-                        seg_end_pos = waypoint_positions.get(seg_end_id)
+                        # Find trajectory indices for this route segment
+                        # We need to check all trajectory vertices between these route waypoints
+                        start_traj_idx = None
+                        end_traj_idx = None
 
-                        if not seg_start_pos or not seg_end_pos:
+                        # Find start waypoint in trajectory
+                        start_wp_pos = waypoint_positions.get(seg_start_id)
+                        if start_wp_pos:
+                            for ti, tv in enumerate(other_trajectory):
+                                if abs(tv[0] - start_wp_pos[0]) < 0.001 and abs(tv[1] - start_wp_pos[1]) < 0.001:
+                                    start_traj_idx = ti
+                                    break
+
+                        # Find end waypoint in trajectory
+                        end_wp_pos = waypoint_positions.get(seg_end_id)
+                        if end_wp_pos:
+                            for ti, tv in enumerate(other_trajectory):
+                                if abs(tv[0] - end_wp_pos[0]) < 0.001 and abs(tv[1] - end_wp_pos[1]) < 0.001:
+                                    end_traj_idx = ti
+                                    break
+
+                        if start_traj_idx is None or end_traj_idx is None:
                             continue
 
-                        # Quick distance check: is segment within circle of radius SSD?
-                        # Use bounding box approximation for speed
-                        min_x = min(seg_start_pos[0], seg_end_pos[0]) - ssd
-                        max_x = max(seg_start_pos[0], seg_end_pos[0]) + ssd
-                        min_y = min(seg_start_pos[1], seg_end_pos[1]) - ssd
-                        max_y = max(seg_start_pos[1], seg_end_pos[1]) + ssd
+                        # Check all trajectory sub-segments between these waypoints
+                        # This includes SAM-avoidance tangent points
+                        best_osd_in_segment = float('inf')
 
-                        if not (min_x <= target_pos[0] <= max_x and min_y <= target_pos[1] <= max_y):
-                            continue  # Segment bounding box too far away
+                        for ti in range(start_traj_idx, end_traj_idx):
+                            traj_seg_start = other_trajectory[ti]
+                            traj_seg_end = other_trajectory[ti + 1]
 
-                        # Calculate OSD: Other Segment Distance
-                        osd = self._point_to_line_distance(target_pos, seg_start_pos, seg_end_pos)
+                            # Quick bounding box check
+                            min_x = min(traj_seg_start[0], traj_seg_end[0]) - ssd
+                            max_x = max(traj_seg_start[0], traj_seg_end[0]) + ssd
+                            min_y = min(traj_seg_start[1], traj_seg_end[1]) - ssd
+                            max_y = max(traj_seg_start[1], traj_seg_end[1]) + ssd
+
+                            if not (min_x <= target_pos[0] <= max_x and min_y <= target_pos[1] <= max_y):
+                                continue  # Trajectory segment too far away
+
+                            # Calculate OSD to this trajectory sub-segment
+                            osd = self._point_to_line_distance(target_pos, traj_seg_start, traj_seg_end)
+                            if osd < best_osd_in_segment:
+                                best_osd_in_segment = osd
+
+                        # Use the best (minimum) OSD found across all sub-segments
+                        osd = best_osd_in_segment
+
+                        if osd == float('inf'):
+                            continue  # No valid sub-segments found
 
                         if osd < ssd:
                             print(f"         📐 D{other_drone} segment {seg_start_id}→{seg_end_id}: OSD={osd:.2f} < SSD={ssd:.2f}")
