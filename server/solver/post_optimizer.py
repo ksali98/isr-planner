@@ -695,13 +695,24 @@ class TrajectorySwapOptimizer:
                     continue
 
                 trajectory = drone_trajectories.get(current_drone)
-                if not trajectory or traj_idx == 0 or traj_idx >= len(trajectory) - 1:
-                    print(f"    ⏭️  SKIP {wp_id}: At trajectory boundary (idx={traj_idx}, len={len(trajectory) if trajectory else 0})")
+                if not trajectory or len(trajectory) < 2:
+                    print(f"    ⏭️  SKIP {wp_id}: No valid trajectory (len={len(trajectory) if trajectory else 0})")
                     continue
 
                 # Get actual trajectory vertices immediately before/after this target
-                prev_pos = trajectory[traj_idx - 1]
-                next_pos = trajectory[traj_idx + 1]
+                # Handle boundary cases (targets at trajectory endpoints)
+                if traj_idx == 0:
+                    # Target at start of trajectory - use first two vertices
+                    prev_pos = trajectory[0]
+                    next_pos = trajectory[1] if len(trajectory) > 1 else trajectory[0]
+                elif traj_idx >= len(trajectory) - 1:
+                    # Target at end of trajectory - use last two vertices
+                    prev_pos = trajectory[-2] if len(trajectory) > 1 else trajectory[-1]
+                    next_pos = trajectory[-1]
+                else:
+                    # Target in middle of trajectory - use surrounding vertices
+                    prev_pos = trajectory[traj_idx - 1]
+                    next_pos = trajectory[traj_idx + 1]
 
                 # Calculate SSD: Self Segment Distance using trajectory vertices
                 ssd = self._point_to_line_distance(target_pos, prev_pos, next_pos)
