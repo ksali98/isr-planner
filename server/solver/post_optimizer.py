@@ -698,9 +698,7 @@ class TrajectorySwapOptimizer:
                     other_current_distance = self._calculate_route_distance(other_route)
 
                     # Check each segment in this drone's route
-                    # IMPORTANT: Only check up to second-to-last segment to prevent insertion AFTER end airport
-                    # A route is [start, ..., targets, ..., end], we can only insert between start and end
-                    for j in range(len(other_route) - 2):  # -2 to exclude the last segment (before end airport)
+                    for j in range(len(other_route) - 1):
                         # Skip frozen segments (cannot insert into frozen)
                         if j in other_frozen:
                             continue
