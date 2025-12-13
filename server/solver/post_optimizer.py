@@ -199,15 +199,19 @@ class PostOptimizer:
             drone_remaining_fuel[did] = fuel_budget - distance_used
 
         # Try to assign each unvisited target
+        # GOAL: Maximize total points by inserting ALL targets that fit within fuel budget
+        # STRATEGY:
+        #   1. Process targets by priority (highest first) - maximizes points
+        #   2. For each target, find ALL drones that can take it (capability + fuel check)
+        #   3. Among viable drones, pick the one with LOWEST insertion cost - minimizes fuel
         optimized_routes = dict(solution.get("routes", {}))
 
         for tid in unvisited_sorted:
             target = target_by_id[tid]
             priority = int(target.get("priority", 5))
 
-            best_drone = None
-            best_insertion = None
-            best_cost = float('inf')
+            # Find ALL viable (drone, position, cost) options for this target
+            viable_options = []  # List of (drone_id, insertion_index, insertion_cost)
 
             for did, cfg in drone_configs.items():
                 # Check ALL constraints: enabled, target type, AND priority
@@ -225,6 +229,10 @@ class PostOptimizer:
 
                 if not route:
                     continue
+
+                # Find the cheapest insertion position for THIS drone
+                best_insertion_idx = None
+                best_insertion_cost = float('inf')
 
                 # Try inserting at each position
                 for i in range(1, len(route)):  # Don't insert before start
@@ -244,37 +252,41 @@ class PostOptimizer:
                     if insertion_cost > remaining_fuel:
                         continue
 
-                    # Prefer insertions that minimize cost while considering priority
-                    # Use efficiency metric: priority / cost
-                    if insertion_cost <= 0:
-                        insertion_cost = 0.1  # Avoid division by zero
+                    # Track the cheapest insertion point for this drone
+                    if insertion_cost < best_insertion_cost:
+                        best_insertion_cost = insertion_cost
+                        best_insertion_idx = i
 
-                    efficiency = priority / insertion_cost
+                # If we found a viable insertion for this drone, add to options
+                if best_insertion_idx is not None:
+                    viable_options.append((did, best_insertion_idx, best_insertion_cost))
 
-                    if insertion_cost < best_cost:
-                        best_cost = insertion_cost
-                        best_drone = did
-                        best_insertion = i
+            # If no drone can take this target, skip it
+            if not viable_options:
+                continue
 
-            # Apply the best insertion if found
-            if best_drone and best_insertion is not None:
-                route = list(optimized_routes[best_drone].get("route", []))
-                route.insert(best_insertion, tid)
+            # Among viable options, pick the drone with LOWEST insertion cost
+            # This minimizes fuel usage when multiple drones can service the target
+            best_drone, best_insertion, best_cost = min(viable_options, key=lambda x: x[2])
 
-                # Recalculate route metrics
-                new_distance = self._calculate_route_distance(route)
-                new_points = self._calculate_route_points(route, target_by_id)
+            # Apply the insertion
+            route = list(optimized_routes[best_drone].get("route", []))
+            route.insert(best_insertion, tid)
 
-                optimized_routes[best_drone] = {
-                    "route": route,
-                    "sequence": ",".join(route),
-                    "points": new_points,
-                    "distance": new_distance,
-                    "fuel_budget": optimized_routes[best_drone].get("fuel_budget", 0)
-                }
+            # Recalculate route metrics
+            new_distance = self._calculate_route_distance(route)
+            new_points = self._calculate_route_points(route, target_by_id)
 
-                # Update remaining fuel
-                drone_remaining_fuel[best_drone] -= best_cost
+            optimized_routes[best_drone] = {
+                "route": route,
+                "sequence": ",".join(route),
+                "points": new_points,
+                "distance": new_distance,
+                "fuel_budget": optimized_routes[best_drone].get("fuel_budget", 0)
+            }
+
+            # Update remaining fuel for this drone
+            drone_remaining_fuel[best_drone] -= best_cost
 
         # Rebuild solution
         optimized_solution = {
