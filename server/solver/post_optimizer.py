@@ -1125,7 +1125,11 @@ class CrossingRemovalOptimizer:
         for did, route_data in optimized_routes.items():
             route = route_data["route"]
             route_data["sequence"] = ",".join(str(wp) for wp in route)
-            route_data["distance"] = self._calculate_route_distance(route, waypoint_positions)
+            # Use SAM-aware distance matrix if available, otherwise fallback to Euclidean
+            if self._distance_matrix:
+                route_data["distance"] = self._calculate_route_distance_from_matrix(route)
+            else:
+                route_data["distance"] = self._calculate_route_distance_euclidean(route, waypoint_positions)
             route_data["points"] = self._calculate_route_points(route, target_by_id)
 
         return {
@@ -1137,12 +1141,40 @@ class CrossingRemovalOptimizer:
             "passes": num_passes
         }
 
-    def _calculate_route_distance(
+    def _calculate_route_distance_from_matrix(self, route: List[str]) -> float:
+        """
+        Calculate total SAM-aware distance of a route using the distance matrix.
+
+        This is the correct distance calculation that accounts for SAM zones.
+        """
+        if len(route) < 2 or not self._distance_matrix:
+            return 0.0
+
+        labels = self._distance_matrix.get("labels", [])
+        matrix = self._distance_matrix.get("matrix", [])
+
+        total = 0.0
+        for i in range(len(route) - 1):
+            try:
+                idx_from = labels.index(str(route[i]))
+                idx_to = labels.index(str(route[i + 1]))
+                total += matrix[idx_from][idx_to]
+            except (ValueError, IndexError):
+                # Fallback if waypoint not in matrix
+                total += 10.0
+
+        return total
+
+    def _calculate_route_distance_euclidean(
         self,
         route: List[str],
         waypoint_positions: Dict[str, Tuple[float, float]]
     ) -> float:
-        """Calculate total Euclidean distance of a route."""
+        """
+        Calculate total Euclidean distance of a route (fallback when no matrix available).
+
+        WARNING: This does NOT account for SAM zones. Only use as fallback.
+        """
         if len(route) < 2:
             return 0.0
 
