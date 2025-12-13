@@ -246,6 +246,11 @@ class PostOptimizer:
                     prev_wp = route[i - 1]
                     next_wp = route[i]
 
+                    # CRITICAL: Only insert between targets or before end airport
+                    # Skip positions where next_wp is an airport (prevents inserting after end airport)
+                    if str(next_wp).startswith("A"):
+                        continue
+
                     # Calculate insertion cost
                     # Cost = (new_distance) - (original_distance)
                     orig_dist = self._get_distance(prev_wp, next_wp)
