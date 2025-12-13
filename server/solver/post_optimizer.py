@@ -230,12 +230,19 @@ class PostOptimizer:
                 if not route:
                     continue
 
+                # Get frozen segments for this drone (indices where route[i]->route[i+1] is frozen)
+                frozen_segments = set(route_data.get("frozen_segments", []))
+
                 # Find the cheapest insertion position for THIS drone
                 best_insertion_idx = None
                 best_insertion_cost = float('inf')
 
                 # Try inserting at each position
                 for i in range(1, len(route)):  # Don't insert before start
+                    # Skip if this segment is frozen (cannot insert into frozen segment)
+                    if (i - 1) in frozen_segments:
+                        continue
+
                     prev_wp = route[i - 1]
                     next_wp = route[i]
 
@@ -543,6 +550,15 @@ class TrajectorySwapOptimizer:
         """
         Reassign targets to drones with closer trajectories.
 
+        GOAL: Minimize fuel usage by moving targets closer to trajectory paths
+
+        Algorithm:
+        1. For each target, calculate distance to its current trajectory segment
+        2. Find ALL other trajectory segments (same or different drones)
+        3. If a closer segment exists, move target there
+        4. Can move within same drone (reposition) or to different drone
+        5. Respects frozen segments, fuel budgets, and capabilities
+
         Args:
             solution: Current solution with routes for each drone
             env: Environment dict with targets, airports, sams
@@ -566,7 +582,7 @@ class TrajectorySwapOptimizer:
         for a in env.get("airports", []):
             waypoint_positions[str(a["id"])] = (float(a["x"]), float(a["y"]))
 
-        # Copy routes for modification, including trajectories
+        # Copy routes for modification, including trajectories and frozen segments
         optimized_routes = {}
         drone_trajectories = {}  # Store the actual SAM-avoiding trajectories
         for did, route_data in solution.get("routes", {}).items():
@@ -576,6 +592,7 @@ class TrajectorySwapOptimizer:
                 "points": route_data.get("points", 0),
                 "distance": route_data.get("distance", 0),
                 "fuel_budget": route_data.get("fuel_budget", 0),
+                "frozen_segments": set(route_data.get("frozen_segments", [])),
             }
             # Extract trajectory as list of (x, y) tuples
             traj = route_data.get("trajectory", [])
@@ -617,6 +634,13 @@ class TrajectorySwapOptimizer:
                     continue  # Target no longer in any route
 
                 route = optimized_routes[current_drone]["route"]
+                frozen_segments = optimized_routes[current_drone]["frozen_segments"]
+
+                # Skip if target is in a frozen segment (cannot move from frozen)
+                if current_idx > 0 and (current_idx - 1) in frozen_segments:
+                    continue  # Target is in frozen segment route[i-1]->route[i]
+                if current_idx < len(route) - 1 and current_idx in frozen_segments:
+                    continue  # Target is in frozen segment route[i]->route[i+1]
 
                 target = target_by_id.get(str(wp_id))
                 if not target:
@@ -626,8 +650,6 @@ class TrajectorySwapOptimizer:
                 if not target_pos:
                     continue
 
-                target_type = str(target.get("type", "a")).lower()
-
                 # Get prev and next waypoints in current route
                 prev_wp = route[current_idx - 1] if current_idx > 0 else None
                 next_wp = route[current_idx + 1] if current_idx < len(route) - 1 else None
@@ -635,80 +657,109 @@ class TrajectorySwapOptimizer:
                 if not prev_wp or not next_wp:
                     continue
 
-                # Calculate current insertion cost using SAM-aware distance matrix
-                # Cost of having target in current position = dist(prev->target) + dist(target->next)
-                # Cost if we remove target = dist(prev->next)
-                # So current "extra cost" = dist(prev->target) + dist(target->next) - dist(prev->next)
+                # Calculate CURRENT trajectory distance (distance from target to its current trajectory segment)
+                # Use waypoint positions (not trajectory polylines for now - simplified)
+                prev_pos = waypoint_positions.get(str(prev_wp))
+                next_pos = waypoint_positions.get(str(next_wp))
+
+                if not prev_pos or not next_pos:
+                    continue
+
+                current_traj_distance = self._point_to_line_distance(target_pos, prev_pos, next_pos)
+
+                # Calculate current insertion cost for fuel tracking
                 d1 = self._get_matrix_distance(str(prev_wp), str(wp_id))
                 d2 = self._get_matrix_distance(str(wp_id), str(next_wp))
                 d3 = self._get_matrix_distance(str(prev_wp), str(next_wp))
-                current_cost = d1 + d2 - d3
+                current_insertion_cost = d1 + d2 - d3
 
-                # Check all other drones' routes for better insertion
+                # Find ALL other trajectory segments (including same drone, different positions)
                 best_drone = None
                 best_segment = None
-                best_cost = current_cost
+                best_traj_distance = current_traj_distance
+                best_insertion_cost = float('inf')
 
                 for other_drone, other_route_data in optimized_routes.items():
-                    if other_drone == current_drone:
-                        continue
-
-                    # Check ALL constraints: enabled, target type, AND priority
-                    other_cfg = drone_configs.get(other_drone, {})
-                    if not target_allowed_for_drone(target, other_drone, other_cfg, priority_filters):
-                        continue
-
                     other_route = other_route_data["route"]
+                    other_frozen = other_route_data["frozen_segments"]
 
-                    # Get fuel budget for the receiving drone
+                    # Check drone capability (skip if same drone, we'll check positions)
+                    if other_drone != current_drone:
+                        other_cfg = drone_configs.get(other_drone, {})
+                        if not target_allowed_for_drone(target, other_drone, other_cfg, priority_filters):
+                            continue
+
+                    # Check fuel budget for receiving drone
                     other_fuel_budget = other_route_data.get("fuel_budget", 0)
                     if other_fuel_budget <= 0:
-                        # Try to get from drone_configs
                         other_cfg = drone_configs.get(other_drone, {})
                         other_fuel_budget = other_cfg.get("fuel_budget", 200)
 
-                    # Calculate current fuel usage for receiving drone
                     other_current_distance = self._calculate_route_distance(other_route)
 
-                    # Check each segment in other drone's route for insertion cost
+                    # Check each segment in this drone's route
                     for j in range(len(other_route) - 1):
-                        seg_start = str(other_route[j])
-                        seg_end = str(other_route[j + 1])
+                        # Skip frozen segments (cannot insert into frozen)
+                        if j in other_frozen:
+                            continue
+
+                        # Skip current position (same drone, same segment)
+                        if other_drone == current_drone and j == current_idx - 1:
+                            continue
+
+                        seg_start_id = str(other_route[j])
+                        seg_end_id = str(other_route[j + 1])
+
+                        seg_start_pos = waypoint_positions.get(seg_start_id)
+                        seg_end_pos = waypoint_positions.get(seg_end_id)
+
+                        if not seg_start_pos or not seg_end_pos:
+                            continue
+
+                        # Calculate trajectory distance to this segment
+                        traj_distance = self._point_to_line_distance(target_pos, seg_start_pos, seg_end_pos)
 
                         # Calculate insertion cost at this position
-                        # Cost = dist(seg_start->target) + dist(target->seg_end) - dist(seg_start->seg_end)
-                        d_start = self._get_matrix_distance(seg_start, str(wp_id))
-                        d_end = self._get_matrix_distance(str(wp_id), seg_end)
-                        d_direct = self._get_matrix_distance(seg_start, seg_end)
+                        d_start = self._get_matrix_distance(seg_start_id, str(wp_id))
+                        d_end = self._get_matrix_distance(str(wp_id), seg_end_id)
+                        d_direct = self._get_matrix_distance(seg_start_id, seg_end_id)
                         insertion_cost = d_start + d_end - d_direct
 
-                        # Check if adding this target would exceed fuel budget
-                        new_total_distance = other_current_distance + insertion_cost
-                        if new_total_distance > other_fuel_budget:
-                            continue  # Skip - would exceed fuel budget
+                        # For different drones: check fuel budget
+                        if other_drone != current_drone:
+                            # Removing from current drone frees fuel, adding to other uses fuel
+                            new_total_distance = other_current_distance + insertion_cost
+                            if new_total_distance > other_fuel_budget:
+                                continue  # Would exceed fuel budget
 
-                        if insertion_cost < best_cost:
-                            best_cost = insertion_cost
+                        # For same drone: net cost is relative change
+                        # (removal from current position saves fuel, insertion at new position costs fuel)
+
+                        # Only swap if trajectory distance is CLOSER
+                        if traj_distance < best_traj_distance:
+                            best_traj_distance = traj_distance
+                            best_insertion_cost = insertion_cost
                             best_drone = other_drone
                             best_segment = j + 1  # Insert after seg_start
 
-                # If found a lower cost insertion, swap
-                if best_drone and best_cost < current_cost:
+                # If found a closer trajectory, swap
+                if best_drone and best_traj_distance < current_traj_distance:
                     # Record the swap
                     all_swaps.append({
                         "target": wp_id,
                         "from_drone": current_drone,
                         "to_drone": best_drone,
-                        "old_cost": current_cost,
-                        "new_cost": best_cost,
-                        "savings": current_cost - best_cost,
+                        "old_traj_dist": current_traj_distance,
+                        "new_traj_dist": best_traj_distance,
+                        "savings": current_traj_distance - best_traj_distance,
+                        "same_drone": (best_drone == current_drone),
                         "pass": pass_num + 1
                     })
 
                     # Remove from current route
                     optimized_routes[current_drone]["route"].remove(wp_id)
 
-                    # Insert into new route
+                    # Insert into new route (or new position in same route)
                     optimized_routes[best_drone]["route"].insert(best_segment, wp_id)
 
         # Recalculate metrics for all routes
@@ -988,7 +1039,7 @@ class CrossingRemovalOptimizer:
         for a in env.get("airports", []):
             waypoint_positions[str(a["id"])] = (float(a["x"]), float(a["y"]))
 
-        # Copy routes for modification
+        # Copy routes for modification, including frozen segments
         optimized_routes = {}
         for did, route_data in solution.get("routes", {}).items():
             optimized_routes[did] = {
@@ -997,6 +1048,7 @@ class CrossingRemovalOptimizer:
                 "points": route_data.get("points", 0),
                 "distance": route_data.get("distance", 0),
                 "fuel_budget": route_data.get("fuel_budget", 0),
+                "frozen_segments": set(route_data.get("frozen_segments", [])),
             }
 
         all_fixes = []  # Track all crossings fixed
@@ -1006,6 +1058,7 @@ class CrossingRemovalOptimizer:
             # Process each drone's route
             for did, route_data in optimized_routes.items():
                 route = route_data["route"]
+                frozen_segments = route_data["frozen_segments"]
 
                 if len(route) < 4:
                     continue  # Need at least 4 points to have a crossing
@@ -1028,6 +1081,17 @@ class CrossingRemovalOptimizer:
                             # Skip adjacent segments
                             if j == i + 1:
                                 continue
+
+                            # Check if any segment in the reversal range is frozen
+                            # We reverse route[i+1:j+1], which affects segments from i to j
+                            reversal_affects_frozen = False
+                            for k in range(i, j + 1):
+                                if k in frozen_segments:
+                                    reversal_affects_frozen = True
+                                    break
+
+                            if reversal_affects_frozen:
+                                continue  # Cannot reverse if it involves frozen segments
 
                             # Get segment endpoints
                             p1 = waypoint_positions.get(str(route[i]))
