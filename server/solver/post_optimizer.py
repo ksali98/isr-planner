@@ -628,13 +628,15 @@ class TrajectorySwapOptimizer:
         self._drone_configs = drone_configs
         self._priority_filters = priority_filters
 
-        num_passes = 4  # Do 4 full passes through all targets
+        # Do ONE swap per invocation to avoid stale trajectory data
+        # After swap, frontend regenerates trajectories and user can click again
+        num_passes = 1
         all_swaps = []  # Track all swaps made
 
-        print(f"\n🔧 [TrajectorySwapOptimizer] Starting {num_passes} passes...")
+        print(f"\n🔧 [TrajectorySwapOptimizer] Searching for best swap...")
 
         for pass_num in range(num_passes):
-            print(f"\n  📍 Pass {pass_num + 1}/{num_passes}")
+            print(f"\n  📍 Evaluating all targets...")
 
             # Collect ALL possible swap candidates in this pass
             swap_candidates = []
