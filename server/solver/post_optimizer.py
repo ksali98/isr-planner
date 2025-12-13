@@ -613,7 +613,10 @@ class TrajectorySwapOptimizer:
         num_passes = 4  # Do 4 full passes through all targets
         all_swaps = []  # Track all swaps made
 
+        print(f"\n🔧 [TrajectorySwapOptimizer] Starting {num_passes} passes...")
+
         for pass_num in range(num_passes):
+            print(f"\n  📍 Pass {pass_num + 1}/{num_passes}")
             # Collect all targets to check in this pass
             # We need a snapshot because routes will change during the pass
             targets_to_check = []
@@ -674,6 +677,8 @@ class TrajectorySwapOptimizer:
                 current_traj_distance = self._point_to_line_distance(
                     target_pos, prev_pos, next_pos
                 )
+
+                print(f"    🎯 {wp_id}: self-traj-dist={current_traj_distance:.2f} (from line {prev_wp}→{next_wp})")
 
                 # Calculate current insertion cost for fuel tracking
                 d1 = self._get_matrix_distance(str(prev_wp), str(wp_id))
@@ -757,6 +762,8 @@ class TrajectorySwapOptimizer:
 
                 # If found a closer trajectory, swap
                 if best_drone and best_traj_distance < current_traj_distance:
+                    print(f"      ✅ SWAP: {wp_id} from D{current_drone} to D{best_drone}, dist {current_traj_distance:.2f}→{best_traj_distance:.2f}")
+
                     # Record the swap
                     all_swaps.append({
                         "target": wp_id,
