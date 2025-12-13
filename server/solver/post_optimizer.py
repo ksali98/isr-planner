@@ -705,6 +705,7 @@ class TrajectorySwapOptimizer:
                 best_route_segment = None
                 best_osd = float('inf')
                 best_insertion_cost = float('inf')
+                best_net_savings = -float('inf')  # Track maximum gain (SSD - OSD)
 
                 # Check all route segments in all drones
                 for other_drone, other_route_data in optimized_routes.items():
@@ -782,25 +783,14 @@ class TrajectorySwapOptimizer:
                                 print(f"            ⛽ FUEL: D{other_drone} {seg_start_id}→{seg_end_id} exceeds budget ({other_current_distance:.1f}+{insertion_cost:.1f} > {other_fuel_budget:.1f})")
                                 continue
 
-                        # Calculate net savings for this swap
-                        # For same-drone swaps: no insertion cost to other drone
-                        # For cross-drone swaps: must account for insertion cost
-                        if other_drone == current_drone:
-                            # Same drone: just reordering within route
-                            net_savings = ssd - osd  # Pure geometric improvement
-                        else:
-                            # Cross-drone swap: geometric improvement minus insertion cost
-                            # We remove from current drone (saves distance) and add to other drone (costs distance)
-                            # Net benefit = (what we save) - (what we add)
-                            # Since we're using perpendicular distances as proxy for route improvement,
-                            # the savings is approximately (ssd - osd)
-                            # But we need to ensure the other drone can afford the insertion_cost
-                            net_savings = ssd - osd  # Geometric improvement is the main factor
+                        # Calculate net savings: the gain from moving this target
+                        # Gain = SSD - OSD (how much closer the target becomes)
+                        net_savings = ssd - osd
 
-                        # Track best option (maximum net savings)
-                        # Use net_savings as primary criterion, OSD as tiebreaker
-                        if net_savings > (ssd - best_osd):  # Better savings than current best
-                            print(f"            🔄 New best: D{other_drone} {seg_start_id}→{seg_end_id}, savings={net_savings:.2f} (was {ssd - best_osd:.2f})")
+                        # Track best option: select target with MAXIMUM gain (SSD - OSD)
+                        if net_savings > best_net_savings:
+                            print(f"            🔄 New best: D{other_drone} {seg_start_id}→{seg_end_id}, gain={net_savings:.2f} (SSD={ssd:.2f} - OSD={osd:.2f})")
+                            best_net_savings = net_savings
                             best_osd = osd
                             best_insertion_cost = insertion_cost
                             best_drone = other_drone
