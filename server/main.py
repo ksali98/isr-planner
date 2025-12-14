@@ -1354,10 +1354,17 @@ async def api_insert_missed_optimize(req: InsertMissedRequest):
     into drone routes that have remaining fuel capacity. Targets are inserted
     at optimal positions to minimize additional fuel consumption.
     """
-    print("\n" + "="*60)
-    print("📥 INSERT MISSED ENDPOINT CALLED")
-    print(f"   Received routes: {list(req.solution.get('routes', {}).keys())}")
-    print("="*60)
+    print("\n" + "="*80, flush=True)
+    print("📥 INSERT MISSED ENDPOINT CALLED", flush=True)
+    print(f"   Received routes: {list(req.solution.get('routes', {}).keys())}", flush=True)
+
+    # Log BEFORE routes
+    print("\n🔍 ROUTES BEFORE INSERT MISSED:", flush=True)
+    for did in sorted(req.solution.get('routes', {}).keys()):
+        route = req.solution['routes'][did].get('route', [])
+        print(f"   D{did}: {route} (length={len(route)})", flush=True)
+
+    print("="*80, flush=True)
 
     # Use distance matrix from solution if available, else fall back to cache
     distance_matrix = req.solution.get('distance_matrix')
@@ -1393,12 +1400,21 @@ async def api_insert_missed_optimize(req: InsertMissedRequest):
                 if str(tid).startswith("T"):
                     insertions.append({"target": tid, "drone": did})
 
+        # Log AFTER routes
+        print("\n✅ ROUTES AFTER INSERT MISSED:", flush=True)
+        for did in sorted(result.get('routes', {}).keys()):
+            route = result['routes'][did].get('route', [])
+            complete = "COMPLETE" if (route and route[0].startswith('A') and route[-1].startswith('A')) else "INCOMPLETE"
+            print(f"   D{did}: {route} (length={len(route)}, {complete})", flush=True)
+
         if insertions:
-            print(f"\n➕ INSERT MISSED OPTIMIZATION: {len(insertions)} targets inserted")
+            print(f"\n➕ INSERT MISSED OPTIMIZATION: {len(insertions)} targets inserted", flush=True)
             for ins in insertions:
-                print(f"   {ins['target']} → Drone {ins['drone']}")
+                print(f"   {ins['target']} → Drone {ins['drone']}", flush=True)
         else:
-            print("\n➕ INSERT MISSED OPTIMIZATION: No insertions possible (all targets visited or fuel exhausted)")
+            print("\n➕ INSERT MISSED OPTIMIZATION: No insertions possible (all targets visited or fuel exhausted)", flush=True)
+
+        print("="*80 + "\n", flush=True)
 
         return {
             "success": True,

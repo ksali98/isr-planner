@@ -11,7 +11,26 @@ This is a LangGraph-compatible tool.
 
 import math
 import re
+import sys
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Set, Tuple, Callable
+
+# Add paths for SAM navigation
+root_path = Path(__file__).resolve().parents[2]
+if str(root_path) not in sys.path:
+    sys.path.insert(0, str(root_path))
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
+
+# Import SAM-aware path planning
+try:
+    from path_planning_core.boundary_navigation import plan_path as boundary_plan_path
+    from path_planning_core.sam_wrapping import wrap_sams
+    HAS_SAM_NAVIGATION = True
+except ImportError:
+    boundary_plan_path = None
+    wrap_sams = None
+    HAS_SAM_NAVIGATION = False
 
 
 # ============================================================================
@@ -133,10 +152,58 @@ class PostOptimizer:
 
     def __init__(self):
         self._distance_matrix: Optional[Dict[str, Any]] = None
+        self._env: Optional[Dict[str, Any]] = None
+        self._waypoint_positions: Optional[Dict[str, List[float]]] = None
+        self._sams: Optional[List[Dict[str, Any]]] = None
+        self._wrapped_polygons: Optional[List[Any]] = None
 
     def set_distance_matrix(self, matrix_data: Dict[str, Any]):
         """Set the pre-calculated distance matrix for optimization decisions."""
         self._distance_matrix = matrix_data
+
+    def set_environment(self, env: Dict[str, Any]):
+        """
+        Set environment data for SAM-aware distance fallback calculations.
+
+        Args:
+            env: Environment dict with airports, targets, and sams
+        """
+        self._env = env
+
+        # Build waypoint position lookup
+        waypoint_positions = {}
+        for a in env.get("airports", []):
+            waypoint_positions[str(a["id"])] = [float(a["x"]), float(a["y"])]
+        for t in env.get("targets", []):
+            waypoint_positions[str(t["id"])] = [float(t["x"]), float(t["y"])]
+        self._waypoint_positions = waypoint_positions
+
+        # Store SAM data
+        self._sams = env.get("sams", [])
+
+        # Generate wrapped polygons for SAM-aware distance calculations
+        # boundary_plan_path expects polygon format: List[List[List[float]]]
+        if wrap_sams and self._sams:
+            sams_for_wrapping = []
+            for sam in self._sams:
+                pos = sam.get("pos") or sam.get("position")
+                if pos:
+                    sams_for_wrapping.append({
+                        'x': pos[0] if isinstance(pos, (list, tuple)) else pos,
+                        'y': pos[1] if isinstance(pos, (list, tuple)) else pos,
+                        'radius': float(sam.get("range", sam.get("radius", 15)))
+                    })
+            if sams_for_wrapping:
+                wrapped_polygon_arrays, _ = wrap_sams(sams_for_wrapping)
+                # Convert numpy arrays to lists of [x, y] points
+                self._wrapped_polygons = []
+                for poly in wrapped_polygon_arrays:
+                    if hasattr(poly, 'tolist'):
+                        self._wrapped_polygons.append(poly.tolist())
+                    else:
+                        self._wrapped_polygons.append(list(poly))
+        else:
+            self._wrapped_polygons = None
 
     def optimize(
         self,
@@ -379,7 +446,12 @@ class PostOptimizer:
         }
 
     def _get_distance(self, from_id: str, to_id: str) -> float:
-        """Get distance between two waypoints from matrix."""
+        """
+        Get distance between two waypoints.
+
+        First tries distance matrix lookup, then falls back to SAM-aware calculation.
+        """
+        # Try distance matrix first
         if self._distance_matrix:
             labels = self._distance_matrix.get("labels", [])
             matrix = self._distance_matrix.get("matrix", [])
@@ -391,8 +463,31 @@ class PostOptimizer:
             except (ValueError, IndexError):
                 pass
 
-        # Default fallback - should not happen if matrix is set
-        return 10.0
+        # Fallback: Calculate SAM-aware distance on-the-fly
+        if self._waypoint_positions and from_id in self._waypoint_positions and to_id in self._waypoint_positions:
+            start_pos = self._waypoint_positions[from_id]
+            end_pos = self._waypoint_positions[to_id]
+
+            # If we have SAM navigation and polygons, use SAM-aware path
+            if HAS_SAM_NAVIGATION and boundary_plan_path and self._wrapped_polygons:
+                try:
+                    path, distance, method = boundary_plan_path(start_pos, end_pos, self._wrapped_polygons)
+                    if path and distance < float('inf'):
+                        print(f"⚠️ Distance matrix fallback: {from_id}→{to_id} = {distance:.2f} (SAM-aware, {method})", flush=True)
+                        return distance
+                except Exception as e:
+                    print(f"⚠️ SAM-aware fallback failed for {from_id}→{to_id}: {e}", flush=True)
+
+            # Final fallback: Euclidean distance
+            dx = end_pos[0] - start_pos[0]
+            dy = end_pos[1] - start_pos[1]
+            euclidean = math.hypot(dx, dy)
+            print(f"⚠️ Distance matrix fallback: {from_id}→{to_id} = {euclidean:.2f} (Euclidean)", flush=True)
+            return euclidean
+
+        # Absolute fallback if no position data available
+        print(f"❌ No distance data available for {from_id}→{to_id}, returning large sentinel value", flush=True)
+        return 99999.0
 
     def _calculate_route_distance(self, route: List[str]) -> float:
         """Calculate total distance of a route."""
@@ -447,6 +542,10 @@ def post_optimize_solution(
     Returns:
         Optimized solution with updated routes
     """
+    # Set environment for SAM-aware distance fallback calculations
+    _optimizer.set_environment(env)
+
+    # Set distance matrix if available
     if distance_matrix:
         _optimizer.set_distance_matrix(distance_matrix)
 
