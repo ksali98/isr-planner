@@ -826,12 +826,33 @@ class TrajectorySwapOptimizer:
         """Set the pre-calculated distance matrix."""
         self._distance_matrix = matrix_data
 
+    def _get_route_signature(self, routes: Dict[str, Any]) -> str:
+        """
+        Create a unique signature for a route configuration.
+        Used for cycle detection.
+        """
+        # Sort drone IDs for consistent ordering
+        parts = []
+        for did in sorted(routes.keys()):
+            route = routes[did].get("route", [])
+            parts.append(f"{did}:{','.join(str(wp) for wp in route)}")
+        return "|".join(parts)
+
+    def _calculate_total_distance(self, routes: Dict[str, Any]) -> float:
+        """Calculate total distance across all drones."""
+        total = 0.0
+        for did, route_data in routes.items():
+            total += route_data.get("distance", 0.0)
+        return total
+
     def optimize(
         self,
         solution: Dict[str, Any],
         env: Dict[str, Any],
         drone_configs: Dict[str, Dict[str, Any]],
-        priority_constraints: Optional[str] = None
+        priority_constraints: Optional[str] = None,
+        auto_iterate: bool = True,
+        max_iterations: int = 50
     ) -> Dict[str, Any]:
         """
         Reassign targets to drones with closer trajectories using SAM-avoiding trajectory segments.
@@ -846,14 +867,187 @@ class TrajectorySwapOptimizer:
            - Check if segment can accept target (capability, fuel, not frozen)
         4. Move target to segment with minimum OSD (if any valid ones exist)
 
+        When auto_iterate=True (default):
+        - Runs multiple iterations until no more swaps or cycle detected
+        - Tracks fuel/distance at each iteration
+        - Returns the solution with lowest total distance
+
         Args:
             solution: Current solution with routes for each drone
             env: Environment dict with targets, airports, sams
             drone_configs: Drone configurations with capabilities
             priority_constraints: Optional priority constraints string
+            auto_iterate: If True, run until convergence/cycle and return best fuel state
+            max_iterations: Maximum iterations for auto mode (safety limit)
 
         Returns:
             Optimized solution with targets moved to closer trajectories
+        """
+        if auto_iterate:
+            return self._optimize_auto(
+                solution, env, drone_configs, priority_constraints, max_iterations
+            )
+        else:
+            return self._optimize_single(
+                solution, env, drone_configs, priority_constraints
+            )
+
+    def _optimize_auto(
+        self,
+        solution: Dict[str, Any],
+        env: Dict[str, Any],
+        drone_configs: Dict[str, Dict[str, Any]],
+        priority_constraints: Optional[str] = None,
+        max_iterations: int = 50
+    ) -> Dict[str, Any]:
+        """
+        Auto-iterate Swap Closer until convergence or cycle detection.
+        Returns the solution with the lowest total distance encountered.
+        """
+        print(f"\n🔄 [TrajectorySwapOptimizer] AUTO-ITERATE MODE (max {max_iterations} iterations)")
+
+        # Track seen states for cycle detection
+        seen_signatures: Set[str] = set()
+
+        # Track best solution (lowest total distance)
+        best_solution = None
+        best_distance = float('inf')
+        best_iteration = 0
+
+        # History for reporting
+        all_swaps = []
+        iteration_history = []
+
+        current_solution = solution
+        iteration = 0
+
+        while iteration < max_iterations:
+            iteration += 1
+
+            # Get signature of current state
+            current_routes = current_solution.get("routes", {})
+            signature = self._get_route_signature(current_routes)
+
+            # Check for cycle
+            if signature in seen_signatures:
+                print(f"\n🔁 CYCLE DETECTED at iteration {iteration}")
+                print(f"   Returning best solution from iteration {best_iteration} (distance: {best_distance:.2f})")
+                break
+
+            seen_signatures.add(signature)
+
+            # Calculate current total distance
+            current_distance = self._calculate_total_distance(current_routes)
+            iteration_history.append({
+                "iteration": iteration,
+                "distance": current_distance,
+                "signature": signature[:50] + "..." if len(signature) > 50 else signature
+            })
+
+            # Track best solution
+            if current_distance < best_distance:
+                best_distance = current_distance
+                best_solution = self._deep_copy_solution(current_solution)
+                best_iteration = iteration
+                print(f"   ✨ Iteration {iteration}: NEW BEST distance = {best_distance:.2f}")
+            else:
+                print(f"   📍 Iteration {iteration}: distance = {current_distance:.2f}")
+
+            # Run single swap iteration
+            result = self._optimize_single(
+                current_solution, env, drone_configs, priority_constraints
+            )
+
+            swaps_made = result.get("swaps_made", [])
+
+            # Check for convergence (no more swaps)
+            if not swaps_made:
+                print(f"\n✅ CONVERGED at iteration {iteration} (no more beneficial swaps)")
+                print(f"   Final distance: {current_distance:.2f}")
+                # Use current solution if it's the best, otherwise use tracked best
+                if current_distance <= best_distance:
+                    best_solution = self._deep_copy_solution(current_solution)
+                    best_distance = current_distance
+                    best_iteration = iteration
+                break
+
+            # Record swaps
+            for swap in swaps_made:
+                swap["iteration"] = iteration
+                all_swaps.append(swap)
+
+            # Update current solution for next iteration
+            current_solution = {
+                "routes": result.get("routes", {}),
+                "sequences": result.get("sequences", {})
+            }
+
+        else:
+            # Max iterations reached
+            print(f"\n⚠️ MAX ITERATIONS ({max_iterations}) reached")
+            print(f"   Returning best solution from iteration {best_iteration} (distance: {best_distance:.2f})")
+
+        # Use best solution found
+        if best_solution is None:
+            best_solution = current_solution
+
+        # Recalculate final metrics
+        final_routes = best_solution.get("routes", {})
+        targets = env.get("targets", [])
+        target_by_id = {str(t["id"]): t for t in targets}
+
+        for did, route_data in final_routes.items():
+            route = route_data.get("route", [])
+            route_data["sequence"] = ",".join(str(wp) for wp in route)
+            route_data["distance"] = self._calculate_route_distance(route)
+            route_data["points"] = self._calculate_route_points(route, target_by_id)
+
+        print(f"\n📊 AUTO-ITERATE SUMMARY:")
+        print(f"   Total iterations: {iteration}")
+        print(f"   Total swaps made: {len(all_swaps)}")
+        print(f"   Best iteration: {best_iteration}")
+        print(f"   Best total distance: {best_distance:.2f}")
+
+        return {
+            "sequences": {
+                did: data.get("sequence", "") for did, data in final_routes.items()
+            },
+            "routes": final_routes,
+            "swaps_made": all_swaps,
+            "iterations": iteration,
+            "best_iteration": best_iteration,
+            "best_distance": best_distance,
+            "converged": len(all_swaps) == 0 or (iteration < max_iterations and not any(s.get("iteration") == iteration for s in all_swaps)),
+            "cycle_detected": signature in seen_signatures if iteration > 0 else False,
+        }
+
+    def _deep_copy_solution(self, solution: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a deep copy of a solution to preserve state."""
+        import copy
+        return {
+            "routes": {
+                did: {
+                    "route": list(data.get("route", [])),
+                    "sequence": data.get("sequence", ""),
+                    "points": data.get("points", 0),
+                    "distance": data.get("distance", 0),
+                    "fuel_budget": data.get("fuel_budget", 0),
+                    "frozen_segments": list(data.get("frozen_segments", [])),
+                }
+                for did, data in solution.get("routes", {}).items()
+            },
+            "sequences": dict(solution.get("sequences", {}))
+        }
+
+    def _optimize_single(
+        self,
+        solution: Dict[str, Any],
+        env: Dict[str, Any],
+        drone_configs: Dict[str, Dict[str, Any]],
+        priority_constraints: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Perform a SINGLE swap iteration (the original behavior).
         """
         # Parse priority constraints into per-drone filter functions
         priority_filters = parse_priority_constraint(priority_constraints) if priority_constraints else {}
@@ -1352,13 +1546,19 @@ def trajectory_swap_optimize(
     env: Dict[str, Any],
     drone_configs: Dict[str, Dict[str, Any]],
     distance_matrix: Optional[Dict[str, Any]] = None,
-    priority_constraints: Optional[str] = None
+    priority_constraints: Optional[str] = None,
+    auto_iterate: bool = True,
+    max_iterations: int = 50
 ) -> Dict[str, Any]:
     """
     Reassign targets to drones whose trajectories pass closer to them.
 
     For each target, if another drone's path passes closer AND that drone
     can carry the target, move it to the closer trajectory.
+
+    When auto_iterate=True (default):
+    - Runs multiple iterations until convergence or cycle detection
+    - Returns the solution with the lowest total distance encountered
 
     Args:
         solution: Current solution with drone routes
@@ -1367,6 +1567,8 @@ def trajectory_swap_optimize(
         distance_matrix: Pre-calculated distance matrix
         priority_constraints: Optional priority constraints string
                               e.g., "D1,D2: priority>=6; D3,D4: priority<6"
+        auto_iterate: If True (default), run until convergence/cycle and return best fuel state
+        max_iterations: Maximum iterations for auto mode (default 50)
 
     Returns:
         Optimized solution with targets moved to closer trajectories
@@ -1374,7 +1576,10 @@ def trajectory_swap_optimize(
     if distance_matrix:
         _trajectory_optimizer.set_distance_matrix(distance_matrix)
 
-    return _trajectory_optimizer.optimize(solution, env, drone_configs, priority_constraints)
+    return _trajectory_optimizer.optimize(
+        solution, env, drone_configs, priority_constraints,
+        auto_iterate=auto_iterate, max_iterations=max_iterations
+    )
 
 
 def set_trajectory_optimizer_matrix(matrix_data: Dict[str, Any]):

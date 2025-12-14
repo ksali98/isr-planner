@@ -1547,9 +1547,9 @@ function attachOptimizationHandlers() {
         appendDebugLine("No routes to optimize. Run planner first.");
         return;
       }
-      appendDebugLine("Running Trajectory Swap optimization...");
+      appendDebugLine("Running Trajectory Swap optimization (auto-iterate mode)...");
       btnSwap.disabled = true;
-      btnSwap.textContent = "Working...";
+      btnSwap.textContent = "Optimizing...";
 
       try {
         const droneConfigs = state.droneConfigs;
@@ -1591,6 +1591,12 @@ function attachOptimizationHandlers() {
 
         if (data.success) {
           const swaps = data.swaps_made || [];
+          const iterations = data.iterations || 1;
+          const bestIteration = data.best_iteration || iterations;
+          const bestDistance = data.best_distance || 0;
+          const cycleDetected = data.cycle_detected || false;
+          const converged = data.converged || false;
+
           if (swaps.length > 0) {
             // Update routes with optimized solution
             state.routes = data.routes;
@@ -1601,17 +1607,34 @@ function attachOptimizationHandlers() {
               state.sequences[did] = seq;
             }
 
-            appendDebugLine(`Swap optimization: ${swaps.length} targets moved to closer trajectories.`);
-            swaps.forEach(swap => {
-              appendDebugLine(`  ${swap.target}: D${swap.from_drone} -> D${swap.to_drone}`);
+            // Show summary of auto-iteration
+            if (cycleDetected) {
+              appendDebugLine(`Swap optimization: Cycle detected after ${iterations} iterations.`);
+              appendDebugLine(`  Using best solution from iteration ${bestIteration} (distance: ${bestDistance.toFixed(1)})`);
+            } else if (converged) {
+              appendDebugLine(`Swap optimization: Converged after ${iterations} iterations.`);
+            } else {
+              appendDebugLine(`Swap optimization: Completed ${iterations} iterations.`);
+            }
+
+            appendDebugLine(`  Total swaps: ${swaps.length}, Best distance: ${bestDistance.toFixed(1)}`);
+
+            // Show individual swaps (limit to first 10 if many)
+            const swapsToShow = swaps.slice(0, 10);
+            swapsToShow.forEach(swap => {
+              const iter = swap.iteration ? ` (iter ${swap.iteration})` : '';
+              appendDebugLine(`  ${swap.target}: D${swap.from_drone} -> D${swap.to_drone}${iter}`);
             });
+            if (swaps.length > 10) {
+              appendDebugLine(`  ... and ${swaps.length - 10} more swaps`);
+            }
 
             // Recalculate trajectories for modified routes
             await regenerateTrajectories();
             updateStatsFromRoutes();
             drawEnvironment();
           } else {
-            appendDebugLine("Swap optimization: No beneficial swaps found.");
+            appendDebugLine(`Swap optimization: No beneficial swaps found (${iterations} iteration${iterations > 1 ? 's' : ''}).`);
           }
         } else {
           appendDebugLine("Swap optimization error: " + (data.error || "Unknown error"));
