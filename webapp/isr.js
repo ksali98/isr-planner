@@ -413,6 +413,29 @@ function drawEnvironment() {
     }
   });
 
+  // Helper function to check if a point is inside any SAM polygon
+  function isInsideAnySAM(px, py) {
+    for (const sam of sams) {
+      const pos = sam.pos || sam.position;
+      if (!pos || pos.length !== 2) continue;
+
+      const samX = pos[0];
+      const samY = pos[1];
+      const range = Number(sam.range || 0);
+
+      // Calculate distance from point to SAM center
+      const dx = px - samX;
+      const dy = py - samY;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      // If inside this SAM's range, return true
+      if (distance < range) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // Targets
   targets.forEach((t, idx) => {
     const [x, y] = w2c(t.x, t.y);
@@ -436,6 +459,19 @@ function drawEnvironment() {
     ctx.font = "9px system-ui";
     const priority = t.priority || 5;
     ctx.fillText(`${t.id}-${priority}`, x + 6, y + 3);
+
+    // Draw X if target is inside a SAM polygon (no-fly zone)
+    if (isInsideAnySAM(t.x, t.y)) {
+      ctx.strokeStyle = "#ef4444";
+      ctx.lineWidth = 2;
+      const xSize = 8;
+      ctx.beginPath();
+      ctx.moveTo(x - xSize, y - xSize);
+      ctx.lineTo(x + xSize, y + xSize);
+      ctx.moveTo(x + xSize, y - xSize);
+      ctx.lineTo(x - xSize, y + xSize);
+      ctx.stroke();
+    }
 
     if (
       state.selectedObject &&

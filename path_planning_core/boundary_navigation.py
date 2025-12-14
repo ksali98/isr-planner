@@ -460,8 +460,8 @@ def _exit_tangent_continues_toward_goal(
             f"exit={exit_vec}, dot={dot:.2f}"
         )
 
-    # dot < 0 → angle > 90° → reversal → reject
-    return dot >= 0.0
+    # Reject if angle > 90° (backward turn from entry to exit)
+    return dot >= 0
 
 def _entry_tangent_continues_forward(
     start: Point,
@@ -496,8 +496,8 @@ def _entry_tangent_continues_forward(
             f"boundary={boundary_vec}, dot={dot:.2f}"
         )
 
-    # dot < 0 → angle > 90° → reversal → reject
-    return dot >= 0.0
+    # Reject if angle > 90° (backward turn when entering)
+    return dot >= 0
 
 def _entry_tangent_continues_forward(
     start: Point,

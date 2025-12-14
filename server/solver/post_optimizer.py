@@ -205,6 +205,45 @@ class PostOptimizer:
         else:
             self._wrapped_polygons = None
 
+    def _is_inside_polygon(self, waypoint_id: str) -> bool:
+        """
+        Check if a waypoint is inside any SAM polygon (no-fly zone).
+
+        Args:
+            waypoint_id: Waypoint identifier (e.g., "T15", "A1")
+
+        Returns:
+            True if waypoint is inside any SAM polygon, False otherwise
+        """
+        if not self._waypoint_positions or not self._sams:
+            return False
+
+        if waypoint_id not in self._waypoint_positions:
+            return False
+
+        wx, wy = self._waypoint_positions[waypoint_id]
+
+        # Check if waypoint is inside any SAM's circular range (polygon)
+        for sam in self._sams:
+            pos = sam.get("pos") or sam.get("position")
+            if not pos:
+                continue
+
+            sam_x = pos[0] if isinstance(pos, (list, tuple)) else pos
+            sam_y = pos[1] if isinstance(pos, (list, tuple)) else pos
+            sam_range = float(sam.get("range", sam.get("radius", 15)))
+
+            # Calculate distance from waypoint to SAM center
+            dx = wx - sam_x
+            dy = wy - sam_y
+            distance = math.sqrt(dx * dx + dy * dy)
+
+            # If waypoint is inside this SAM's range polygon, it's invalid
+            if distance < sam_range:
+                return True
+
+        return False
+
     def optimize(
         self,
         solution: Dict[str, Any],
@@ -246,6 +285,20 @@ class PostOptimizer:
 
         if not unvisited:
             # All targets visited, no optimization needed
+            return solution
+
+        # Filter out targets inside SAM polygons (no-fly zones)
+        # These targets cannot be visited safely and will cause trajectory failures
+        targets_inside_polygons = set()
+        for tid in unvisited:
+            if self._is_inside_polygon(tid):
+                targets_inside_polygons.add(tid)
+                print(f"⚠️ Insert Missed: Skipping {tid} - inside SAM polygon (no-fly zone)", flush=True)
+
+        unvisited = unvisited - targets_inside_polygons
+
+        if not unvisited:
+            # No valid unvisited targets to insert
             return solution
 
         # Build target lookup
