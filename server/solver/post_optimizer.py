@@ -766,7 +766,15 @@ class TrajectorySwapOptimizer:
                         seg_start_id = str(other_route[j])
                         seg_end_id = str(other_route[j + 1])
 
-                        # Note: We DON'T skip segments ending at airports
+                        # Skip segments ending at the end_airport when it's the last waypoint
+                        # This prevents inserting targets AFTER the end_airport
+                        if j + 1 == len(other_route) - 1:
+                            other_cfg = drone_configs.get(other_drone, {})
+                            end_airport = other_cfg.get("end_airport", "-")
+                            if end_airport != "-" and seg_end_id == end_airport:
+                                continue  # Don't allow insertions after the end_airport
+
+                        # Note: We DON'T skip segments ending at airports in general
                         # Targets can be inserted into T→A segments (they go between T and A)
                         # The insertion point (j+1) places them correctly before the ending airport
 
