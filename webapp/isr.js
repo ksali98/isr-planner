@@ -66,6 +66,12 @@ const state = {
     animationId: null,       // requestAnimationFrame ID
   },
 
+  // Checkpoint / segmented solve state
+  checkpoint: {
+    active: false,
+    pct: 0.5,
+    segments: {},   // per drone: { prefix, suffix, splitPoint, checkpointDist }
+  },
 };
 
 // ----------------------------------------------------
@@ -148,6 +154,13 @@ function _samsOverlap(sam1, sam2) {
   return _distance([x1, y1], [x2, y2]) <= (r1 + r2);
 }
 
+document.addEventListener("keydown", (e) => {
+  if (e.key === "c") {
+    freezeAtCheckpoint(0.5);
+  }
+});
+
+
 function _clusterOverlappingSams(sams) {
   if (!sams || sams.length === 0) return [];
   const n = sams.length;
@@ -213,6 +226,125 @@ function updateSamWrappingClientSide() {
     state.wrappedPolygons = [];
   }
 }
+
+// ----------------------------------------------------
+// Polyline utilities
+// points: array of [x,y]
+// dist: distance along polyline in same units as coords
+// ----------------------------------------------------
+function split_polyline_at_distance(points, dist) {
+  // Defensive defaults
+  const n = Array.isArray(points) ? points.length : 0;
+
+  if (n === 0) {
+    return {
+      prefixPoints: [],
+      suffixPoints: [],
+      splitPoint: null,
+      totalDistance: 0,
+      splitIndex: -1,
+      t: 0,
+    };
+  }
+
+  if (n === 1) {
+    // Only one point: prefix/suffix are identical
+    return {
+      prefixPoints: [points[0]],
+      suffixPoints: [points[0]],
+      splitPoint: points[0],
+      totalDistance: 0,
+      splitIndex: 0,
+      t: 0,
+    };
+  }
+
+  // Build cumulative distances
+  const cum = [0];
+  let total = 0;
+
+  for (let i = 1; i < n; i++) {
+    const dx = points[i][0] - points[i - 1][0];
+    const dy = points[i][1] - points[i - 1][1];
+    total += Math.sqrt(dx * dx + dy * dy);
+    cum.push(total);
+  }
+
+  // Clamp dist into [0, total]
+  let d = dist;
+  if (!Number.isFinite(d)) d = 0;
+  d = Math.max(0, Math.min(d, total));
+
+  // Edge: split at start
+  if (d === 0) {
+    const sp = points[0];
+    return {
+      prefixPoints: [sp],
+      suffixPoints: [sp, ...points.slice(1)],
+      splitPoint: sp,
+      totalDistance: total,
+      splitIndex: 0,
+      t: 0,
+    };
+  }
+
+  // Edge: split at end
+  if (d === total) {
+    const sp = points[n - 1];
+    return {
+      prefixPoints: [...points],
+      suffixPoints: [sp],
+      splitPoint: sp,
+      totalDistance: total,
+      splitIndex: n - 2, // last segment
+      t: 1,
+    };
+  }
+
+  // Find segment containing distance d:
+  // cum[i] <= d < cum[i+1]
+  let seg = 0;
+  for (let i = 0; i < n - 1; i++) {
+    if (cum[i] <= d && d < cum[i + 1]) {
+      seg = i;
+      break;
+    }
+  }
+
+  const segStart = points[seg];
+  const segEnd = points[seg + 1];
+  const segLen = cum[seg + 1] - cum[seg];
+
+  // Interpolation parameter along the segment
+  const t = segLen > 0 ? (d - cum[seg]) / segLen : 0;
+
+  const splitPoint = [
+    segStart[0] + t * (segEnd[0] - segStart[0]),
+    segStart[1] + t * (segEnd[1] - segStart[1]),
+  ];
+
+  // Construct prefix:
+  // include points[0..seg] plus splitPoint (unless it equals points[seg] exactly)
+  const prefixPoints = points.slice(0, seg + 1);
+  const lastPrefix = prefixPoints[prefixPoints.length - 1];
+  if (lastPrefix[0] !== splitPoint[0] || lastPrefix[1] !== splitPoint[1]) {
+    prefixPoints.push(splitPoint);
+  }
+
+  // Construct suffix:
+  // start with splitPoint, then include points[seg+1..end]
+  const suffixPoints = [splitPoint, ...points.slice(seg + 1)];
+
+  return {
+    prefixPoints,
+    suffixPoints,
+    splitPoint,
+    totalDistance: total,
+    splitIndex: seg,
+    t,
+  };
+}
+
 
 // ----------------------------------------------------
 // Canvas sizing
@@ -554,7 +686,7 @@ function drawEnvironment() {
 
         if (totalDistance > 0 && cumulativeDistances.length === trajectory.length) {
           // Find position based on distance traveled (uniform speed)
-          const targetDistance = progress * totalDistance;
+          const targetDistance = droneState.distanceTraveled;
 
           // Binary search for the segment containing this distance
           let segmentIdx = 0;
@@ -2069,70 +2201,96 @@ function startAnimation(droneIds) {
         }
       }
 
+      if (totalDistance <= 0) return;
+
       state.animation.drones[did] = {
         progress: 0,
+        distanceTraveled: 0,   // REQUIRED
         animating: true,
-        cumulativeDistances: cumulativeDistances,
-        totalDistance: totalDistance,
+        cumulativeDistances,
+        totalDistance,
       };
+
+          // TEMP TEST: verify split utility
+      const traj = (state.routes[did] && state.routes[did].trajectory) ? state.routes[did].trajectory : [];
+      if (traj.length >= 2) {
+        const total = state.animation.drones[did].totalDistance;
+        const checkpointDist = 0.5 * total;
+
+        const res = split_polyline_at_distance(traj, checkpointDist);
+        console.log("SPLIT TEST", did, {
+          total,
+          checkpointDist,
+          splitPoint: res.splitPoint,
+          prefixLen: res.prefixPoints.length,
+          suffixLen: res.suffixPoints.length,
+          splitIndex: res.splitIndex,
+          t: res.t,
+        });
+      }
+
       // Make sure trajectory is visible for animated drones
       state.trajectoryVisible[did] = true;
     }
   });
 
-  updateTrajectoryButtonStates();
-  updateAnimationButtonStates();
+updateTrajectoryButtonStates();
+updateAnimationButtonStates();
 
-  // Check if any drones were added for animation
-  const activeDrones = Object.keys(state.animation.drones);
-  if (activeDrones.length === 0) {
-    appendDebugLine("No valid drones to animate. Check route data.");
-    state.animation.active = false;
-    return;
-  }
-
-  // Start animation loop
-  const animationSpeed = 0.002; // Progress per frame (adjust for speed)
-  let lastTime = null;
-
-  function animate(currentTime) {
-    // First frame: just store time and continue
-    if (lastTime === null) {
-      lastTime = currentTime;
-    }
-
-    const deltaTime = Math.min(currentTime - lastTime, 100); // Cap at 100ms to prevent huge jumps
-    lastTime = currentTime;
-
-    let anyAnimating = false;
-
-    Object.entries(state.animation.drones).forEach(([did, droneState]) => {
-      if (!droneState.animating) return;
-
-      droneState.progress += animationSpeed * (deltaTime / 16.67); // Normalize to 60fps
-
-      if (droneState.progress >= 1) {
-        droneState.progress = 1;
-        droneState.animating = false;
-      } else {
-        anyAnimating = true;
-      }
-    });
-
-    drawEnvironment();
-
-    if (anyAnimating) {
-      state.animation.animationId = requestAnimationFrame(animate);
-    } else {
-      appendDebugLine("Animation complete.");
-      state.animation.active = false;
-      updateAnimationButtonStates();
-    }
-  }
-
-  state.animation.animationId = requestAnimationFrame(animate);
-  appendDebugLine(`Started animation for: ${droneIds.map((d) => `D${d}`).join(", ")}`);
+// Check if any drones were added for animation
+const activeDrones = Object.keys(state.animation.drones);
+if (activeDrones.length === 0) {
+  appendDebugLine("No valid drones to animate. Check route data.");
+  state.animation.active = false;
+  return;
 }
+
+// Start animation loop
+const speedUnitsPerSec = 20; // tune this (map units per second)
+let lastTime = null;
+
+function animate(currentTime) {
+  if (lastTime === null) lastTime = currentTime;
+
+  const deltaTime = Math.min(currentTime - lastTime, 100);
+  lastTime = currentTime;
+
+  const dt = deltaTime / 1000; // seconds
+  let anyAnimating = false;
+
+  Object.entries(state.animation.drones).forEach(([did, droneState]) => {
+    if (!droneState.animating) return;
+
+    // 1) advance by distance (single source of truth)
+    droneState.distanceTraveled += speedUnitsPerSec * dt;
+
+    // 2) clamp and stop if finished
+    if (droneState.distanceTraveled >= droneState.totalDistance) {
+      droneState.distanceTraveled = droneState.totalDistance;
+      droneState.animating = false;
+    } else {
+      anyAnimating = true;
+    }
+
+    // 3) derive progress (for existing drawing/UI code)
+    droneState.progress = (droneState.totalDistance > 0)
+      ? (droneState.distanceTraveled / droneState.totalDistance)
+      : 1;
+  });
+
+  drawEnvironment();
+
+  if (anyAnimating) {
+    state.animation.frameId = requestAnimationFrame(animate);
+  } else {
+    state.animation.active = false;
+    updateAnimationButtonStates();
+  }
+}
+
+    state.animation.animationId = requestAnimationFrame(animate);
+    appendDebugLine(`Started animation for: ${droneIds.map((d) => `D${d}`).join(", ")}`);
+  }
 
 function stopAnimation() {
   if (state.animation.animationId) {
