@@ -166,8 +166,19 @@ if (!window.__checkpointFreezeKeyInstalled) {
     "keydown",
     (e) => {
       if (String(e.key).toLowerCase() === "c") {
-        appendDebugLine("C pressed → freeze at 50% checkpoint");
-        freezeAtCheckpoint(0.5);
+        // Freeze at CURRENT animation progress, not fixed 50%
+        let currentPct = 0.5; // fallback
+        if (state.animation && state.animation.drones) {
+          // Use average progress across all animating drones
+          const progresses = Object.values(state.animation.drones)
+            .filter(d => d.animating || d.progress > 0)
+            .map(d => d.progress || 0);
+          if (progresses.length > 0) {
+            currentPct = progresses.reduce((a, b) => a + b, 0) / progresses.length;
+          }
+        }
+        appendDebugLine(`C pressed → freeze at ${(currentPct * 100).toFixed(1)}% checkpoint`);
+        freezeAtCheckpoint(currentPct);
       }
     },
     true // capture phase so nothing can block it
@@ -676,10 +687,12 @@ function drawEnvironment() {
     ctx.setLineDash([]);
   });
 
-  // Draw animated drones
-  if (state.animation.active) {
+  // Draw animated drones (active animation OR frozen at checkpoint)
+  const shouldDrawDrones = state.animation.active || state.checkpoint?.active;
+  if (shouldDrawDrones && state.animation.drones) {
     Object.entries(state.animation.drones).forEach(([did, droneState]) => {
-      if (!droneState.animating) return;
+      // Draw if animating OR frozen at checkpoint
+      if (!droneState.animating && !state.checkpoint?.active) return;
       if (!state.trajectoryVisible[did]) return;
 
       const routeInfo = state.routes[did];
