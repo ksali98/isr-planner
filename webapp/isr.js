@@ -2881,6 +2881,18 @@ function applyAgentRoute(route, points, fuel) {
     trajectory: buildTrajectoryFromRoute(route),
   };
 
+window.addEventListener("keydown", (e) => {
+  if (String(e.key).toLowerCase() === "c") {
+    appendDebugLine("Keypress: C detected (attempting freeze)");
+    try {
+      freezeAtCheckpoint(0.5);
+    } catch (err) {
+      console.error("freezeAtCheckpoint failed:", err);
+      appendDebugLine("Freeze failed (see console)");
+    }
+  }
+});
+
   // Ensure trajectory is visible for D1
   state.trajectoryVisible["1"] = true;
 
