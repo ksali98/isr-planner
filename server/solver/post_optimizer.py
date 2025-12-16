@@ -244,6 +244,111 @@ class PostOptimizer:
 
         return False
 
+    def _find_closest_trajectory_segment(
+        self,
+        target_pos: Tuple[float, float],
+        trajectory: List[Tuple[float, float]],
+        route: List[str],
+        waypoint_positions: Dict[str, Tuple[float, float]]
+    ) -> Tuple[int, bool, int]:
+        """
+        Find the closest segment in a trajectory to a target point.
+
+        Args:
+            target_pos: (x, y) position of the target to insert
+            trajectory: List of (x, y) vertices in the SAM-avoiding trajectory
+            route: Route sequence (e.g., ['A1', 'T9', 'T17', 'A2'])
+            waypoint_positions: Mapping of waypoint IDs to (x, y) positions
+
+        Returns:
+            Tuple of (route_index, has_perpendicular, closest_vertex_offset) where:
+            - route_index: Index in route where target should be inserted
+            - has_perpendicular: True if perpendicular exists to closest segment
+            - closest_vertex_offset: If no perpendicular, which vertex is closer (0=first, 1=second)
+        """
+        if not trajectory or len(trajectory) < 2:
+            return (1, False, 0)
+
+        tx, ty = target_pos
+        min_dist = float('inf')
+        best_route_idx = None
+        best_has_perp = False
+        best_closest_vertex = 0
+
+        # Build mapping from trajectory indices to route waypoint positions
+        traj_to_route_wp = {}  # Maps trajectory index to route waypoint index
+        traj_idx = 0
+        for route_wp_idx, wp_id in enumerate(route):
+            wp_pos = waypoint_positions.get(str(wp_id))
+            if wp_pos:
+                # Find matching trajectory vertex
+                for i in range(traj_idx, len(trajectory)):
+                    if abs(trajectory[i][0] - wp_pos[0]) < 0.001 and \
+                       abs(trajectory[i][1] - wp_pos[1]) < 0.001:
+                        traj_to_route_wp[i] = route_wp_idx
+                        traj_idx = i + 1
+                        break
+
+        # Iterate through trajectory segments
+        for i in range(len(trajectory) - 1):
+            p1 = trajectory[i]
+            p2 = trajectory[i + 1]
+
+            # Calculate point-to-segment distance
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            segment_length_sq = dx * dx + dy * dy
+
+            if segment_length_sq == 0:
+                # Degenerate segment
+                dist = math.sqrt((tx - p1[0]) ** 2 + (ty - p1[1]) ** 2)
+                has_perp = False
+                t = 0
+            else:
+                # Calculate projection parameter t
+                t = ((tx - p1[0]) * dx + (ty - p1[1]) * dy) / segment_length_sq
+                t_clamped = max(0.0, min(1.0, t))
+
+                # Find closest point on segment
+                closest_x = p1[0] + t_clamped * dx
+                closest_y = p1[1] + t_clamped * dy
+
+                # Distance to closest point
+                dist = math.sqrt((tx - closest_x) ** 2 + (ty - closest_y) ** 2)
+
+                # Check if perpendicular exists (t strictly between 0 and 1)
+                has_perp = (0 < t < 1)
+
+            # Update if this is the closest segment
+            if dist < min_dist:
+                min_dist = dist
+
+                # Find which route waypoints this trajectory segment is between
+                # Look for the route waypoint at or after trajectory vertex i
+                route_wp_start = None
+                for traj_v_idx in range(i, -1, -1):
+                    if traj_v_idx in traj_to_route_wp:
+                        route_wp_start = traj_to_route_wp[traj_v_idx]
+                        break
+
+                if route_wp_start is None:
+                    route_wp_start = 0
+
+                # Insertion position is after route_wp_start
+                best_route_idx = route_wp_start + 1
+                best_has_perp = has_perp
+
+                # If no perpendicular, determine which vertex is closer
+                if not has_perp:
+                    dist_to_p1 = math.sqrt((tx - p1[0]) ** 2 + (ty - p1[1]) ** 2)
+                    dist_to_p2 = math.sqrt((tx - p2[0]) ** 2 + (ty - p2[1]) ** 2)
+                    best_closest_vertex = 0 if dist_to_p1 < dist_to_p2 else 1
+
+        if best_route_idx is None:
+            best_route_idx = 1
+
+        return (best_route_idx, best_has_perp, best_closest_vertex)
+
     def optimize(
         self,
         solution: Dict[str, Any],
@@ -353,45 +458,69 @@ class PostOptimizer:
                 # Get frozen segments for this drone (indices where route[i]->route[i+1] is frozen)
                 frozen_segments = set(route_data.get("frozen_segments", []))
 
-                # Find the cheapest insertion position for THIS drone
-                best_insertion_idx = None
-                best_insertion_cost = float('inf')
+                # Use trajectory-based insertion logic
+                # Find closest segment in the drone's trajectory
+                trajectory = route_data.get("trajectory", [])
+                target_pos = self._waypoint_positions.get(tid)
 
-                # Try inserting at each position
-                for i in range(1, len(route)):  # Don't insert before start
-                    # Skip if this segment is frozen (cannot insert into frozen segment)
-                    if (i - 1) in frozen_segments:
-                        continue
+                if not trajectory or not target_pos:
+                    # No trajectory available, skip this drone
+                    continue
 
-                    prev_wp = route[i - 1]
-                    next_wp = route[i]
+                # Convert trajectory to list of tuples if needed
+                if trajectory and not isinstance(trajectory[0], tuple):
+                    trajectory = [(float(p[0]), float(p[1])) for p in trajectory]
 
-                    # CRITICAL: Only insert between targets or before end airport
-                    # Skip positions where next_wp is an airport (prevents inserting after end airport)
-                    if str(next_wp).startswith("A"):
-                        continue
+                # Find closest trajectory segment and insertion position
+                route_idx, has_perp, closest_vertex = self._find_closest_trajectory_segment(
+                    target_pos, trajectory, route, self._waypoint_positions
+                )
 
-                    # Calculate insertion cost
-                    # Cost = (new_distance) - (original_distance)
+                # Adjust insertion index if no perpendicular exists
+                if not has_perp and closest_vertex == 1:
+                    # Closer to second vertex, insert after it
+                    route_idx = min(route_idx + 1, len(route))
+
+                # Check if this position is frozen
+                if route_idx > 0 and (route_idx - 1) in frozen_segments:
+                    continue
+
+                # Check if we're trying to insert after the end airport
+                if route_idx >= len(route):
+                    continue
+
+                # Calculate insertion cost using proper SAM-avoiding distances
+                if route_idx == 0:
+                    prev_wp = None
+                    next_wp = route[0] if route else None
+                elif route_idx >= len(route):
+                    prev_wp = route[-1] if route else None
+                    next_wp = None
+                else:
+                    prev_wp = route[route_idx - 1]
+                    next_wp = route[route_idx]
+
+                # Calculate cost as difference in distances
+                if prev_wp and next_wp:
                     orig_dist = self._get_distance(prev_wp, next_wp)
                     new_dist = (
                         self._get_distance(prev_wp, tid) +
                         self._get_distance(tid, next_wp)
                     )
                     insertion_cost = new_dist - orig_dist
+                elif prev_wp:
+                    insertion_cost = self._get_distance(prev_wp, tid)
+                elif next_wp:
+                    insertion_cost = self._get_distance(tid, next_wp)
+                else:
+                    continue
 
-                    # Check if we have enough fuel for this insertion
-                    if insertion_cost > remaining_fuel:
-                        continue
+                # Check if we have enough fuel
+                if insertion_cost > remaining_fuel:
+                    continue
 
-                    # Track the cheapest insertion point for this drone
-                    if insertion_cost < best_insertion_cost:
-                        best_insertion_cost = insertion_cost
-                        best_insertion_idx = i
-
-                # If we found a viable insertion for this drone, add to options
-                if best_insertion_idx is not None:
-                    viable_options.append((did, best_insertion_idx, best_insertion_cost))
+                # Add this as a viable option
+                viable_options.append((did, route_idx, insertion_cost))
 
             # If no drone can take this target, skip it
             if not viable_options:
