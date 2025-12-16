@@ -1241,17 +1241,19 @@ class TrajectorySwapOptimizer:
                         seg_start_id = str(other_route[j])
                         seg_end_id = str(other_route[j + 1])
 
-                        # Skip segments ending at the end_airport when it's the last waypoint
-                        # This prevents inserting targets AFTER the end_airport
-                        if j + 1 == len(other_route) - 1:
-                            other_cfg = drone_configs.get(other_drone, {})
-                            end_airport = other_cfg.get("end_airport", "-")
-                            if end_airport != "-" and seg_end_id == end_airport:
-                                continue  # Don't allow insertions after the end_airport
-
-                        # Note: We DON'T skip segments ending at airports in general
-                        # Targets can be inserted into T→A segments (they go between T and A)
-                        # The insertion point (j+1) places them correctly before the ending airport
+                        # For LINEAR routes (start != end airport), we previously skipped
+                        # the last segment. But this is WRONG - inserting into T→A creates
+                        # T→X→A which is valid. The insertion point (j+1) places the target
+                        # BEFORE the ending airport, not after.
+                        #
+                        # For CYCLIC routes (start == end airport, e.g., A1→...→A1), the
+                        # last segment returns to the start, and inserting before it is
+                        # perfectly valid.
+                        #
+                        # Therefore, we should NOT skip the last segment in either case.
+                        # The only invalid insertion would be at position len(route), which
+                        # would place a target AFTER the end airport - but that's handled
+                        # elsewhere in the insertion logic.
 
                         # Find trajectory indices for this route segment
                         # We need to check all trajectory vertices between these route waypoints
