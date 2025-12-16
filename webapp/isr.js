@@ -74,6 +74,11 @@ const state = {
     pct: 0.5,
     segments: {},   // per drone: { prefix, suffix, splitPoint, checkpointDist }
   },
+
+  // Mission history for segmented replanning
+  missionHistory: [],          // Array of segment snapshots
+  initialEnvSnapshot: null,    // Immutable copy of original env for reset
+  visitedTargets: [],          // Target IDs completed across all segments
 };
 
 // ----------------------------------------------------
@@ -170,6 +175,42 @@ if (!window.__checkpointFreezeKeyInstalled) {
       }
     },
     true // capture phase so nothing can block it
+  );
+}
+
+// Reset mission key handler (R)
+// ----------------------------------------------------
+if (!window.__resetMissionKeyInstalled) {
+  window.__resetMissionKeyInstalled = true;
+
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (String(e.key).toLowerCase() === "r") {
+        // Skip if user is typing in an input field
+        const activeTag = document.activeElement?.tagName?.toLowerCase();
+        if (activeTag === "input" || activeTag === "textarea" || activeTag === "select") {
+          console.log("R key ignored - focus is on input element:", activeTag);
+          return;
+        }
+
+        console.log("R key pressed, animation.active =", state.animation?.active);
+        appendDebugLine("R key pressed - attempting reset...");
+
+        // Only reset if not actively animating
+        if (!state.animation?.active) {
+          console.log("Calling resetMission()");
+          const didReset = resetMission();
+          console.log("resetMission returned:", didReset);
+          if (didReset) {
+            appendDebugLine("🔄 Mission reset via R key");
+          }
+        } else {
+          appendDebugLine("Cannot reset while animating");
+        }
+      }
+    },
+    true
   );
 }
 
@@ -1947,6 +1988,202 @@ async function fetchWrappedPolygons(recalculate = false) {
   }
 }
 
+// ----------------------------------------------------
+// Mission History & Segmented Replanning Helpers
+// ----------------------------------------------------
+
+/**
+ * Save the initial environment snapshot (called on first load or reset)
+ */
+function saveInitialEnvSnapshot() {
+  if (state.env) {
+    state.initialEnvSnapshot = JSON.parse(JSON.stringify(state.env));
+    state.missionHistory = [];
+    state.visitedTargets = [];
+    appendDebugLine("Initial environment snapshot saved");
+  }
+}
+
+/**
+ * Push current segment to mission history
+ */
+function pushMissionSegment(note = "") {
+  const segment = {
+    envSnapshot: JSON.parse(JSON.stringify(state.env)),
+    droneConfigsSnapshot: JSON.parse(JSON.stringify(state.droneConfigs)),
+    startStates: {},  // { did: { x, y } } - where each drone started this segment
+    trajectoriesByDrone: {},  // { did: [[x,y], ...] }
+    routesByDrone: {},  // { did: ["A1", "T1", ...] }
+    visitedTargetsThisSegment: [],
+    meta: {
+      createdAt: new Date().toISOString(),
+      note: note,
+      segmentIndex: state.missionHistory.length,
+    }
+  };
+
+  // Capture start states and trajectories from current routes
+  Object.entries(state.routes || {}).forEach(([did, routeData]) => {
+    const traj = routeData.trajectory || [];
+    const route = routeData.route || [];
+
+    // Start state is first point of trajectory (or start airport position)
+    if (traj.length > 0) {
+      segment.startStates[did] = { x: traj[0][0], y: traj[0][1] };
+      segment.trajectoriesByDrone[did] = JSON.parse(JSON.stringify(traj));
+    }
+    segment.routesByDrone[did] = [...route];
+
+    // Extract visited targets (anything starting with T)
+    route.forEach(wp => {
+      if (String(wp).startsWith("T") && !state.visitedTargets.includes(wp)) {
+        segment.visitedTargetsThisSegment.push(wp);
+        state.visitedTargets.push(wp);
+      }
+    });
+  });
+
+  state.missionHistory.push(segment);
+  appendDebugLine(`Segment ${segment.meta.segmentIndex} saved (${segment.visitedTargetsThisSegment.length} targets visited)`);
+  return segment;
+}
+
+/**
+ * Build env2 for replanning after checkpoint freeze
+ * - Creates synthetic start nodes at frozen positions
+ * - Marks visited targets
+ * - Returns modified env and droneConfigs
+ */
+function buildCheckpointEnv() {
+  if (!state.checkpoint?.active || !state.checkpoint.segments) {
+    return { env: state.env, droneConfigs: state.droneConfigs, isCheckpointReplan: false };
+  }
+
+  // Deep copy current env
+  const env2 = JSON.parse(JSON.stringify(state.env));
+
+  // Add synthetic start nodes for each frozen drone
+  env2.synthetic_starts = env2.synthetic_starts || {};
+
+  // Deep copy drone configs
+  const newDroneConfigs = JSON.parse(JSON.stringify(state.droneConfigs));
+
+  // Calculate remaining fuel for each drone
+  Object.entries(state.checkpoint.segments).forEach(([did, seg]) => {
+    if (!seg?.splitPoint) return;
+
+    const nodeId = `D${did}_START`;
+    env2.synthetic_starts[nodeId] = {
+      id: nodeId,
+      x: seg.splitPoint[0],
+      y: seg.splitPoint[1],
+    };
+
+    // Update drone config to start from synthetic node
+    if (newDroneConfigs[did]) {
+      newDroneConfigs[did].start_airport = nodeId;
+
+      // Calculate remaining fuel (original budget minus distance traveled)
+      const originalBudget = newDroneConfigs[did].fuel_budget || 150;
+      const distanceTraveled = seg.checkpointDist || 0;
+      newDroneConfigs[did].fuel_budget = Math.max(0, originalBudget - distanceTraveled);
+    }
+  });
+
+  // Mark visited targets (exclude them from planning or mark as completed)
+  env2.visited_targets = [...state.visitedTargets];
+
+  // Optionally filter out visited targets from the targets array
+  // (depending on how backend handles this)
+  // env2.targets = env2.targets.filter(t => !state.visitedTargets.includes(t.id));
+
+  return {
+    env: env2,
+    droneConfigs: newDroneConfigs,
+    isCheckpointReplan: true,
+  };
+}
+
+/**
+ * Get joined trajectories for full mission replay
+ * Concatenates all segment trajectories per drone
+ */
+function getJoinedTrajectories() {
+  const joined = {};
+
+  state.missionHistory.forEach((segment) => {
+    Object.entries(segment.trajectoriesByDrone || {}).forEach(([did, traj]) => {
+      if (!joined[did]) {
+        joined[did] = [];
+      }
+
+      if (joined[did].length > 0 && traj.length > 0) {
+        // Check if we need to bridge (avoid duplicate points)
+        const lastPoint = joined[did][joined[did].length - 1];
+        const firstPoint = traj[0];
+        if (Math.abs(lastPoint[0] - firstPoint[0]) < 0.001 &&
+            Math.abs(lastPoint[1] - firstPoint[1]) < 0.001) {
+          // Skip duplicate point
+          joined[did] = joined[did].concat(traj.slice(1));
+        } else {
+          joined[did] = joined[did].concat(traj);
+        }
+      } else {
+        joined[did] = joined[did].concat(traj);
+      }
+    });
+  });
+
+  return joined;
+}
+
+/**
+ * Reset mission to initial state for full replay
+ */
+function resetMission() {
+  if (!state.initialEnvSnapshot) {
+    appendDebugLine("No initial snapshot to reset to. Run Planner first.");
+    return false;
+  }
+
+  // Restore initial environment
+  state.env = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
+
+  // Clear checkpoint state
+  state.checkpoint = {
+    active: false,
+    pct: 0.5,
+    segments: {},
+  };
+
+  // Clear checkpoint replan prefix distances
+  state.checkpointReplanPrefixDistances = null;
+
+  // Clear visited targets
+  state.visitedTargets = [];
+
+  // Clear mission history
+  state.missionHistory = [];
+
+  // Clear routes - user needs to re-solve after reset
+  state.routes = {};
+  state.sequences = {};
+
+  // Stop any animation
+  if (state.animation.animationId) {
+    cancelAnimationFrame(state.animation.animationId);
+    state.animation.animationId = null;
+  }
+  state.animation.active = false;
+  state.animation.drones = {};
+
+  drawEnvironment();
+  updateAnimationButtonStates();
+  appendDebugLine("Mission reset to initial state. Run Planner to start fresh.");
+
+  return true;
+}
+
 async function runPlanner() {
   if (!state.env) {
     alert("No environment loaded yet.");
@@ -1974,13 +2211,29 @@ async function runPlanner() {
   const strategySelect = $("allocation-strategy");
   const strategy = strategySelect ? strategySelect.value : "efficient";
 
+  // Check if this is a checkpoint replan (solve from frozen positions)
+  const { env: envToSolve, droneConfigs: configsToSolve, isCheckpointReplan } = buildCheckpointEnv();
+
+  // If this is the first solve (no history), save the initial snapshot
+  if (state.missionHistory.length === 0 && !isCheckpointReplan) {
+    saveInitialEnvSnapshot();
+  }
+
+  // If checkpoint replan, save current segment before solving new one
+  if (isCheckpointReplan && Object.keys(state.routes).length > 0) {
+    pushMissionSegment("Pre-replan segment");
+  }
+
   const payload = {
-    env: state.env,
-    drone_configs: state.droneConfigs,
+    env: envToSolve,
+    drone_configs: configsToSolve,
     allocation_strategy: strategy,
+    is_checkpoint_replan: isCheckpointReplan,
+    visited_targets: state.visitedTargets,
   };
 
-  appendDebugLine(`➡ Sending /api/solve_with_allocation (strategy: ${strategy})... (Press Cancel to abort)`);
+  const modeLabel = isCheckpointReplan ? "CHECKPOINT REPLAN" : "FRESH SOLVE";
+  appendDebugLine(`➡ [${modeLabel}] Sending /api/solve_with_allocation (strategy: ${strategy})...`);
 
   let bodyStr;
   try {
@@ -2007,6 +2260,63 @@ async function runPlanner() {
       return;
     }
 
+    // If this was a checkpoint replan, splice new trajectories with frozen prefixes
+    if (isCheckpointReplan && state.checkpoint?.segments) {
+      const newRoutes = data.routes || {};
+
+      Object.entries(newRoutes).forEach(([did, routeData]) => {
+        const seg = state.checkpoint.segments[did];
+        if (!seg?.prefix || !routeData?.trajectory) return;
+
+        const prefix = seg.prefix;
+        const newSuffix = routeData.trajectory;
+
+        // Splice: prefix + newSuffix (avoiding duplicate join point)
+        let joined;
+        if (prefix.length > 0 && newSuffix.length > 0) {
+          const lastPrefixPt = prefix[prefix.length - 1];
+          const firstSuffixPt = newSuffix[0];
+          if (Math.abs(lastPrefixPt[0] - firstSuffixPt[0]) < 0.001 &&
+              Math.abs(lastPrefixPt[1] - firstSuffixPt[1]) < 0.001) {
+            joined = prefix.concat(newSuffix.slice(1));
+          } else {
+            joined = prefix.concat(newSuffix);
+          }
+        } else {
+          joined = prefix.concat(newSuffix);
+        }
+
+        routeData.trajectory = joined;
+      });
+
+      data.routes = newRoutes;
+      appendDebugLine("📎 Spliced new trajectories with frozen prefixes");
+
+      // Store prefix distances so animation can start from the right position
+      // We calculate the distance of each prefix so startAnimation knows where to begin
+      state.checkpointReplanPrefixDistances = {};
+      Object.entries(state.checkpoint.segments).forEach(([did, seg]) => {
+        if (seg?.prefix && seg.prefix.length >= 2) {
+          let prefixDist = 0;
+          for (let i = 1; i < seg.prefix.length; i++) {
+            const dx = seg.prefix[i][0] - seg.prefix[i - 1][0];
+            const dy = seg.prefix[i][1] - seg.prefix[i - 1][1];
+            prefixDist += Math.sqrt(dx * dx + dy * dy);
+          }
+          state.checkpointReplanPrefixDistances[did] = prefixDist;
+          appendDebugLine(`📏 Drone ${did} prefix distance: ${prefixDist.toFixed(1)}`);
+        }
+      });
+      console.log("checkpointReplanPrefixDistances:", state.checkpointReplanPrefixDistances);
+    }
+
+    // Clear checkpoint state after successful replan
+    state.checkpoint = {
+      active: false,
+      pct: 0.5,
+      segments: {},
+    };
+
     state.sequences = data.sequences || {};
     state.routes = data.routes || {};
     state.wrappedPolygons = data.wrapped_polygons || [];
@@ -2030,7 +2340,8 @@ async function runPlanner() {
     updateStatsFromRoutes();
 
     drawEnvironment();
-    appendDebugLine("✅ Planner solution applied.");
+    const resultLabel = isCheckpointReplan ? "✅ Checkpoint replan applied." : "✅ Planner solution applied.";
+    appendDebugLine(resultLabel);
   } catch (err) {
     if (err.name === 'AbortError') {
       appendDebugLine("⚠️ Solve request canceled.");
@@ -2257,6 +2568,18 @@ function startAnimation(droneIds) {
   // Stop any existing animation
   stopAnimation();
 
+  // Check if we're in a frozen checkpoint state WITHOUT a replan
+  // If checkpoint is active (frozen) but no prefix distances exist, block animation
+  const hasFrozenCheckpoint = state.checkpoint?.active ||
+    Object.keys(state.checkpoint?.segments || {}).length > 0;
+  const hasReplanData = state.checkpointReplanPrefixDistances &&
+    Object.keys(state.checkpointReplanPrefixDistances).length > 0;
+
+  if (hasFrozenCheckpoint && !hasReplanData) {
+    appendDebugLine("⚠️ Cannot animate: checkpoint is frozen. Run Planner to replan from checkpoint, or press R to reset.");
+    return;
+  }
+
   // Clear checkpoint state so frozen drones don't persist
   if (state.checkpoint) {
     state.checkpoint.active = false;
@@ -2294,9 +2617,16 @@ function startAnimation(droneIds) {
 
       if (totalDistance <= 0) return;
 
+      // Check if this is a checkpoint replan - start from prefix distance if so
+      let initialDistance = 0;
+      if (state.checkpointReplanPrefixDistances && state.checkpointReplanPrefixDistances[did]) {
+        initialDistance = state.checkpointReplanPrefixDistances[did];
+        appendDebugLine(`🎬 Drone ${did} starting animation from distance ${initialDistance.toFixed(1)} (checkpoint replan)`);
+      }
+
       state.animation.drones[did] = {
-        progress: 0,
-        distanceTraveled: 0,   // REQUIRED
+        progress: totalDistance > 0 ? initialDistance / totalDistance : 0,
+        distanceTraveled: initialDistance,
         animating: true,
         cumulativeDistances,
         totalDistance,
@@ -2324,6 +2654,10 @@ function startAnimation(droneIds) {
       state.trajectoryVisible[did] = true;
     }
   });
+
+// Clear checkpoint replan prefix distances after using them
+// (so next animation without replan starts from 0)
+state.checkpointReplanPrefixDistances = null;
 
 updateTrajectoryButtonStates();
 updateAnimationButtonStates();

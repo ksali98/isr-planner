@@ -232,7 +232,7 @@ def distance(a: Dict[str, float], b: Dict[str, float]) -> float:
 
 
 def build_id_map(env: Dict[str, Any]):
-    """Return dict: id_str -> {'x':..., 'y':..., 'kind': 'airport'|'target'}."""
+    """Return dict: id_str -> {'x':..., 'y':..., 'kind': 'airport'|'target'|'synthetic_start'}."""
     id_map: Dict[str, Dict[str, Any]] = {}
 
     for a in env.get("airports", []):
@@ -251,6 +251,16 @@ def build_id_map(env: Dict[str, Any]):
             "kind": "target",
             "priority": int(t.get("priority", 0)),
             "type": str(t.get("type", "a")).lower(),
+        }
+
+    # Add synthetic start nodes (for checkpoint replanning)
+    for node_id, node_data in env.get("synthetic_starts", {}).items():
+        id_map[str(node_id)] = {
+            "x": float(node_data["x"]),
+            "y": float(node_data["y"]),
+            "kind": "synthetic_start",
+            "priority": 0,
+            "type": None,
         }
 
     return id_map

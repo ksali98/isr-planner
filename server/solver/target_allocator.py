@@ -611,7 +611,17 @@ def allocate_targets(
         _allocator.set_distance_matrix(distance_matrix)
 
     targets = env.get("targets", [])
-    airports = env.get("airports", [])
+    airports = list(env.get("airports", []))  # Make a copy to avoid modifying original
+
+    # Add synthetic start nodes (for checkpoint replanning)
+    # These act like airports - drones can start from these positions
+    for node_id, node_data in env.get("synthetic_starts", {}).items():
+        airports.append({
+            "id": str(node_id),
+            "x": float(node_data["x"]),
+            "y": float(node_data["y"]),
+            "is_synthetic": True,
+        })
 
     # Filter out excluded targets (e.g., targets inside SAM zones)
     if distance_matrix:

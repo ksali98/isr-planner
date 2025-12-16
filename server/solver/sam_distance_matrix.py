@@ -497,9 +497,20 @@ def calculate_sam_aware_matrix(
     Returns:
         Distance matrix data dict
     """
-    airports = env.get("airports", [])
+    airports = list(env.get("airports", []))
     targets = env.get("targets", [])
     sams = env.get("sams", [])
+
+    # Add synthetic start nodes (for checkpoint replanning)
+    # These act like airports for distance calculations
+    for node_id, node_data in env.get("synthetic_starts", {}).items():
+        airports.append({
+            "id": str(node_id),
+            "x": float(node_data["x"]),
+            "y": float(node_data["y"]),
+            "is_synthetic": True,
+        })
+        print(f"📍 [SAM Matrix] Added synthetic start: {node_id} at ({node_data['x']:.1f}, {node_data['y']:.1f})", flush=True)
 
     return _calculator.calculate_matrix(airports, targets, sams, buffer)
 

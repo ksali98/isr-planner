@@ -162,6 +162,9 @@ def _parse_env_for_solver(
     """
     Pull airports/targets/sams out of the web environment JSON.
     We expect the web client to send the same basic structure as the editor export.
+
+    Also handles synthetic_starts for checkpoint replanning - these are added
+    to the airports list so drones can start from mid-trajectory positions.
     """
     airports: List[Dict[str, Any]] = []
     for a in env.get("airports", []):
@@ -170,6 +173,17 @@ def _parse_env_for_solver(
             "x": float(a["x"]),
             "y": float(a["y"]),
         })
+
+    # Add synthetic start nodes (for checkpoint replanning)
+    # These act like airports - drones can start from these positions
+    for node_id, node_data in env.get("synthetic_starts", {}).items():
+        airports.append({
+            "id": str(node_id),
+            "x": float(node_data["x"]),
+            "y": float(node_data["y"]),
+            "is_synthetic": True,  # Mark as synthetic for reference
+        })
+        print(f"📍 Added synthetic start: {node_id} at ({node_data['x']:.1f}, {node_data['y']:.1f})", flush=True)
 
     targets: List[Dict[str, Any]] = []
     for t in env.get("targets", []):
