@@ -2175,6 +2175,58 @@ function attachTrajectoryControls() {
   updateTrajectoryButtonStates();
 }
 
+function freezeAtCheckpoint(checkpointPct = 0.5) {
+  // Ensure checkpoint container exists
+  state.checkpoint = state.checkpoint || { active: false, pct: 0.5, segments: {} };
+
+  if (!state.animation || !state.animation.drones) return;
+
+  state.checkpoint.active = true;
+  state.checkpoint.pct = checkpointPct;
+  state.checkpoint.segments = {};
+
+  Object.entries(state.animation.drones).forEach(([did, droneState]) => {
+    const traj = state.routes[did]?.trajectory || [];
+    if (traj.length < 2 || droneState.totalDistance <= 0) return;
+
+    const checkpointDist = checkpointPct * droneState.totalDistance;
+
+    const { prefixPoints, suffixPoints, splitPoint } =
+      split_polyline_at_distance(traj, checkpointDist);
+
+    // Store for later replanning/splicing
+    state.checkpoint.segments[did] = {
+      prefix: prefixPoints,
+      suffix: suffixPoints,
+      splitPoint,
+      checkpointDist,
+    };
+
+    // Freeze at checkpoint
+    droneState.distanceTraveled = checkpointDist;
+    droneState.progress = droneState.totalDistance > 0
+      ? (checkpointDist / droneState.totalDistance)
+      : 1;
+    droneState.animating = false;
+
+    // Optional: show frozen prefix only
+    state.routes[did]._fullTrajectory = traj;
+    state.routes[did].trajectory = prefixPoints;
+  });
+
+  // Stop the RAF loop cleanly
+  state.animation.active = false;
+  if (state.animation.animationId) {
+    cancelAnimationFrame(state.animation.animationId);
+    state.animation.animationId = null;
+  }
+
+  updateAnimationButtonStates();
+  drawEnvironment();
+  appendDebugLine(`Frozen at ${(checkpointPct * 100).toFixed(0)}% checkpoint`);
+}
+console.log("freezeAtCheckpoint defined?", typeof freezeAtCheckpoint, "line marker A");
+
 // ----------------------------------------------------
 // Animation controls
 // ----------------------------------------------------
@@ -2894,65 +2946,6 @@ window.addEventListener("keydown", (e) => {
     }
   }
 });
-
-function freezeAtCheckpoint(checkpointPct = 0.5) {
-  state.checkpoint = state.checkpoint || { active: false, pct: 0.5, segments: {} };
-
-  state.checkpoint.active = true;
-  state.checkpoint.pct = checkpointPct;
-  state.checkpoint.segments = {};
-
-  Object.entries(state.animation.drones).forEach(([did, droneState]) => {
-    const traj = state.routes[did]?.trajectory || [];
-    if (traj.length < 2 || droneState.totalDistance <= 0) return;
-
-    const checkpointDist = checkpointPct * droneState.totalDistance;
-    const { prefixPoints, suffixPoints, splitPoint } =
-      split_polyline_at_distance(traj, checkpointDist);
-
-    state.checkpoint.segments[did] = {
-      prefix: prefixPoints,
-      suffix: suffixPoints,
-      splitPoint,
-      checkpointDist,
-    };
-
-    droneState.distanceTraveled = checkpointDist;
-    droneState.progress = checkpointDist / droneState.totalDistance;
-    droneState.animating = false;
-
-    // Optional: show frozen prefix only
-    state.routes[did]._fullTrajectory = traj;
-    state.routes[did].trajectory = prefixPoints;
-  });
-
-  // Stop animation loop cleanly
-  state.animation.active = false;
-  if (state.animation.animationId) {
-    cancelAnimationFrame(state.animation.animationId);
-    state.animation.animationId = null;
-  }
-
-  updateAnimationButtonStates();
-  drawEnvironment();
-  appendDebugLine(`Frozen at ${(checkpointPct * 100).toFixed(0)}% checkpoint`);
-}
-
-
-  // Ensure trajectory is visible for D1
-  state.trajectoryVisible["1"] = true;
-
-  // Update allocation display
-  state.allocations = { "1": route.filter(wp => String(wp).startsWith('T')) };
-  updateAllocationDisplay(state.allocations);
-
-  // Update debug output
-  appendDebugLine(`Agent route applied to D1: ${routeStr} (${calculatedPoints} pts, ${calculatedFuel.toFixed(1)} fuel)`);
-
-  // Redraw
-  drawEnvironment();
-  updateStatsFromRoutes();
-}
 
 function buildTrajectoryFromRoute(route) {
   // Build trajectory points from waypoint IDs
