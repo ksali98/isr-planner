@@ -2934,6 +2934,7 @@ function applyAgentRoute(route, points, fuel) {
     distance: calculatedFuel,
     trajectory: buildTrajectoryFromRoute(route),
   };
+}
 
 window.addEventListener("keydown", (e) => {
   if (String(e.key).toLowerCase() === "c") {
