@@ -166,19 +166,7 @@ if (!window.__checkpointFreezeKeyInstalled) {
     "keydown",
     (e) => {
       if (String(e.key).toLowerCase() === "c") {
-        // Freeze at CURRENT animation progress, not fixed 50%
-        let currentPct = 0.5; // fallback
-        if (state.animation && state.animation.drones) {
-          // Use average progress across all animating drones
-          const progresses = Object.values(state.animation.drones)
-            .filter(d => d.animating || d.progress > 0)
-            .map(d => d.progress || 0);
-          if (progresses.length > 0) {
-            currentPct = progresses.reduce((a, b) => a + b, 0) / progresses.length;
-          }
-        }
-        appendDebugLine(`C pressed → freeze at ${(currentPct * 100).toFixed(1)}% checkpoint`);
-        freezeAtCheckpoint(currentPct);
+        freezeAtCheckpoint(); // Freeze at current position
       }
     },
     true // capture phase so nothing can block it
@@ -2205,42 +2193,42 @@ function attachTrajectoryControls() {
   updateTrajectoryButtonStates();
 }
 
-function freezeAtCheckpoint(checkpointPct = 0.5) {
+function freezeAtCheckpoint() {
+  // Freeze drones at their CURRENT position (distanceTraveled), not at a percentage
+
+  if (!state.animation || !state.animation.drones || !state.animation.active) {
+    appendDebugLine("No active animation to freeze");
+    return;
+  }
+
   // Ensure checkpoint container exists
-  state.checkpoint = state.checkpoint || { active: false, pct: 0.5, segments: {} };
-
-  if (!state.animation || !state.animation.drones) return;
-
+  state.checkpoint = state.checkpoint || { active: false, pct: 0, segments: {} };
   state.checkpoint.active = true;
-  state.checkpoint.pct = checkpointPct;
   state.checkpoint.segments = {};
 
   Object.entries(state.animation.drones).forEach(([did, droneState]) => {
     const traj = state.routes[did]?.trajectory || [];
     if (traj.length < 2 || droneState.totalDistance <= 0) return;
 
-    const checkpointDist = checkpointPct * droneState.totalDistance;
+    // Use the drone's CURRENT distanceTraveled (actual position during animation)
+    const currentDist = droneState.distanceTraveled || 0;
 
     const { prefixPoints, suffixPoints, splitPoint } =
-      split_polyline_at_distance(traj, checkpointDist);
+      split_polyline_at_distance(traj, currentDist);
 
-    // Store for later replanning/splicing
+    // Store the current position as splitPoint for drawing
     state.checkpoint.segments[did] = {
       prefix: prefixPoints,
       suffix: suffixPoints,
       splitPoint,
-      checkpointDist,
+      checkpointDist: currentDist,
     };
 
-    // Freeze at checkpoint
-    droneState.distanceTraveled = checkpointDist;
-    droneState.progress = droneState.totalDistance > 0
-      ? (checkpointDist / droneState.totalDistance)
-      : 1;
+    // Stop animating but keep current position
     droneState.animating = false;
 
-    // Optional: show frozen prefix only
-    state.routes[did]._fullTrajectory = traj;
+    // Store full trajectory and replace with prefix (traveled portion only)
+    state.routes[did]._fullTrajectory = state.routes[did]._fullTrajectory || traj;
     state.routes[did].trajectory = prefixPoints;
   });
 
@@ -2251,9 +2239,14 @@ function freezeAtCheckpoint(checkpointPct = 0.5) {
     state.animation.animationId = null;
   }
 
+  const avgPct = Object.values(state.animation.drones)
+    .filter(d => d.totalDistance > 0)
+    .map(d => (d.distanceTraveled || 0) / d.totalDistance)
+    .reduce((a, b, _, arr) => a + b / arr.length, 0) * 100;
+
   updateAnimationButtonStates();
   drawEnvironment();
-  appendDebugLine(`Frozen at ${(checkpointPct * 100).toFixed(0)}% checkpoint`);
+  appendDebugLine(`Frozen at ${avgPct.toFixed(0)}% progress`);
 }
 console.log("freezeAtCheckpoint defined?", typeof freezeAtCheckpoint, "line marker A");
 
@@ -2263,6 +2256,20 @@ console.log("freezeAtCheckpoint defined?", typeof freezeAtCheckpoint, "line mark
 function startAnimation(droneIds) {
   // Stop any existing animation
   stopAnimation();
+
+  // Clear checkpoint state so frozen drones don't persist
+  if (state.checkpoint) {
+    state.checkpoint.active = false;
+    state.checkpoint.segments = {};
+  }
+
+  // Restore full trajectories if they were truncated by a previous freeze
+  Object.keys(state.routes || {}).forEach((did) => {
+    if (state.routes[did]._fullTrajectory) {
+      state.routes[did].trajectory = state.routes[did]._fullTrajectory;
+      delete state.routes[did]._fullTrajectory;
+    }
+  });
 
   // Initialize animation state for selected drones
   state.animation.active = true;
