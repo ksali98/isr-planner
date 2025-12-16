@@ -156,11 +156,23 @@ function _samsOverlap(sam1, sam2) {
   return _distance([x1, y1], [x2, y2]) <= (r1 + r2);
 }
 
-document.addEventListener("keydown", (e) => {
-  if (e.key === "c") {
-    freezeAtCheckpoint(0.5);
-  }
-});
+// ----------------------------------------------------
+// Checkpoint freeze key handler (C)
+// ----------------------------------------------------
+if (!window.__checkpointFreezeKeyInstalled) {
+  window.__checkpointFreezeKeyInstalled = true;
+
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (String(e.key).toLowerCase() === "c") {
+        appendDebugLine("C pressed → freeze at 50% checkpoint");
+        freezeAtCheckpoint(0.5);
+      }
+    },
+    true // capture phase so nothing can block it
+  );
+}
 
 
 function _clusterOverlappingSams(sams) {
@@ -2415,6 +2427,101 @@ function attachAnimationControls() {
   if (stopBtn) {
     stopBtn.addEventListener("click", stopAnimation);
   }
+}
+// ----------------------------------------------------
+// Replan from checkpoint
+// ----------------------------------------------------
+async function replanFromCheckpoint() {
+  if (!state.missionId) {
+    appendDebugLine("No missionId. Run planner first.");
+    return;
+  }
+  if (!state.checkpoint?.active) {
+    appendDebugLine("No active checkpoint. Press C to freeze first.");
+    return;
+  }
+
+  // Build env2: copy current env, then (for now) only change drone starts to splitPoint.
+  // (We’ll exclude visited targets next; this gets the pipeline working end-to-end.)
+  const env2 = JSON.parse(JSON.stringify(state.env));
+
+  // Add synthetic start nodes per drone based on checkpoint splitPoint
+  // and update drone configs to start from those nodes.
+  env2.synthetic_starts = env2.synthetic_starts || {};
+  const newDroneConfigs = JSON.parse(JSON.stringify(state.droneConfigs));
+
+  Object.entries(state.checkpoint.segments).forEach(([did, seg]) => {
+    if (!seg?.splitPoint) return;
+
+    const nodeId = `D${did}_START`;
+    env2.synthetic_starts[nodeId] = { x: seg.splitPoint[0], y: seg.splitPoint[1] };
+
+    // Update drone config to start at synthetic node
+    if (newDroneConfigs[did]) {
+      newDroneConfigs[did].start_airport = nodeId; // naming consistent with existing schema
+    }
+  });
+
+  appendDebugLine("Requesting replanned suffix from checkpoint...");
+
+  // Call backend (new endpoint)
+  const resp = await fetch("/api/mission/replan_checkpoint", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mission_id: state.missionId,
+      checkpoint_pct: state.checkpoint.pct,
+      env2,
+      drone_configs: newDroneConfigs,
+    }),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    console.error("Replan failed:", text);
+    appendDebugLine("Replan failed. See console.");
+    return;
+  }
+
+  const data = await resp.json();
+
+  // Expected: data.routes like your normal solver response:
+  // { "1": { trajectory: [[x,y],...], route:[...]} , ... }
+  if (!data.routes) {
+    console.error("Replan response missing routes:", data);
+    appendDebugLine("Replan response invalid (missing routes).");
+    return;
+  }
+
+  // Splice: finalTrajectory = prefix + newSuffixTrajectory (skipping duplicate split point)
+  Object.entries(data.routes).forEach(([did, r]) => {
+    const seg = state.checkpoint.segments[did];
+    if (!seg?.prefix || !r?.trajectory || r.trajectory.length < 1) return;
+
+    const prefix = seg.prefix;
+    const newSuffix = r.trajectory;
+
+    // Avoid duplicating the join point if the suffix starts at the split
+    const joined =
+      (prefix.length > 0 &&
+       newSuffix.length > 0 &&
+       prefix[prefix.length - 1][0] === newSuffix[0][0] &&
+       prefix[prefix.length - 1][1] === newSuffix[0][1])
+        ? prefix.concat(newSuffix.slice(1))
+        : prefix.concat(newSuffix);
+
+    // Install joined route back into UI state
+    state.routes[did].trajectory = joined;
+
+    // If you also display route labels, keep the new route (or splice labels later)
+    if (r.route) state.routes[did].route = r.route;
+  });
+
+  // After replanning, clear checkpoint active (optional) and redraw
+  state.checkpoint.active = false;
+
+  drawEnvironment();
+  appendDebugLine("Replan complete: suffix replaced and spliced.");
 }
 
 // ----------------------------------------------------
