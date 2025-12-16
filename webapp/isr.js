@@ -705,7 +705,12 @@ function drawEnvironment() {
 
       let droneX, droneY;
 
-      if (trajectory.length >= 2) {
+      // If frozen at checkpoint, draw drone at the splitPoint (end of prefix)
+      if (state.checkpoint?.active && state.checkpoint.segments[did]?.splitPoint) {
+        const sp = state.checkpoint.segments[did].splitPoint;
+        droneX = sp[0];
+        droneY = sp[1];
+      } else if (trajectory.length >= 2) {
         // Animate along the full SAM-avoiding trajectory using distance-based interpolation
         // This ensures uniform speed regardless of segment count (SAM circles have many short segments)
         const cumulativeDistances = droneState.cumulativeDistances || [];
