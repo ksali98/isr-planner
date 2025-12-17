@@ -3238,73 +3238,73 @@ function startAnimation(droneIds) {
     }
   });
 
-// Clear checkpoint replan prefix distances after using them
-// (so next animation without replan starts from 0)
-state.checkpointReplanPrefixDistances = null;
+  // Clear checkpoint replan prefix distances after using them
+  // (so next animation without replan starts from 0)
+  state.checkpointReplanPrefixDistances = null;
 
-updateTrajectoryButtonStates();
-updateAnimationButtonStates();
+  updateTrajectoryButtonStates();
+  updateAnimationButtonStates();
 
-// Check if any drones were added for animation
-const activeDrones = Object.keys(state.animation.drones);
-if (activeDrones.length === 0) {
-  appendDebugLine("No valid drones to animate. Check route data.");
-  state.animation.active = false;
-  return;
-}
-
-// Start animation loop
-const speedUnitsPerSec = 20; // tune this (map units per second)
-let lastTime = null;
-
-function animate(currentTime) {
-  if (lastTime === null) lastTime = currentTime;
-
-  const deltaTime = Math.min(currentTime - lastTime, 100);
-  lastTime = currentTime;
-
-  const dt = deltaTime / 1000; // seconds
-  let anyAnimating = false;
-
-  Object.entries(state.animation.drones).forEach(([did, droneState]) => {
-    if (!droneState.animating) return;
-
-    // 1) advance by distance (single source of truth)
-    droneState.distanceTraveled += speedUnitsPerSec * dt;
-
-    // 2) clamp and stop if finished
-    if (droneState.distanceTraveled >= droneState.totalDistance) {
-      droneState.distanceTraveled = droneState.totalDistance;
-      droneState.animating = false;
-    } else {
-      anyAnimating = true;
-    }
-
-    // 3) derive progress (for existing drawing/UI code)
-    droneState.progress = (droneState.totalDistance > 0)
-      ? (droneState.distanceTraveled / droneState.totalDistance)
-      : 1;
-  });
-
-  drawEnvironment();
-
-  if (anyAnimating) {
-    state.animation.frameId = requestAnimationFrame(animate);
-  } else {
+  // Check if any drones were added for animation
+  const activeDrones = Object.keys(state.animation.drones);
+  if (activeDrones.length === 0) {
+    appendDebugLine("No valid drones to animate. Check route data.");
     state.animation.active = false;
-    // Animation completed naturally - go to READY_TO_ANIMATE
-    setMissionMode(MissionMode.READY_TO_ANIMATE, "animation complete");
-    updateAnimationButtonStates();
+    return;
   }
+
+  // Start animation loop
+  const speedUnitsPerSec = 20; // tune this (map units per second)
+  let lastTime = null;
+
+  function animate(currentTime) {
+    if (lastTime === null) lastTime = currentTime;
+
+    const deltaTime = Math.min(currentTime - lastTime, 100);
+    lastTime = currentTime;
+
+    const dt = deltaTime / 1000; // seconds
+    let anyAnimating = false;
+
+    Object.entries(state.animation.drones).forEach(([did, droneState]) => {
+      if (!droneState.animating) return;
+
+      // 1) advance by distance (single source of truth)
+      droneState.distanceTraveled += speedUnitsPerSec * dt;
+
+      // 2) clamp and stop if finished
+      if (droneState.distanceTraveled >= droneState.totalDistance) {
+        droneState.distanceTraveled = droneState.totalDistance;
+        droneState.animating = false;
+      } else {
+        anyAnimating = true;
+      }
+
+      // 3) derive progress (for existing drawing/UI code)
+      droneState.progress = (droneState.totalDistance > 0)
+        ? (droneState.distanceTraveled / droneState.totalDistance)
+        : 1;
+    });
+
+    drawEnvironment();
+
+    if (anyAnimating) {
+      state.animation.frameId = requestAnimationFrame(animate);
+    } else {
+      state.animation.active = false;
+      // Animation completed naturally - go to READY_TO_ANIMATE
+      setMissionMode(MissionMode.READY_TO_ANIMATE, "animation complete");
+      updateAnimationButtonStates();
+    }
+  }
+
+  state.animation.animationId = requestAnimationFrame(animate);
+
+  // Transition to ANIMATING state
+  setMissionMode(MissionMode.ANIMATING, "animation started");
+
+  appendDebugLine(`Started animation for: ${droneIds.map((d) => `D${d}`).join(", ")}`);
 }
-
-    state.animation.animationId = requestAnimationFrame(animate);
-
-    // Transition to ANIMATING state
-    setMissionMode(MissionMode.ANIMATING, "animation started");
-
-    appendDebugLine(`Started animation for: ${droneIds.map((d) => `D${d}`).join(", ")}`);
-  }
 
 function stopAnimation() {
   const wasAnimating = state.animation.active;
