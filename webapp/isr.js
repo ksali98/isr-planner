@@ -716,12 +716,14 @@ function drawEnvironment() {
     ctx.setLineDash([]);
   });
 
-  // Draw animated drones (active animation OR frozen at checkpoint)
-  const shouldDrawDrones = state.animation.active || state.checkpoint?.active;
+  // Draw animated drones (active animation OR frozen at checkpoint OR drones positioned after replan)
+  const shouldDrawDrones = state.animation.active ||
+                          state.checkpoint?.active ||
+                          (state.animation.drones && Object.keys(state.animation.drones).length > 0);
   if (shouldDrawDrones && state.animation.drones) {
     Object.entries(state.animation.drones).forEach(([did, droneState]) => {
-      // Draw if animating OR frozen at checkpoint
-      if (!droneState.animating && !state.checkpoint?.active) return;
+      // Draw if animating OR frozen at checkpoint OR drone has a valid position
+      if (!droneState.animating && !state.checkpoint?.active && droneState.distanceTraveled === undefined) return;
       if (!state.trajectoryVisible[did]) return;
 
       const routeInfo = state.routes[did];
@@ -2310,19 +2312,50 @@ async function runPlanner() {
       console.log("checkpointReplanPrefixDistances:", state.checkpointReplanPrefixDistances);
     }
 
-    // Clear checkpoint state after successful replan
-    state.checkpoint = {
-      active: false,
-      pct: 0.5,
-      segments: {},
-    };
-
     state.sequences = data.sequences || {};
     state.routes = data.routes || {};
     state.wrappedPolygons = data.wrapped_polygons || [];
     state.allocations = data.allocations || {};
     state.allocationStrategy = data.allocation_strategy || null;
     state.distanceMatrix = data.distance_matrix || null;
+
+    // After checkpoint replan, update animation drones to show at their new starting positions
+    if (isCheckpointReplan && state.animation.drones) {
+      Object.keys(state.animation.drones).forEach((did) => {
+        if (state.routes[did] && state.checkpointReplanPrefixDistances && state.checkpointReplanPrefixDistances[did]) {
+          const routeInfo = state.routes[did];
+          const trajectory = routeInfo.trajectory || [];
+
+          // Recalculate cumulative distances for the new spliced trajectory
+          let cumulativeDistances = [0];
+          let totalDistance = 0;
+          if (trajectory.length >= 2) {
+            for (let i = 1; i < trajectory.length; i++) {
+              const dx = trajectory[i][0] - trajectory[i - 1][0];
+              const dy = trajectory[i][1] - trajectory[i - 1][1];
+              totalDistance += Math.sqrt(dx * dx + dy * dy);
+              cumulativeDistances.push(totalDistance);
+            }
+          }
+
+          const prefixDist = state.checkpointReplanPrefixDistances[did];
+          state.animation.drones[did] = {
+            progress: totalDistance > 0 ? prefixDist / totalDistance : 0,
+            distanceTraveled: prefixDist,
+            animating: false,  // Not animating yet, just showing position
+            cumulativeDistances,
+            totalDistance,
+          };
+        }
+      });
+    }
+
+    // Clear checkpoint state after successful replan
+    state.checkpoint = {
+      active: false,
+      pct: 0.5,
+      segments: {},
+    };
 
     // Debug: Log what allocations we received
     console.log("🎯 data.allocations from server:", data.allocations);
