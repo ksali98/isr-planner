@@ -185,10 +185,19 @@ def _parse_env_for_solver(
         })
         print(f"📍 Added synthetic start: {node_id} at ({node_data['x']:.1f}, {node_data['y']:.1f})", flush=True)
 
+    # Filter out visited targets for checkpoint replanning
+    visited_target_ids = set(str(tid) for tid in env.get("visited_targets", []))
+
     targets: List[Dict[str, Any]] = []
     for t in env.get("targets", []):
+        target_id = str(t["id"])
+        # Skip visited targets - they are already completed in previous segments
+        if target_id in visited_target_ids:
+            print(f"📍 Skipping visited target: {target_id} (already completed)", flush=True)
+            continue
+
         targets.append({
-            "id": str(t["id"]),
+            "id": target_id,
             "x": float(t["x"]),
             "y": float(t["y"]),
             "priority": int(t.get("priority", 5)),

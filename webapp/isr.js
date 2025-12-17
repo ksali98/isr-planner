@@ -646,8 +646,20 @@ function drawEnvironment() {
     const priority = t.priority || 5;
     ctx.fillText(`${t.id}-${priority}`, x + 6, y + 3);
 
-    // Draw X if target is inside a SAM polygon (no-fly zone)
-    if (isInsideAnySAM(t.x, t.y)) {
+    // Draw green X if target is visited (completed in previous checkpoint segment)
+    if (state.visitedTargets && state.visitedTargets.includes(t.id)) {
+      ctx.strokeStyle = "#22c55e";  // green
+      ctx.lineWidth = 3;
+      const xSize = 10;
+      ctx.beginPath();
+      ctx.moveTo(x - xSize, y - xSize);
+      ctx.lineTo(x + xSize, y + xSize);
+      ctx.moveTo(x + xSize, y - xSize);
+      ctx.lineTo(x - xSize, y + xSize);
+      ctx.stroke();
+    }
+    // Draw red X if target is inside a SAM polygon (no-fly zone)
+    else if (isInsideAnySAM(t.x, t.y)) {
       ctx.strokeStyle = "#ef4444";
       ctx.lineWidth = 2;
       const xSize = 8;
@@ -2550,6 +2562,9 @@ function freezeAtCheckpoint() {
   state.checkpoint.active = true;
   state.checkpoint.segments = {};
 
+  // Track which targets are visited in the current (frozen) routes
+  const targetsVisitedThisSegment = [];
+
   Object.entries(state.animation.drones).forEach(([did, droneState]) => {
     const traj = state.routes[did]?.trajectory || [];
     if (traj.length < 2 || droneState.totalDistance <= 0) return;
@@ -2568,6 +2583,16 @@ function freezeAtCheckpoint() {
       checkpointDist: currentDist,
     };
 
+    // Mark ALL targets in this drone's route as visited
+    // These targets are now "in the past" and should not be included in the new solution
+    const route = state.routes[did]?.route || [];
+    route.forEach(wp => {
+      if (String(wp).startsWith("T") && !state.visitedTargets.includes(wp)) {
+        targetsVisitedThisSegment.push(wp);
+        state.visitedTargets.push(wp);
+      }
+    });
+
     // Stop animating but keep current position
     droneState.animating = false;
 
@@ -2575,6 +2600,10 @@ function freezeAtCheckpoint() {
     state.routes[did]._fullTrajectory = state.routes[did]._fullTrajectory || traj;
     state.routes[did].trajectory = prefixPoints;
   });
+
+  if (targetsVisitedThisSegment.length > 0) {
+    appendDebugLine(`🎯 Marked ${targetsVisitedThisSegment.length} targets as visited: ${targetsVisitedThisSegment.join(', ')}`);
+  }
 
   // Stop the RAF loop cleanly
   state.animation.active = false;
