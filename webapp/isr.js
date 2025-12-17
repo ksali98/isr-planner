@@ -125,6 +125,240 @@ const missionState = {
   pauseContext: null,          // { droneStates: {...} } - saved state for resume
 };
 
+// ----------------------------------------------------
+// MissionReplay - Clean architecture for segment-based mission replay
+// ----------------------------------------------------
+
+/**
+ * Segment - Immutable data structure for a mission segment
+ * A segment represents one "solve" of the mission, including:
+ * - The environment state at that point
+ * - The solution (routes/trajectories)
+ * - The checkpoint boundary (where this segment ends and next begins)
+ */
+class Segment {
+  constructor({
+    index,
+    solution,
+    env,
+    prefixDistances = null,
+    isCheckpointReplan = false,
+    timestamp = new Date().toISOString()
+  }) {
+    this.index = index;
+    this.solution = Object.freeze(JSON.parse(JSON.stringify(solution)));
+    this.env = Object.freeze(JSON.parse(JSON.stringify(env)));
+    this.prefixDistances = prefixDistances ? Object.freeze({...prefixDistances}) : null;
+    this.isCheckpointReplan = isCheckpointReplan;
+    this.timestamp = timestamp;
+    Object.freeze(this);
+  }
+
+  /**
+   * Get the checkpoint distance for a specific drone
+   * Returns null if this segment doesn't have checkpoint data
+   */
+  getCheckpointDistance(droneId) {
+    return this.prefixDistances?.[droneId] ?? null;
+  }
+
+  /**
+   * Check if this segment has checkpoint boundaries
+   */
+  hasCheckpointBoundary() {
+    return this.prefixDistances !== null && Object.keys(this.prefixDistances).length > 0;
+  }
+}
+
+/**
+ * MissionReplay - Manages multi-segment mission playback
+ *
+ * Responsibilities:
+ * - Store mission segments in sequence
+ * - Track current playback position (segment index + distance)
+ * - Detect segment boundary crossings
+ * - Provide segment data for animation and display
+ *
+ * Does NOT:
+ * - Control animation timing (that's the animation loop's job)
+ * - Modify UI directly (emits events/callbacks instead)
+ */
+class MissionReplay {
+  constructor() {
+    this._segments = [];
+    this._currentSegmentIndex = 0;
+    this._onSegmentSwitch = null;  // Callback: (fromIndex, toIndex, newSegment) => void
+  }
+
+  // --- Segment Management ---
+
+  /**
+   * Add a new segment to the mission
+   */
+  addSegment(segmentData) {
+    const segment = new Segment({
+      index: this._segments.length,
+      ...segmentData
+    });
+    this._segments.push(segment);
+    console.log(`[MissionReplay] Added segment ${segment.index}, isCheckpointReplan=${segment.isCheckpointReplan}`);
+    return segment;
+  }
+
+  /**
+   * Get all segments
+   */
+  getSegments() {
+    return [...this._segments];
+  }
+
+  /**
+   * Get segment by index
+   */
+  getSegment(index) {
+    return this._segments[index] ?? null;
+  }
+
+  /**
+   * Get current segment
+   */
+  getCurrentSegment() {
+    return this._segments[this._currentSegmentIndex] ?? null;
+  }
+
+  /**
+   * Get next segment (if any)
+   */
+  getNextSegment() {
+    return this._segments[this._currentSegmentIndex + 1] ?? null;
+  }
+
+  /**
+   * Get segment count
+   */
+  getSegmentCount() {
+    return this._segments.length;
+  }
+
+  /**
+   * Get current segment index
+   */
+  getCurrentSegmentIndex() {
+    return this._currentSegmentIndex;
+  }
+
+  /**
+   * Check if there are more segments after current
+   */
+  hasNextSegment() {
+    return this._currentSegmentIndex < this._segments.length - 1;
+  }
+
+  // --- Playback Control ---
+
+  /**
+   * Reset to beginning for replay
+   */
+  resetToStart() {
+    this._currentSegmentIndex = 0;
+    console.log(`[MissionReplay] Reset to start, ${this._segments.length} segments available`);
+  }
+
+  /**
+   * Clear all segments (full reset)
+   */
+  clear() {
+    this._segments = [];
+    this._currentSegmentIndex = 0;
+    console.log(`[MissionReplay] Cleared all segments`);
+  }
+
+  /**
+   * Keep only first N segments
+   */
+  truncateAfter(index) {
+    if (index < this._segments.length - 1) {
+      this._segments = this._segments.slice(0, index + 1);
+      if (this._currentSegmentIndex > index) {
+        this._currentSegmentIndex = index;
+      }
+      console.log(`[MissionReplay] Truncated to ${this._segments.length} segments`);
+    }
+  }
+
+  /**
+   * Set callback for segment switches
+   */
+  onSegmentSwitch(callback) {
+    this._onSegmentSwitch = callback;
+  }
+
+  /**
+   * Check if a drone has crossed into the next segment
+   * Call this from animation loop with current drone distances
+   *
+   * @param droneDistances - Object mapping droneId to current distance traveled
+   * @returns {switched: boolean, newSegment: Segment|null}
+   */
+  checkSegmentBoundary(droneDistances) {
+    const nextSegment = this.getNextSegment();
+    if (!nextSegment || !nextSegment.hasCheckpointBoundary()) {
+      return { switched: false, newSegment: null };
+    }
+
+    // Check if ANY drone has crossed the checkpoint boundary
+    for (const [droneId, currentDist] of Object.entries(droneDistances)) {
+      const checkpointDist = nextSegment.getCheckpointDistance(droneId);
+      if (checkpointDist !== null && currentDist >= checkpointDist) {
+        // Crossed! Switch to next segment
+        const fromIndex = this._currentSegmentIndex;
+        this._currentSegmentIndex++;
+        console.log(`[MissionReplay] Segment switch: ${fromIndex} -> ${this._currentSegmentIndex} (D${droneId} crossed at ${currentDist.toFixed(1)} >= ${checkpointDist.toFixed(1)})`);
+
+        if (this._onSegmentSwitch) {
+          this._onSegmentSwitch(fromIndex, this._currentSegmentIndex, nextSegment);
+        }
+
+        return { switched: true, newSegment: nextSegment };
+      }
+    }
+
+    return { switched: false, newSegment: null };
+  }
+
+  /**
+   * Get the starting distance for a drone in the current segment
+   * (0 for segment 0, prefixDistance for checkpoint replans)
+   */
+  getStartingDistance(droneId) {
+    const segment = this.getCurrentSegment();
+    if (!segment || segment.index === 0) {
+      return 0;
+    }
+    return segment.getCheckpointDistance(droneId) ?? 0;
+  }
+
+  /**
+   * Export replay state for debugging
+   */
+  getDebugInfo() {
+    return {
+      segmentCount: this._segments.length,
+      currentIndex: this._currentSegmentIndex,
+      segments: this._segments.map(s => ({
+        index: s.index,
+        isCheckpointReplan: s.isCheckpointReplan,
+        hasCheckpoint: s.hasCheckpointBoundary(),
+        envTargets: s.env.targets?.length ?? 0,
+        routeCount: Object.keys(s.solution.routes || {}).length
+      }))
+    };
+  }
+}
+
+// Global mission replay instance
+const missionReplay = new MissionReplay();
+
 /**
  * Get UI permissions based on current mission mode
  * Returns which actions are allowed in the current state
@@ -432,19 +666,25 @@ function acceptSolution() {
     return;
   }
 
-  // Add the draft solution to committed segments
-  const segment = {
-    index: missionState.committedSegments.length,
+  // Add segment to MissionReplay (the clean way)
+  const segment = missionReplay.addSegment({
+    solution: missionState.draftSolution,
+    env: missionState.acceptedEnv || state.env,
+    prefixDistances: state.checkpointReplanPrefixDistances,
+    isCheckpointReplan: missionState.draftSolution.isCheckpointReplan || false,
+  });
+
+  // Also keep in missionState.committedSegments for backward compatibility during transition
+  missionState.committedSegments.push({
+    index: segment.index,
     solution: JSON.parse(JSON.stringify(missionState.draftSolution)),
     env: JSON.parse(JSON.stringify(missionState.acceptedEnv || state.env)),
-    timestamp: new Date().toISOString(),
-    // Store prefix distances for mission replay (where the C point is)
+    timestamp: segment.timestamp,
     prefixDistances: state.checkpointReplanPrefixDistances
       ? JSON.parse(JSON.stringify(state.checkpointReplanPrefixDistances))
       : null,
     isCheckpointReplan: missionState.draftSolution.isCheckpointReplan || false,
-  };
-  missionState.committedSegments.push(segment);
+  });
   missionState.currentSegmentIndex = segment.index;
 
   // Clear the draft
@@ -455,6 +695,7 @@ function acceptSolution() {
 
   appendDebugLine(`✅ Solution accepted as segment ${segment.index + 1}`);
   appendDebugLine(`   Visited targets retained: [${state.visitedTargets.join(", ")}]`);
+  appendDebugLine(`   MissionReplay: ${missionReplay.getSegmentCount()} segments`);
   drawEnvironment();
 }
 
@@ -510,8 +751,8 @@ function resetMission() {
     return;
   }
 
-  // Must have at least one committed segment to reset to
-  if (missionState.committedSegments.length === 0) {
+  // Must have segments to reset to (check both old and new system)
+  if (missionReplay.getSegmentCount() === 0 && missionState.committedSegments.length === 0) {
     appendDebugLine("No committed segments to reset to");
     return;
   }
@@ -530,46 +771,38 @@ function resetMission() {
     missionState.acceptedEnv = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
   }
 
-  // KEEP all committed segments for mission replay (don't discard!)
-  const firstSegment = missionState.committedSegments[0];
-  const totalSegments = missionState.committedSegments.length;
-  appendDebugLine(`Reset: Found ${totalSegments} committed segments (keeping all for replay)`);
-  appendDebugLine(`Reset: firstSegment exists: ${!!firstSegment}, has solution: ${!!(firstSegment && firstSegment.solution)}`);
-  if (firstSegment && firstSegment.solution) {
-    appendDebugLine(`Reset: firstSegment.solution.routes keys: ${Object.keys(firstSegment.solution.routes || {}).join(", ") || "EMPTY"}`);
-  }
-  // Log all segments for debugging
-  missionState.committedSegments.forEach((seg, idx) => {
-    const hasPrefixDist = seg.prefixDistances ? Object.keys(seg.prefixDistances).length : 0;
-    appendDebugLine(`  Segment ${idx}: isCheckpointReplan=${seg.isCheckpointReplan}, prefixDistances=${hasPrefixDist} drones`);
+  // Reset MissionReplay to start (keeps all segments)
+  missionReplay.resetToStart();
+
+  // Log replay debug info
+  const debugInfo = missionReplay.getDebugInfo();
+  appendDebugLine(`🔄 MissionReplay: ${debugInfo.segmentCount} segments, reset to index ${debugInfo.currentIndex}`);
+  debugInfo.segments.forEach(s => {
+    appendDebugLine(`   Segment ${s.index}: checkpoint=${s.hasCheckpoint}, targets=${s.envTargets}, routes=${s.routeCount}`);
   });
-  // Don't discard segments - keep them all: missionState.committedSegments = [firstSegment];
-  missionState.currentSegmentIndex = 0;  // Start from first segment
+
+  // Also sync missionState for backward compatibility
+  missionState.currentSegmentIndex = 0;
 
   // Clear draft state
   missionState.draftEnv = null;
   missionState.draftSolution = null;
   missionState.pauseContext = null;
 
-  // Restore the first segment's solution to the UI
+  // Restore the first segment's solution to the UI using MissionReplay
+  const firstSegment = missionReplay.getSegment(0);
   if (firstSegment && firstSegment.solution) {
-    appendDebugLine("Restoring segment solution routes: " + Object.keys(firstSegment.solution.routes || {}).join(", "));
-    // Debug: Log trajectory lengths from the stored segment
-    Object.entries(firstSegment.solution.routes || {}).forEach(([did, routeData]) => {
-      const trajLen = routeData.trajectory ? routeData.trajectory.length : 0;
-      const firstPt = trajLen > 0 ? `(${routeData.trajectory[0][0].toFixed(1)},${routeData.trajectory[0][1].toFixed(1)})` : "N/A";
-      const lastPt = trajLen > 0 ? `(${routeData.trajectory[trajLen-1][0].toFixed(1)},${routeData.trajectory[trajLen-1][1].toFixed(1)})` : "N/A";
-      appendDebugLine(`  D${did}: ${trajLen} pts, route: ${(routeData.route || []).join("-")}, from ${firstPt} to ${lastPt}`);
-    });
-    applyDraftSolutionToUI(firstSegment.solution);
-    appendDebugLine("After restore, state.routes keys: " + Object.keys(state.routes).join(", "));
-    // Debug: Verify routes were applied
-    Object.entries(state.routes || {}).forEach(([did, routeData]) => {
-      const trajLen = routeData.trajectory ? routeData.trajectory.length : 0;
-      const firstPt = trajLen > 0 ? `(${routeData.trajectory[0][0].toFixed(1)},${routeData.trajectory[0][1].toFixed(1)})` : "N/A";
-      const lastPt = trajLen > 0 ? `(${routeData.trajectory[trajLen-1][0].toFixed(1)},${routeData.trajectory[trajLen-1][1].toFixed(1)})` : "N/A";
-      appendDebugLine(`  state.routes[${did}]: ${trajLen} pts, from ${firstPt} to ${lastPt}`);
-    });
+    appendDebugLine("Restoring segment 0 from MissionReplay");
+    // Unfreeze the solution for applyDraftSolutionToUI (it needs mutable data)
+    const solutionCopy = JSON.parse(JSON.stringify(firstSegment.solution));
+    applyDraftSolutionToUI(solutionCopy);
+  } else {
+    // Fallback to old system
+    const oldFirstSegment = missionState.committedSegments[0];
+    if (oldFirstSegment && oldFirstSegment.solution) {
+      appendDebugLine("Restoring segment 0 from missionState (fallback)");
+      applyDraftSolutionToUI(oldFirstSegment.solution);
+    }
   }
 
   // Clear any _fullTrajectory overrides that may have been set during checkpoint
@@ -584,10 +817,6 @@ function resetMission() {
   state.checkpointReplanPrefixDistances = null;
   state.missionHistory = [];
   state.visitedTargets = [];
-
-  // Clear segment switch flags for replay
-  state._segmentSwitchPending = false;
-  state._nextSegmentIndex = null;
 
   // Reset to READY_TO_ANIMATE so user can replay from beginning
   setMissionMode(MissionMode.READY_TO_ANIMATE, "mission reset to start");
@@ -3288,14 +3517,10 @@ function startAnimation(droneIds) {
     Object.keys(state.checkpointReplanPrefixDistances).length > 0;
   state.debugStopAtSplice = isCheckpointReplan;  // Set true to stop at splice point
 
-  // Clear segment switch flags at animation start
-  state._segmentSwitchPending = false;
-  state._nextSegmentIndex = null;
-
-  // Debug: Log visited targets at animation start
+  // Debug: Log visited targets and MissionReplay state at animation start
   appendDebugLine(`🎬 Animation starting. Visited targets: [${state.visitedTargets.join(", ")}]`);
-  appendDebugLine(`🎬 checkpointReplanPrefixDistances: ${JSON.stringify(state.checkpointReplanPrefixDistances)}`);
-  appendDebugLine(`🎬 Segments: ${missionState.committedSegments.length}, currentSegmentIndex: ${missionState.currentSegmentIndex}`);
+  const replayInfo = missionReplay.getDebugInfo();
+  appendDebugLine(`🎬 MissionReplay: ${replayInfo.segmentCount} segments, current=${replayInfo.currentIndex}`);
   if (isCheckpointReplan) {
     appendDebugLine(`🛑 DEBUG: Will stop at splice point (prefix distance)`);
   }
@@ -3428,27 +3653,8 @@ function startAnimation(droneIds) {
       }
 
       // MISSION REPLAY: Check if we've reached the C point (segment boundary)
-      // and need to switch to the next segment
-      if (!state._segmentSwitchPending) {
-        const currentSegIdx = missionState.currentSegmentIndex;
-        const nextSegIdx = currentSegIdx + 1;
-        const nextSegment = missionState.committedSegments[nextSegIdx];
-
-        // If there's a next segment with prefix distances, check if we've reached the C point
-        if (nextSegment && nextSegment.prefixDistances && nextSegment.prefixDistances[did]) {
-          const cPointDist = nextSegment.prefixDistances[did];
-
-          if (droneState.distanceTraveled >= cPointDist && !droneState._passedCPoint) {
-            droneState._passedCPoint = true;
-            console.log(`🔄 D${did} reached C point at distance ${cPointDist.toFixed(1)} - triggering segment switch`);
-            appendDebugLine(`🔄 D${did} reached C point - switching to segment ${nextSegIdx}`);
-
-            // Mark that we need to switch segments (do it once, not per drone)
-            state._segmentSwitchPending = true;
-            state._nextSegmentIndex = nextSegIdx;
-          }
-        }
-      }
+      // Using MissionReplay for clean segment management
+      // (The actual check happens after the drone loop to avoid switching mid-iteration)
 
       // DEBUG: For checkpoint replan, stop at the splice point (prefix distance)
       // This allows verification that the splice is correct
@@ -3540,58 +3746,56 @@ function startAnimation(droneIds) {
       }
     });
 
-    // MISSION REPLAY: Perform segment switch if triggered
-    if (state._segmentSwitchPending) {
-      state._segmentSwitchPending = false;
-      const nextSegIdx = state._nextSegmentIndex;
-      const nextSegment = missionState.committedSegments[nextSegIdx];
+    // MISSION REPLAY: Check segment boundary and switch if needed
+    // Collect current drone distances for boundary check
+    const droneDistances = {};
+    Object.entries(state.animation.drones).forEach(([did, ds]) => {
+      droneDistances[did] = ds.distanceTraveled;
+    });
 
-      if (nextSegment) {
-        console.log(`🔄 Switching to segment ${nextSegIdx}`);
-        appendDebugLine(`🔄 === SEGMENT SWITCH to ${nextSegIdx} ===`);
+    // Use MissionReplay to check if we crossed a segment boundary
+    const { switched, newSegment } = missionReplay.checkSegmentBoundary(droneDistances);
 
-        // Update current segment index
-        missionState.currentSegmentIndex = nextSegIdx;
+    if (switched && newSegment) {
+      appendDebugLine(`🔄 === SEGMENT SWITCH to ${newSegment.index} (via MissionReplay) ===`);
 
-        // Switch environment (shows new targets)
-        if (nextSegment.env) {
-          state.env = JSON.parse(JSON.stringify(nextSegment.env));
-          appendDebugLine(`🔄 Environment updated with ${state.env.targets?.length || 0} targets`);
-        }
+      // Also sync missionState for backward compatibility
+      missionState.currentSegmentIndex = newSegment.index;
 
-        // Switch trajectories to the spliced versions from this segment
-        if (nextSegment.solution && nextSegment.solution.routes) {
-          Object.entries(nextSegment.solution.routes).forEach(([did, routeData]) => {
-            if (state.routes[did] && routeData.trajectory) {
-              const oldLen = state.routes[did].trajectory?.length || 0;
-              state.routes[did].trajectory = JSON.parse(JSON.stringify(routeData.trajectory));
-              state.routes[did].route = JSON.parse(JSON.stringify(routeData.route || []));
-              const newLen = state.routes[did].trajectory.length;
-              appendDebugLine(`🔄 D${did}: trajectory ${oldLen}→${newLen} pts`);
+      // Switch environment (shows new targets)
+      state.env = JSON.parse(JSON.stringify(newSegment.env));
+      appendDebugLine(`🔄 Environment updated with ${state.env.targets?.length || 0} targets`);
 
-              // Update drone's cumulative distances and total distance for the new trajectory
-              const droneState = state.animation.drones[did];
-              if (droneState) {
-                const trajectory = state.routes[did].trajectory;
-                let cumulativeDistances = [0];
-                let totalDistance = 0;
-                for (let i = 1; i < trajectory.length; i++) {
-                  const dx = trajectory[i][0] - trajectory[i - 1][0];
-                  const dy = trajectory[i][1] - trajectory[i - 1][1];
-                  totalDistance += Math.sqrt(dx * dx + dy * dy);
-                  cumulativeDistances.push(totalDistance);
-                }
-                droneState.cumulativeDistances = cumulativeDistances;
-                droneState.totalDistance = totalDistance;
-                // Keep distanceTraveled as-is (we're continuing from C point)
-                appendDebugLine(`🔄 D${did}: totalDistance now ${totalDistance.toFixed(1)}`);
-              }
+      // Switch trajectories to the spliced versions from this segment
+      Object.entries(newSegment.solution.routes || {}).forEach(([did, routeData]) => {
+        if (state.routes[did] && routeData.trajectory) {
+          const oldLen = state.routes[did].trajectory?.length || 0;
+          state.routes[did].trajectory = JSON.parse(JSON.stringify(routeData.trajectory));
+          state.routes[did].route = JSON.parse(JSON.stringify(routeData.route || []));
+          const newLen = state.routes[did].trajectory.length;
+          appendDebugLine(`🔄 D${did}: trajectory ${oldLen}→${newLen} pts`);
+
+          // Update drone's cumulative distances and total distance for the new trajectory
+          const droneState = state.animation.drones[did];
+          if (droneState) {
+            const trajectory = state.routes[did].trajectory;
+            let cumulativeDistances = [0];
+            let totalDistance = 0;
+            for (let i = 1; i < trajectory.length; i++) {
+              const dx = trajectory[i][0] - trajectory[i - 1][0];
+              const dy = trajectory[i][1] - trajectory[i - 1][1];
+              totalDistance += Math.sqrt(dx * dx + dy * dy);
+              cumulativeDistances.push(totalDistance);
             }
-          });
+            droneState.cumulativeDistances = cumulativeDistances;
+            droneState.totalDistance = totalDistance;
+            // Keep distanceTraveled as-is (we're continuing from C point)
+            appendDebugLine(`🔄 D${did}: totalDistance now ${totalDistance.toFixed(1)}`);
+          }
         }
+      });
 
-        appendDebugLine(`🔄 === SEGMENT SWITCH COMPLETE ===`);
-      }
+      appendDebugLine(`🔄 === SEGMENT SWITCH COMPLETE ===`);
     }
 
     drawEnvironment();
