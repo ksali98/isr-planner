@@ -2583,11 +2583,31 @@ function freezeAtCheckpoint() {
       checkpointDist: currentDist,
     };
 
-    // Mark ALL targets in this drone's route as visited
-    // These targets are now "in the past" and should not be included in the new solution
+    // Mark ONLY targets that have been passed (are in the prefix trajectory)
+    // Targets ahead of the frozen position should remain available for replanning
     const route = state.routes[did]?.route || [];
+    const env = state.env;
+
     route.forEach(wp => {
-      if (String(wp).startsWith("T") && !state.visitedTargets.includes(wp)) {
+      if (!String(wp).startsWith("T")) return;
+      if (state.visitedTargets.includes(wp)) return;
+
+      // Find target position
+      const target = env.targets?.find(t => t.id === wp);
+      if (!target) return;
+
+      // Check if this target position appears in the prefix trajectory
+      // A target is visited if we've passed through or near its position
+      const targetPos = [target.x, target.y];
+      const isPassed = prefixPoints.some(pt => {
+        const dist = Math.sqrt(
+          Math.pow(pt[0] - targetPos[0], 2) +
+          Math.pow(pt[1] - targetPos[1], 2)
+        );
+        return dist < 0.5; // Within 0.5 units means we visited it
+      });
+
+      if (isPassed) {
         targetsVisitedThisSegment.push(wp);
         state.visitedTargets.push(wp);
       }
