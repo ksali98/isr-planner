@@ -2788,6 +2788,7 @@ async function runPlanner() {
         }
 
         routeData.trajectory = joined;
+        appendDebugLine(`📎 D${did}: prefix=${prefix.length} + suffix=${newSuffix.length} = joined=${joined.length} pts`);
       });
 
       data.routes = newRoutes;
