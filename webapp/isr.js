@@ -2610,6 +2610,9 @@ function freezeAtCheckpoint() {
       if (isPassed) {
         targetsVisitedThisSegment.push(wp);
         state.visitedTargets.push(wp);
+        console.log(`✓ D${did}: Marked ${wp} as visited (found in prefix trajectory)`);
+      } else {
+        console.log(`○ D${did}: ${wp} NOT visited (ahead of frozen position)`);
       }
     });
 
@@ -2622,7 +2625,10 @@ function freezeAtCheckpoint() {
   });
 
   if (targetsVisitedThisSegment.length > 0) {
-    appendDebugLine(`🎯 Marked ${targetsVisitedThisSegment.length} targets as visited: ${targetsVisitedThisSegment.join(', ')}`);
+    appendDebugLine(`🎯 Marked ${targetsVisitedThisSegment.length} targets as visited (in frozen trajectory): ${targetsVisitedThisSegment.join(', ')}`);
+    appendDebugLine(`   These targets will show GREEN X and be excluded from replanning`);
+  } else {
+    appendDebugLine(`   No targets in frozen trajectories - all remain available for replanning`);
   }
 
   // Stop the RAF loop cleanly
