@@ -3289,7 +3289,7 @@ function startAnimation(droneIds) {
     drawEnvironment();
 
     if (anyAnimating) {
-      state.animation.frameId = requestAnimationFrame(animate);
+      state.animation.animationId = requestAnimationFrame(animate);
     } else {
       state.animation.active = false;
       // Animation completed naturally - go to READY_TO_ANIMATE
@@ -3410,7 +3410,7 @@ function resumeAnimation() {
     drawEnvironment();
 
     if (anyAnimating) {
-      state.animation.frameId = requestAnimationFrame(animate);
+      state.animation.animationId = requestAnimationFrame(animate);
     } else {
       state.animation.active = false;
       // Animation completed naturally - go to READY_TO_ANIMATE
