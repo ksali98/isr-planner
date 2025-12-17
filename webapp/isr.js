@@ -3796,6 +3796,15 @@ function startAnimation(droneIds) {
       });
 
       appendDebugLine(`🔄 === SEGMENT SWITCH COMPLETE ===`);
+
+      // Pause for 200ms at the C point to make the transition visible
+      drawEnvironment();
+      setTimeout(() => {
+        if (state.animation.active) {
+          state.animation.animationId = requestAnimationFrame(animate);
+        }
+      }, 200);
+      return;  // Exit this frame, resume after timeout
     }
 
     drawEnvironment();
