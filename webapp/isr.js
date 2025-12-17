@@ -449,6 +449,7 @@ function acceptSolution() {
   setMissionMode(MissionMode.READY_TO_ANIMATE, "solution accepted");
 
   appendDebugLine(`✅ Solution accepted as segment ${segment.index + 1}`);
+  appendDebugLine(`   Visited targets retained: [${state.visitedTargets.join(", ")}]`);
   drawEnvironment();
 }
 
@@ -526,6 +527,11 @@ function resetMission() {
 
   // Keep only the first committed segment, discard subsequent replans
   const firstSegment = missionState.committedSegments[0];
+  appendDebugLine(`Reset: Found ${missionState.committedSegments.length} committed segments`);
+  appendDebugLine(`Reset: firstSegment exists: ${!!firstSegment}, has solution: ${!!(firstSegment && firstSegment.solution)}`);
+  if (firstSegment && firstSegment.solution) {
+    appendDebugLine(`Reset: firstSegment.solution.routes keys: ${Object.keys(firstSegment.solution.routes || {}).join(", ") || "EMPTY"}`);
+  }
   missionState.committedSegments = [firstSegment];
   missionState.currentSegmentIndex = 0;
 
@@ -536,8 +542,31 @@ function resetMission() {
 
   // Restore the first segment's solution to the UI
   if (firstSegment && firstSegment.solution) {
+    appendDebugLine("Restoring segment solution routes: " + Object.keys(firstSegment.solution.routes || {}).join(", "));
+    // Debug: Log trajectory lengths from the stored segment
+    Object.entries(firstSegment.solution.routes || {}).forEach(([did, routeData]) => {
+      const trajLen = routeData.trajectory ? routeData.trajectory.length : 0;
+      const firstPt = trajLen > 0 ? `(${routeData.trajectory[0][0].toFixed(1)},${routeData.trajectory[0][1].toFixed(1)})` : "N/A";
+      const lastPt = trajLen > 0 ? `(${routeData.trajectory[trajLen-1][0].toFixed(1)},${routeData.trajectory[trajLen-1][1].toFixed(1)})` : "N/A";
+      appendDebugLine(`  D${did}: ${trajLen} pts, route: ${(routeData.route || []).join("-")}, from ${firstPt} to ${lastPt}`);
+    });
     applyDraftSolutionToUI(firstSegment.solution);
+    appendDebugLine("After restore, state.routes keys: " + Object.keys(state.routes).join(", "));
+    // Debug: Verify routes were applied
+    Object.entries(state.routes || {}).forEach(([did, routeData]) => {
+      const trajLen = routeData.trajectory ? routeData.trajectory.length : 0;
+      const firstPt = trajLen > 0 ? `(${routeData.trajectory[0][0].toFixed(1)},${routeData.trajectory[0][1].toFixed(1)})` : "N/A";
+      const lastPt = trajLen > 0 ? `(${routeData.trajectory[trajLen-1][0].toFixed(1)},${routeData.trajectory[trajLen-1][1].toFixed(1)})` : "N/A";
+      appendDebugLine(`  state.routes[${did}]: ${trajLen} pts, from ${firstPt} to ${lastPt}`);
+    });
   }
+
+  // Clear any _fullTrajectory overrides that may have been set during checkpoint
+  Object.values(state.routes).forEach(routeData => {
+    if (routeData._fullTrajectory) {
+      delete routeData._fullTrajectory;
+    }
+  });
 
   // Clear checkpoint state
   state.checkpoint = { active: false, pct: 0.5, segments: {} };
@@ -635,21 +664,10 @@ function _samsOverlap(sam1, sam2) {
 }
 
 // ----------------------------------------------------
-// Checkpoint freeze key handler (C)
+// Checkpoint freeze key handler (C) - REMOVED, handled in main keydown listener
 // ----------------------------------------------------
-if (!window.__checkpointFreezeKeyInstalled) {
-  window.__checkpointFreezeKeyInstalled = true;
-
-  document.addEventListener(
-    "keydown",
-    (e) => {
-      if (String(e.key).toLowerCase() === "c") {
-        freezeAtCheckpoint(); // Freeze at current position
-      }
-    },
-    true // capture phase so nothing can block it
-  );
-}
+// Old duplicate handler removed - C key is now handled in the main window.addEventListener("keydown")
+// which properly uses cutAtCheckpoint() with state machine permissions
 
 // Reset mission key handler (R)
 // ----------------------------------------------------
@@ -888,11 +906,18 @@ function resizeCanvasToContainer() {
 // ----------------------------------------------------
 // Environment drawing
 // ----------------------------------------------------
+let _drawEnvFrameCount = 0;
 function drawEnvironment() {
   const canvas = $("env-canvas");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
+
+  // Debug: Log visited targets every 30 frames (about once per second at 30fps)
+  _drawEnvFrameCount++;
+  if (_drawEnvFrameCount % 60 === 1 && state.visitedTargets.length > 0) {
+    console.log(`[drawEnv] visitedTargets (${state.visitedTargets.length}):`, state.visitedTargets);
+  }
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -1117,7 +1142,8 @@ function drawEnvironment() {
     ctx.fillText(`${t.id}-${priority}`, x + 6, y + 3);
 
     // Draw green X if target is visited (completed in previous checkpoint segment)
-    if (state.visitedTargets && state.visitedTargets.includes(t.id)) {
+    const isVisited = state.visitedTargets && state.visitedTargets.includes(t.id);
+    if (isVisited) {
       ctx.strokeStyle = "#22c55e";  // green
       ctx.lineWidth = 3;
       const xSize = 10;
@@ -2562,7 +2588,11 @@ function pushMissionSegment(note = "") {
  * - Returns modified env and droneConfigs
  */
 function buildCheckpointEnv() {
+  appendDebugLine(`buildCheckpointEnv: checkpoint.active=${state.checkpoint?.active}, segments=${Object.keys(state.checkpoint?.segments || {}).join(",") || "NONE"}`);
+  appendDebugLine(`buildCheckpointEnv: visitedTargets=[${state.visitedTargets.join(", ")}]`);
+
   if (!state.checkpoint?.active || !state.checkpoint.segments) {
+    appendDebugLine("buildCheckpointEnv: NOT a checkpoint replan (checkpoint.active is false or no segments)");
     return { env: state.env, droneConfigs: state.droneConfigs, isCheckpointReplan: false };
   }
 
@@ -2603,6 +2633,8 @@ function buildCheckpointEnv() {
   // Optionally filter out visited targets from the targets array
   // (depending on how backend handles this)
   // env2.targets = env2.targets.filter(t => !state.visitedTargets.includes(t.id));
+
+  appendDebugLine(`buildCheckpointEnv: IS checkpoint replan. synthetic_starts=${Object.keys(env2.synthetic_starts).join(",")}, visited=${env2.visited_targets.length}`);
 
   return {
     env: env2,
@@ -2780,13 +2812,14 @@ async function runPlanner() {
     }
 
     // Store as draft solution (two-phase commit)
+    // IMPORTANT: Deep copy routes to prevent modifications to state.routes from affecting the draft
     missionState.draftSolution = {
-      sequences: data.sequences || {},
-      routes: data.routes || {},
-      wrappedPolygons: data.wrapped_polygons || [],
-      allocations: data.allocations || {},
+      sequences: JSON.parse(JSON.stringify(data.sequences || {})),
+      routes: JSON.parse(JSON.stringify(data.routes || {})),
+      wrappedPolygons: JSON.parse(JSON.stringify(data.wrapped_polygons || [])),
+      allocations: JSON.parse(JSON.stringify(data.allocations || {})),
       allocationStrategy: data.allocation_strategy || null,
-      distanceMatrix: data.distance_matrix || null,
+      distanceMatrix: data.distance_matrix ? JSON.parse(JSON.stringify(data.distance_matrix)) : null,
       isCheckpointReplan: isCheckpointReplan,
       checkpointSegments: isCheckpointReplan ? JSON.parse(JSON.stringify(state.checkpoint.segments)) : null,
     };
@@ -2835,12 +2868,13 @@ async function runPlanner() {
 function applyDraftSolutionToUI(draft) {
   if (!draft) return;
 
-  state.sequences = draft.sequences || {};
-  state.routes = draft.routes || {};
-  state.wrappedPolygons = draft.wrappedPolygons || [];
-  state.allocations = draft.allocations || {};
+  // Deep copy to allow UI modifications without affecting the stored draft
+  state.sequences = JSON.parse(JSON.stringify(draft.sequences || {}));
+  state.routes = JSON.parse(JSON.stringify(draft.routes || {}));
+  state.wrappedPolygons = JSON.parse(JSON.stringify(draft.wrappedPolygons || []));
+  state.allocations = JSON.parse(JSON.stringify(draft.allocations || {}));
   state.allocationStrategy = draft.allocationStrategy || null;
-  state.distanceMatrix = draft.distanceMatrix || null;
+  state.distanceMatrix = draft.distanceMatrix ? JSON.parse(JSON.stringify(draft.distanceMatrix)) : null;
 
   // After checkpoint replan, update animation drones to show at their new starting positions
   if (draft.isCheckpointReplan && state.animation.drones) {
@@ -3033,8 +3067,8 @@ function attachTrajectoryControls() {
 function freezeAtCheckpoint() {
   // Freeze drones at their CURRENT position (distanceTraveled), not at a percentage
 
-  if (!state.animation || !state.animation.drones || !state.animation.active) {
-    appendDebugLine("No active animation to freeze");
+  if (!state.animation || !state.animation.drones || Object.keys(state.animation.drones).length === 0) {
+    appendDebugLine("No animation data to freeze (drones: " + JSON.stringify(state.animation?.drones) + ")");
     return;
   }
 
@@ -3181,61 +3215,88 @@ function startAnimation(droneIds) {
   state.animation.active = true;
   state.animation.drones = {};
 
+  // Debug: Log visited targets at animation start
+  appendDebugLine(`🎬 Animation starting. Visited targets: [${state.visitedTargets.join(", ")}]`);
+  appendDebugLine(`🎬 checkpointReplanPrefixDistances: ${JSON.stringify(state.checkpointReplanPrefixDistances)}`);
+
   droneIds.forEach((did) => {
     const routeInfo = state.routes[did];
-    if (routeInfo && routeInfo.route && routeInfo.route.length >= 2) {
-      // Pre-calculate cumulative distances for uniform speed animation
-      const trajectory = routeInfo.trajectory || [];
-      let cumulativeDistances = [0];
-      let totalDistance = 0;
 
-      if (trajectory.length >= 2) {
-        for (let i = 1; i < trajectory.length; i++) {
-          const dx = trajectory[i][0] - trajectory[i - 1][0];
-          const dy = trajectory[i][1] - trajectory[i - 1][1];
-          totalDistance += Math.sqrt(dx * dx + dy * dy);
-          cumulativeDistances.push(totalDistance);
-        }
-      }
-
-      if (totalDistance <= 0) return;
-
-      // Check if this is a checkpoint replan - start from prefix distance if so
-      let initialDistance = 0;
-      if (state.checkpointReplanPrefixDistances && state.checkpointReplanPrefixDistances[did]) {
-        initialDistance = state.checkpointReplanPrefixDistances[did];
-        appendDebugLine(`🎬 Drone ${did} starting animation from distance ${initialDistance.toFixed(1)} (checkpoint replan)`);
-      }
-
-      state.animation.drones[did] = {
-        progress: totalDistance > 0 ? initialDistance / totalDistance : 0,
-        distanceTraveled: initialDistance,
-        animating: true,
-        cumulativeDistances,
-        totalDistance,
-      };
-
-          // TEMP TEST: verify split utility
-      const traj = (state.routes[did] && state.routes[did].trajectory) ? state.routes[did].trajectory : [];
-      if (traj.length >= 2) {
-        const total = state.animation.drones[did].totalDistance;
-        const checkpointDist = 0.5 * total;
-
-        const res = split_polyline_at_distance(traj, checkpointDist);
-        console.log("SPLIT TEST", did, {
-          total,
-          checkpointDist,
-          splitPoint: res.splitPoint,
-          prefixLen: res.prefixPoints.length,
-          suffixLen: res.suffixPoints.length,
-          splitIndex: res.splitIndex,
-          t: res.t,
-        });
-      }
-
-      // Make sure trajectory is visible for animated drones
-      state.trajectoryVisible[did] = true;
+    // Debug: Log why a drone might be skipped
+    if (!routeInfo) {
+      appendDebugLine(`⚠️ D${did} skipped: no routeInfo`);
+      return;
     }
+
+    // Debug: Log trajectory info at animation start
+    const trajLen = routeInfo.trajectory ? routeInfo.trajectory.length : 0;
+    const routeStr = (routeInfo.route || []).join("-");
+    const firstPt = trajLen > 0 ? `(${routeInfo.trajectory[0][0].toFixed(1)},${routeInfo.trajectory[0][1].toFixed(1)})` : "N/A";
+    const lastPt = trajLen > 0 ? `(${routeInfo.trajectory[trajLen-1][0].toFixed(1)},${routeInfo.trajectory[trajLen-1][1].toFixed(1)})` : "N/A";
+    appendDebugLine(`🎬 D${did}: ${trajLen} pts, route: ${routeStr}, from ${firstPt} to ${lastPt}`);
+    if (!routeInfo.route) {
+      appendDebugLine(`⚠️ D${did} skipped: no route array`);
+      return;
+    }
+    if (routeInfo.route.length < 2) {
+      appendDebugLine(`⚠️ D${did} skipped: route too short (${routeInfo.route.length} waypoints)`);
+      return;
+    }
+
+    // Pre-calculate cumulative distances for uniform speed animation
+    const trajectory = routeInfo.trajectory || [];
+    let cumulativeDistances = [0];
+    let totalDistance = 0;
+
+    if (trajectory.length >= 2) {
+      for (let i = 1; i < trajectory.length; i++) {
+        const dx = trajectory[i][0] - trajectory[i - 1][0];
+        const dy = trajectory[i][1] - trajectory[i - 1][1];
+        totalDistance += Math.sqrt(dx * dx + dy * dy);
+        cumulativeDistances.push(totalDistance);
+      }
+    }
+
+    if (totalDistance <= 0) {
+      appendDebugLine(`⚠️ D${did} skipped: totalDistance is ${totalDistance} (trajectory has ${trajectory.length} points)`);
+      return;
+    }
+
+    // Check if this is a checkpoint replan - start from prefix distance if so
+    let initialDistance = 0;
+    if (state.checkpointReplanPrefixDistances && state.checkpointReplanPrefixDistances[did]) {
+      initialDistance = state.checkpointReplanPrefixDistances[did];
+      appendDebugLine(`🎬 Drone ${did} starting animation from distance ${initialDistance.toFixed(1)} (checkpoint replan)`);
+    }
+
+    state.animation.drones[did] = {
+      progress: totalDistance > 0 ? initialDistance / totalDistance : 0,
+      distanceTraveled: initialDistance,
+      animating: true,
+      cumulativeDistances,
+      totalDistance,
+    };
+
+    // TEMP TEST: verify split utility
+    const traj = (state.routes[did] && state.routes[did].trajectory) ? state.routes[did].trajectory : [];
+    if (traj.length >= 2) {
+      const total = state.animation.drones[did].totalDistance;
+      const checkpointDist = 0.5 * total;
+
+      const res = split_polyline_at_distance(traj, checkpointDist);
+      console.log("SPLIT TEST", did, {
+        total,
+        checkpointDist,
+        splitPoint: res.splitPoint,
+        prefixLen: res.prefixPoints.length,
+        suffixLen: res.suffixPoints.length,
+        splitIndex: res.splitIndex,
+        t: res.t,
+      });
+    }
+
+    // Make sure trajectory is visible for animated drones
+    state.trajectoryVisible[did] = true;
   });
 
   // Clear checkpoint replan prefix distances after using them
@@ -3258,6 +3319,11 @@ function startAnimation(droneIds) {
   let lastTime = null;
 
   function animate(currentTime) {
+    // Check if animation was stopped/paused externally
+    if (!state.animation.active) {
+      return;
+    }
+
     if (lastTime === null) lastTime = currentTime;
 
     const deltaTime = Math.min(currentTime - lastTime, 100);
@@ -3284,12 +3350,86 @@ function startAnimation(droneIds) {
       droneState.progress = (droneState.totalDistance > 0)
         ? (droneState.distanceTraveled / droneState.totalDistance)
         : 1;
+
+      // 4) Check if drone has passed any target waypoints and mark them as visited
+      const routeInfo = state.routes[did];
+      if (routeInfo && routeInfo.route && routeInfo.trajectory) {
+        const trajectory = routeInfo.trajectory;
+        const route = routeInfo.route;
+        const cumulativeDistances = droneState.cumulativeDistances || [];
+        const currentDistance = droneState.distanceTraveled;
+
+        // Debug: Log once per drone at start of animation
+        if (droneState.distanceTraveled < 1 && !droneState._debugLogged) {
+          droneState._debugLogged = true;
+          const targets = route.filter(wp => String(wp).startsWith("T"));
+          const envTargetIds = (state.env.targets || []).map(t => t.id).join(", ");
+          console.log(`🔍 D${did} route targets: ${targets.join(", ")}, trajectory points: ${trajectory.length}`);
+          console.log(`🔍 D${did} env targets: [${envTargetIds}]`);
+          appendDebugLine(`🔍 D${did} route targets: [${targets.join(", ")}]`);
+        }
+
+        // For each target in the route, check if we've passed its position
+        route.forEach((wp, wpIdx) => {
+          if (!String(wp).startsWith("T")) return;  // Only targets
+          if (state.visitedTargets.includes(wp)) return;  // Already visited
+
+          // Find the target's position in the environment
+          const target = state.env.targets?.find(t => t.id === wp);
+          if (!target) {
+            // Debug: target not found in env
+            if (!droneState[`_debugNoTarget_${wp}`]) {
+              droneState[`_debugNoTarget_${wp}`] = true;
+              console.log(`⚠️ D${did} target ${wp} not found in state.env.targets`);
+            }
+            return;
+          }
+
+          // Check if we've passed close to this target's position
+          // Find the trajectory point closest to the target
+          let minDist = Infinity;
+          let closestIdx = -1;
+          trajectory.forEach((pt, idx) => {
+            const dist = Math.sqrt(Math.pow(pt[0] - target.x, 2) + Math.pow(pt[1] - target.y, 2));
+            if (dist < minDist) {
+              minDist = dist;
+              closestIdx = idx;
+            }
+          });
+
+          // Debug: Log closest distance once per target
+          if (!droneState[`_debugDist_${wp}`]) {
+            droneState[`_debugDist_${wp}`] = true;
+            console.log(`📏 D${did} target ${wp} at (${target.x.toFixed(1)}, ${target.y.toFixed(1)}), closest traj point idx=${closestIdx}, minDist=${minDist.toFixed(2)}`);
+          }
+
+          // If we found a close point and we've traveled past it, mark target as visited
+          // Increased threshold from 1.0 to 20.0 to account for trajectory smoothing
+          if (closestIdx >= 0 && minDist < 20.0 && cumulativeDistances[closestIdx] !== undefined) {
+            const targetDistance = cumulativeDistances[closestIdx];
+            if (currentDistance >= targetDistance) {
+              state.visitedTargets.push(wp);
+              console.log(`🎯 D${did} passed target ${wp} at distance ${targetDistance.toFixed(1)} (minDist=${minDist.toFixed(2)})`);
+              appendDebugLine(`🎯 D${did} visited ${wp}`);
+            }
+          } else if (!droneState[`_debugSkip_${wp}`] && closestIdx >= 0) {
+            // Debug: Log why target was skipped (only once)
+            droneState[`_debugSkip_${wp}`] = true;
+            if (minDist >= 20.0) {
+              console.log(`⚠️ D${did} target ${wp} skipped: minDist=${minDist.toFixed(2)} >= 20.0`);
+            }
+          }
+        });
+      }
     });
 
     drawEnvironment();
 
-    if (anyAnimating) {
+    if (anyAnimating && state.animation.active) {
       state.animation.animationId = requestAnimationFrame(animate);
+    } else if (!state.animation.active) {
+      // Stopped externally (pause/cut) - don't change mode
+      return;
     } else {
       state.animation.active = false;
       // Animation completed naturally - go to READY_TO_ANIMATE
@@ -3438,12 +3578,27 @@ function cutAtCheckpoint() {
     return;
   }
 
+  appendDebugLine(`cutAtCheckpoint called. animation.drones keys: ${Object.keys(state.animation.drones || {}).join(", ") || "NONE"}`);
+  appendDebugLine(`animation.active: ${state.animation.active}`);
+
   // Use the existing freezeAtCheckpoint logic
   freezeAtCheckpoint();
+
+  // Verify checkpoint was set up
+  if (!state.checkpoint?.active) {
+    appendDebugLine("⚠️ WARNING: freezeAtCheckpoint did not set checkpoint.active! Check drone data.");
+  } else {
+    appendDebugLine(`✅ Checkpoint set with ${Object.keys(state.checkpoint.segments || {}).length} drone segments`);
+  }
 
   // Transition to CHECKPOINT state
   setMissionMode(MissionMode.CHECKPOINT, "cut at checkpoint");
 
+  // Always redraw to show visited targets with green X
+  drawEnvironment();
+
+  // Debug: Log visited targets
+  appendDebugLine(`📍 Visited targets after cut: [${state.visitedTargets.join(", ")}]`);
   appendDebugLine("Cut at checkpoint. Edit environment and Run Planner to continue.");
 }
 

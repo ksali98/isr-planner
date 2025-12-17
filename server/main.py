@@ -705,8 +705,10 @@ class SolveWithAllocationRequest(BaseModel):
     env: Dict[str, Any]
     drone_configs: Dict[str, Any]
     allocation_strategy: str = "efficient"
-    use_sam_aware_distances: bool = True
+    use_sam_aware_distances: bool = False  # Disabled for speed - SAM avoidance happens at trajectory time
     post_optimize: bool = True
+    visited_targets: List[str] = []  # Targets already visited (for checkpoint replanning)
+    is_checkpoint_replan: bool = False  # Whether this is a checkpoint replan
 
 
 class PrepareMatrixRequest(BaseModel):
@@ -748,8 +750,20 @@ def solve_with_allocation(req: SolveWithAllocationRequest):
 
     This is the recommended endpoint for multi-drone missions.
     """
+    # Filter out visited targets (for checkpoint replanning or any solve with visited targets)
+    env_to_solve = req.env
+    if req.visited_targets:
+        visited_set = set(req.visited_targets)
+        env_to_solve = dict(req.env)  # shallow copy
+        original_targets = env_to_solve.get("targets", [])
+        env_to_solve["targets"] = [t for t in original_targets if t.get("id") not in visited_set]
+        label = "CHECKPOINT REPLAN" if req.is_checkpoint_replan else "SOLVE WITH VISITED"
+        print(f"🔄 {label}: Filtered {len(visited_set)} visited targets, {len(env_to_solve['targets'])} remaining", flush=True)
+        print(f"   Visited: {req.visited_targets}", flush=True)
+        print(f"   Synthetic starts: {list(env_to_solve.get('synthetic_starts', {}).keys())}", flush=True)
+
     result = solve_mission_with_allocation(
-        env=req.env,
+        env=env_to_solve,
         drone_configs=req.drone_configs,
         allocation_strategy=req.allocation_strategy,
         use_sam_aware_distances=req.use_sam_aware_distances,
