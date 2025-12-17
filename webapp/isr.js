@@ -3387,6 +3387,15 @@ function freezeAtCheckpoint() {
     const route = state.routes[did]?.route || [];
     const env = state.env;
 
+    // Build cumulative distances for the FULL trajectory to find target positions
+    const fullTraj = traj;
+    const cumDist = [0];
+    for (let i = 1; i < fullTraj.length; i++) {
+      const dx = fullTraj[i][0] - fullTraj[i - 1][0];
+      const dy = fullTraj[i][1] - fullTraj[i - 1][1];
+      cumDist.push(cumDist[i - 1] + Math.sqrt(dx * dx + dy * dy));
+    }
+
     route.forEach(wp => {
       if (!String(wp).startsWith("T")) return;
       if (state.visitedTargets.includes(wp)) return;
@@ -3395,23 +3404,32 @@ function freezeAtCheckpoint() {
       const target = env.targets?.find(t => t.id === wp);
       if (!target) return;
 
-      // Check if this target position appears in the prefix trajectory
-      // A target is visited if we've passed through or near its position
-      const targetPos = [target.x, target.y];
-      const isPassed = prefixPoints.some(pt => {
+      // Find the trajectory point closest to this target (same logic as animation loop)
+      let minDist = Infinity;
+      let closestIdx = -1;
+      fullTraj.forEach((pt, idx) => {
         const dist = Math.sqrt(
-          Math.pow(pt[0] - targetPos[0], 2) +
-          Math.pow(pt[1] - targetPos[1], 2)
+          Math.pow(pt[0] - target.x, 2) +
+          Math.pow(pt[1] - target.y, 2)
         );
-        return dist < 0.5; // Within 0.5 units means we visited it
+        if (dist < minDist) {
+          minDist = dist;
+          closestIdx = idx;
+        }
       });
+
+      // Target is visited if:
+      // 1. The closest trajectory point is within 20 units (same threshold as animation)
+      // 2. We've traveled past that point (currentDist >= cumDist[closestIdx])
+      const targetDist = closestIdx >= 0 ? cumDist[closestIdx] : Infinity;
+      const isPassed = closestIdx >= 0 && minDist < 20.0 && currentDist >= targetDist;
 
       if (isPassed) {
         targetsVisitedThisSegment.push(wp);
         state.visitedTargets.push(wp);
-        console.log(`✓ D${did}: Marked ${wp} as visited (found in prefix trajectory)`);
+        console.log(`✓ D${did}: Marked ${wp} as visited (dist to traj: ${minDist.toFixed(1)}, targetDist: ${targetDist.toFixed(1)}, currentDist: ${currentDist.toFixed(1)})`);
       } else {
-        console.log(`○ D${did}: ${wp} NOT visited (ahead of frozen position)`);
+        console.log(`○ D${did}: ${wp} NOT visited (minDist=${minDist.toFixed(1)}, targetDist=${targetDist.toFixed(1)}, currentDist=${currentDist.toFixed(1)})`);
       }
     });
 
@@ -3686,10 +3704,26 @@ function startAnimation(droneIds) {
         if (droneState.distanceTraveled < 1 && !droneState._debugLogged) {
           droneState._debugLogged = true;
           const targets = route.filter(wp => String(wp).startsWith("T"));
-          const envTargetIds = (state.env.targets || []).map(t => t.id).join(", ");
+          const envTargetIds = (state.env.targets || []).map(t => t.id);
           console.log(`🔍 D${did} route targets: ${targets.join(", ")}, trajectory points: ${trajectory.length}`);
-          console.log(`🔍 D${did} env targets: [${envTargetIds}]`);
+          console.log(`🔍 D${did} env targets: [${envTargetIds.join(", ")}]`);
           appendDebugLine(`🔍 D${did} route targets: [${targets.join(", ")}]`);
+
+          // Check which route targets are NOT in env (with detailed type info)
+          const missingInEnv = targets.filter(t => !envTargetIds.includes(t));
+          if (missingInEnv.length > 0) {
+            console.log(`⚠️ D${did} MISSING in env: [${missingInEnv.join(", ")}]`);
+            appendDebugLine(`⚠️ D${did} MISSING in env: [${missingInEnv.join(", ")}]`);
+            // Log type info for debugging
+            console.log(`⚠️ D${did} route target types: ${targets.map(t => typeof t).join(", ")}`);
+            console.log(`⚠️ D${did} env target ID types: ${envTargetIds.slice(0,5).map(t => typeof t).join(", ")}`);
+          }
+
+          // Also log if any targets are already visited
+          const alreadyVisited = targets.filter(t => state.visitedTargets.includes(t));
+          if (alreadyVisited.length > 0) {
+            console.log(`✓ D${did} already visited: [${alreadyVisited.join(", ")}]`);
+          }
         }
 
         // For each target in the route, check if we've passed its position
@@ -3740,6 +3774,8 @@ function startAnimation(droneIds) {
             droneState[`_debugSkip_${wp}`] = true;
             if (minDist >= 20.0) {
               console.log(`⚠️ D${did} target ${wp} skipped: minDist=${minDist.toFixed(2)} >= 20.0`);
+            } else if (cumulativeDistances[closestIdx] === undefined) {
+              console.log(`⚠️ D${did} target ${wp} skipped: cumulativeDistances[${closestIdx}] undefined (len=${cumulativeDistances.length})`);
             }
           }
         });
@@ -3790,7 +3826,17 @@ function startAnimation(droneIds) {
             droneState.cumulativeDistances = cumulativeDistances;
             droneState.totalDistance = totalDistance;
             // Keep distanceTraveled as-is (we're continuing from C point)
-            appendDebugLine(`🔄 D${did}: totalDistance now ${totalDistance.toFixed(1)}`);
+
+            // IMPORTANT: Re-enable animation for drones that have more to fly
+            // This handles drones that completed their segment 1 flight but have new targets in segment 2
+            if (droneState.distanceTraveled < totalDistance) {
+              if (!droneState.animating) {
+                appendDebugLine(`🔄 D${did}: Re-enabling animation (was finished, now has more trajectory)`);
+              }
+              droneState.animating = true;
+            }
+
+            appendDebugLine(`🔄 D${did}: totalDistance now ${totalDistance.toFixed(1)}, distanceTraveled=${droneState.distanceTraveled.toFixed(1)}, animating=${droneState.animating}`);
           }
         }
       });
