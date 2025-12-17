@@ -1194,8 +1194,10 @@ function drawEnvironment() {
     Object.entries(state.routes || {}).forEach(([did, info]) => {
       const trajLen = info.trajectory ? info.trajectory.length : 0;
       const hasFullTraj = info._fullTrajectory ? info._fullTrajectory.length : 0;
-      if (trajLen > 0 || hasFullTraj > 0) {
-        console.log(`[drawEnv] D${did}: trajectory=${trajLen}pts, _fullTrajectory=${hasFullTraj}pts`);
+      if (trajLen > 0) {
+        const firstPt = `(${info.trajectory[0][0].toFixed(1)},${info.trajectory[0][1].toFixed(1)})`;
+        const lastPt = `(${info.trajectory[trajLen-1][0].toFixed(1)},${info.trajectory[trajLen-1][1].toFixed(1)})`;
+        console.log(`[drawEnv] D${did}: trajectory=${trajLen}pts ${firstPt}→${lastPt}, _fullTrajectory=${hasFullTraj}pts`);
       }
     });
   }
@@ -2884,6 +2886,17 @@ async function runPlanner() {
 function applyDraftSolutionToUI(draft) {
   if (!draft) return;
 
+  // Debug: Log what's in the draft routes before applying
+  console.log("📥 applyDraftSolutionToUI called, isCheckpointReplan:", draft.isCheckpointReplan);
+  Object.entries(draft.routes || {}).forEach(([did, info]) => {
+    const trajLen = info.trajectory ? info.trajectory.length : 0;
+    if (trajLen > 0) {
+      const firstPt = `(${info.trajectory[0][0].toFixed(1)},${info.trajectory[0][1].toFixed(1)})`;
+      const lastPt = `(${info.trajectory[trajLen-1][0].toFixed(1)},${info.trajectory[trajLen-1][1].toFixed(1)})`;
+      console.log(`📥 draft.routes[${did}]: ${trajLen}pts ${firstPt}→${lastPt}`);
+    }
+  });
+
   // Deep copy to allow UI modifications without affecting the stored draft
   state.sequences = JSON.parse(JSON.stringify(draft.sequences || {}));
   state.routes = JSON.parse(JSON.stringify(draft.routes || {}));
@@ -2891,6 +2904,17 @@ function applyDraftSolutionToUI(draft) {
   state.allocations = JSON.parse(JSON.stringify(draft.allocations || {}));
   state.allocationStrategy = draft.allocationStrategy || null;
   state.distanceMatrix = draft.distanceMatrix ? JSON.parse(JSON.stringify(draft.distanceMatrix)) : null;
+
+  // Debug: Log what state.routes looks like after copy
+  console.log("📥 state.routes after copy:");
+  Object.entries(state.routes || {}).forEach(([did, info]) => {
+    const trajLen = info.trajectory ? info.trajectory.length : 0;
+    if (trajLen > 0) {
+      const firstPt = `(${info.trajectory[0][0].toFixed(1)},${info.trajectory[0][1].toFixed(1)})`;
+      const lastPt = `(${info.trajectory[trajLen-1][0].toFixed(1)},${info.trajectory[trajLen-1][1].toFixed(1)})`;
+      console.log(`📥 state.routes[${did}]: ${trajLen}pts ${firstPt}→${lastPt}`);
+    }
+  });
 
   // After checkpoint replan, update animation drones to show at their new starting positions
   if (draft.isCheckpointReplan && state.animation.drones) {
@@ -3220,10 +3244,23 @@ function startAnimation(droneIds) {
   }
 
   // Restore full trajectories if they were truncated by a previous freeze
+  // BUT NOT if this is a checkpoint replan (we want to keep the spliced trajectory)
   Object.keys(state.routes || {}).forEach((did) => {
     if (state.routes[did]._fullTrajectory) {
+      console.log(`⚠️ startAnimation D${did}: _fullTrajectory exists (${state.routes[did]._fullTrajectory.length} pts), restoring...`);
       state.routes[did].trajectory = state.routes[did]._fullTrajectory;
       delete state.routes[did]._fullTrajectory;
+    }
+  });
+
+  // Debug: Log trajectories at animation start
+  console.log("🎬 startAnimation: trajectories before animation:");
+  Object.entries(state.routes || {}).forEach(([did, info]) => {
+    const trajLen = info.trajectory ? info.trajectory.length : 0;
+    if (trajLen > 0) {
+      const firstPt = `(${info.trajectory[0][0].toFixed(1)},${info.trajectory[0][1].toFixed(1)})`;
+      const lastPt = `(${info.trajectory[trajLen-1][0].toFixed(1)},${info.trajectory[trajLen-1][1].toFixed(1)})`;
+      console.log(`🎬 state.routes[${did}]: ${trajLen}pts ${firstPt}→${lastPt}`);
     }
   });
 
@@ -3231,9 +3268,17 @@ function startAnimation(droneIds) {
   state.animation.active = true;
   state.animation.drones = {};
 
+  // Enable debug stop at splice point if this is a checkpoint replan
+  const isCheckpointReplan = state.checkpointReplanPrefixDistances &&
+    Object.keys(state.checkpointReplanPrefixDistances).length > 0;
+  state.debugStopAtSplice = isCheckpointReplan;  // Set true to stop at splice point
+
   // Debug: Log visited targets at animation start
   appendDebugLine(`🎬 Animation starting. Visited targets: [${state.visitedTargets.join(", ")}]`);
   appendDebugLine(`🎬 checkpointReplanPrefixDistances: ${JSON.stringify(state.checkpointReplanPrefixDistances)}`);
+  if (isCheckpointReplan) {
+    appendDebugLine(`🛑 DEBUG: Will stop at splice point (prefix distance)`);
+  }
 
   droneIds.forEach((did) => {
     const routeInfo = state.routes[did];
@@ -3360,6 +3405,19 @@ function startAnimation(droneIds) {
         droneState.animating = false;
       } else {
         anyAnimating = true;
+      }
+
+      // DEBUG: For checkpoint replan, stop at the splice point (prefix distance)
+      // This allows verification that the splice is correct
+      if (state.debugStopAtSplice && state.checkpointReplanPrefixDistances) {
+        const prefixDist = state.checkpointReplanPrefixDistances[did];
+        if (prefixDist !== undefined && droneState.distanceTraveled >= prefixDist && !droneState._passedSplicePoint) {
+          droneState._passedSplicePoint = true;
+          droneState.distanceTraveled = prefixDist;
+          droneState.animating = false;
+          console.log(`🛑 D${did} stopped at splice point (prefixDist=${prefixDist.toFixed(1)})`);
+          appendDebugLine(`🛑 D${did} stopped at splice point`);
+        }
       }
 
       // 3) derive progress (for existing drawing/UI code)
