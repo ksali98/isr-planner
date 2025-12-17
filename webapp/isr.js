@@ -1189,6 +1189,17 @@ function drawEnvironment() {
     "5": "#a855f7",
   };
 
+  // Debug: Log trajectory info once per draw cycle (throttled)
+  if (_drawEnvFrameCount % 120 === 1) {
+    Object.entries(state.routes || {}).forEach(([did, info]) => {
+      const trajLen = info.trajectory ? info.trajectory.length : 0;
+      const hasFullTraj = info._fullTrajectory ? info._fullTrajectory.length : 0;
+      if (trajLen > 0 || hasFullTraj > 0) {
+        console.log(`[drawEnv] D${did}: trajectory=${trajLen}pts, _fullTrajectory=${hasFullTraj}pts`);
+      }
+    });
+  }
+
   Object.entries(state.routes || {}).forEach(([did, info]) => {
     // Check if this trajectory should be visible
     if (!state.trajectoryVisible[did]) return;
