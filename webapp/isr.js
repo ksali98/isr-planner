@@ -79,7 +79,480 @@ const state = {
   missionHistory: [],          // Array of segment snapshots
   initialEnvSnapshot: null,    // Immutable copy of original env for reset
   visitedTargets: [],          // Target IDs completed across all segments
+
+  // Checkpoint replan prefix distances (used for animation start position after replan)
+  checkpointReplanPrefixDistances: null,
 };
+
+// ----------------------------------------------------
+// Mission Mode State Machine
+// ----------------------------------------------------
+/**
+ * MissionMode - Single source of truth for UI state
+ *
+ * IDLE:                 No committed plan exists yet. Can edit env or solve.
+ * EDITING_ENV:          User is editing draftEnv. Must Accept Edits to proceed.
+ * DRAFT_READY:          A draft solution exists. Must Accept Solution or Discard.
+ * READY_TO_ANIMATE:     Committed plan exists. Can start/resume animation.
+ * ANIMATING:            Drones are moving. Can Pause or Cut (C).
+ * PAUSED_MID_ANIMATION: Paused but resumable (no truncation). Can resume or edit.
+ * CHECKPOINT:           Cut occurred. Past locked, future removed. Must replan.
+ */
+const MissionMode = {
+  IDLE: "IDLE",
+  EDITING_ENV: "EDITING_ENV",
+  DRAFT_READY: "DRAFT_READY",
+  READY_TO_ANIMATE: "READY_TO_ANIMATE",
+  ANIMATING: "ANIMATING",
+  PAUSED_MID_ANIMATION: "PAUSED_MID_ANIMATION",
+  CHECKPOINT: "CHECKPOINT",
+};
+
+// Mission state machine state
+const missionState = {
+  mode: MissionMode.IDLE,
+
+  // Environment state (two-phase commit)
+  draftEnv: null,              // Editable environment shown in editor
+  acceptedEnv: null,           // Committed environment used for solving
+
+  // Solution state (two-phase commit)
+  draftSolution: null,         // Last solver output (not yet accepted)
+  committedSegments: [],       // Array of accepted solutions (mission history)
+  currentSegmentIndex: -1,     // Index of current segment being animated (-1 = none)
+
+  // Runtime state for animation resume
+  pauseContext: null,          // { droneStates: {...} } - saved state for resume
+};
+
+/**
+ * Get UI permissions based on current mission mode
+ * Returns which actions are allowed in the current state
+ */
+function getUiPermissions() {
+  const mode = missionState.mode;
+  const hasCommittedPlan = missionState.committedSegments.length > 0;
+  const hasDraftSolution = missionState.draftSolution !== null;
+
+  return {
+    // Animation controls
+    canAnimate: mode === MissionMode.READY_TO_ANIMATE,
+    canResume: mode === MissionMode.PAUSED_MID_ANIMATION,
+    canPause: mode === MissionMode.ANIMATING,
+    canCut: mode === MissionMode.ANIMATING,
+
+    // Editing controls
+    canEnterEdit: mode === MissionMode.IDLE ||
+                  mode === MissionMode.CHECKPOINT ||
+                  mode === MissionMode.PAUSED_MID_ANIMATION,
+    canAcceptEdits: mode === MissionMode.EDITING_ENV,
+
+    // Planning controls
+    canSolve: mode === MissionMode.IDLE || mode === MissionMode.CHECKPOINT,
+    canOptimize: mode === MissionMode.DRAFT_READY,
+    canAcceptSolution: mode === MissionMode.DRAFT_READY,
+    canDiscardDraft: mode === MissionMode.DRAFT_READY,
+
+    // Reset
+    canReset: mode !== MissionMode.ANIMATING &&
+              mode !== MissionMode.EDITING_ENV &&
+              hasCommittedPlan,
+
+    // Derived states for UI
+    isAnimating: mode === MissionMode.ANIMATING,
+    isEditing: mode === MissionMode.EDITING_ENV,
+    hasDraftSolution: hasDraftSolution,
+    hasCommittedPlan: hasCommittedPlan,
+  };
+}
+
+/**
+ * Set mission mode and update UI accordingly
+ */
+function setMissionMode(newMode, reason = "") {
+  const oldMode = missionState.mode;
+  if (oldMode === newMode) return;
+
+  missionState.mode = newMode;
+  console.log(`[MissionMode] ${oldMode} → ${newMode}${reason ? ` (${reason})` : ""}`);
+  appendDebugLine(`Mode: ${newMode}${reason ? ` - ${reason}` : ""}`);
+
+  // Update UI elements based on new mode
+  updateStatusBanner();
+  updateButtonStates();
+}
+
+/**
+ * Get status banner text for current mode
+ */
+function getStatusBannerText() {
+  const mode = missionState.mode;
+
+  switch (mode) {
+    case MissionMode.IDLE:
+      return "Ready. Load environment, edit, or Run Planner.";
+    case MissionMode.EDITING_ENV:
+      return "Editing environment. Click Accept Edits when done.";
+    case MissionMode.DRAFT_READY:
+      return "Draft solution ready. Optimize or Accept Solution to proceed.";
+    case MissionMode.READY_TO_ANIMATE:
+      return "Solution accepted. Click Animate to start mission.";
+    case MissionMode.ANIMATING:
+      return "Animating. Press Pause to stop, or C to cut/checkpoint.";
+    case MissionMode.PAUSED_MID_ANIMATION:
+      return "Paused. Click Animate to resume, or Edit to modify environment.";
+    case MissionMode.CHECKPOINT:
+      return "Checkpoint. Edit environment and Run Planner to replan remainder.";
+    default:
+      return `Mode: ${mode}`;
+  }
+}
+
+/**
+ * Update the status banner display
+ */
+function updateStatusBanner() {
+  const banner = $("status-banner");
+  const bannerText = $("status-banner-text");
+  if (!banner) return;
+
+  const text = getStatusBannerText();
+  const mode = missionState.mode;
+  const perms = getUiPermissions();
+
+  // Update text
+  if (bannerText) {
+    bannerText.textContent = text;
+  }
+
+  // Set banner color based on mode
+  banner.className = "status-banner";
+  switch (mode) {
+    case MissionMode.ANIMATING:
+      banner.classList.add("status-animating");
+      break;
+    case MissionMode.EDITING_ENV:
+      banner.classList.add("status-editing");
+      break;
+    case MissionMode.DRAFT_READY:
+      banner.classList.add("status-draft-ready");
+      break;
+    case MissionMode.READY_TO_ANIMATE:
+      banner.classList.add("status-ready-to-animate");
+      break;
+    case MissionMode.CHECKPOINT:
+      banner.classList.add("status-checkpoint");
+      break;
+    case MissionMode.PAUSED_MID_ANIMATION:
+      banner.classList.add("status-paused");
+      break;
+    default:
+      banner.classList.add("status-idle");
+  }
+
+  // Show/hide action buttons based on permissions
+  const acceptEditsBtn = $("btn-accept-edits");
+  const acceptSolutionBtn = $("btn-accept-solution");
+  const discardBtn = $("btn-discard-draft");
+
+  if (acceptEditsBtn) {
+    acceptEditsBtn.style.display = perms.canAcceptEdits ? "inline-block" : "none";
+  }
+  if (acceptSolutionBtn) {
+    acceptSolutionBtn.style.display = perms.canAcceptSolution ? "inline-block" : "none";
+  }
+  if (discardBtn) {
+    discardBtn.style.display = perms.canDiscardDraft ? "inline-block" : "none";
+  }
+}
+
+/**
+ * Update button enabled/disabled states based on current mode
+ */
+function updateButtonStates() {
+  const perms = getUiPermissions();
+
+  // Animation buttons
+  const animateBtn = $("anim-all");
+  if (animateBtn) {
+    animateBtn.disabled = !(perms.canAnimate || perms.canResume);
+    animateBtn.textContent = perms.canResume ? "Resume" : "Animate";
+  }
+
+  // Pause button (if exists)
+  const pauseBtn = $("btn-pause");
+  if (pauseBtn) {
+    pauseBtn.disabled = !perms.canPause;
+  }
+
+  // Edit button
+  const editBtn = $("btn-edit-mode");
+  if (editBtn) {
+    editBtn.disabled = !perms.canEnterEdit && !perms.isEditing;
+  }
+
+  // Accept Edits button
+  const acceptEditsBtn = $("btn-accept-edits");
+  if (acceptEditsBtn) {
+    acceptEditsBtn.disabled = !perms.canAcceptEdits;
+    acceptEditsBtn.style.display = perms.isEditing ? "inline-block" : "none";
+  }
+
+  // Run Planner / Solve button
+  const solveBtn = $("btn-run-planner");
+  if (solveBtn) {
+    solveBtn.disabled = !perms.canSolve;
+  }
+
+  // Accept Solution button
+  const acceptSolutionBtn = $("btn-accept-solution");
+  if (acceptSolutionBtn) {
+    acceptSolutionBtn.disabled = !perms.canAcceptSolution;
+    acceptSolutionBtn.style.display = perms.hasDraftSolution ? "inline-block" : "none";
+  }
+
+  // Discard Draft button
+  const discardBtn = $("btn-discard-draft");
+  if (discardBtn) {
+    discardBtn.disabled = !perms.canDiscardDraft;
+    discardBtn.style.display = perms.hasDraftSolution ? "inline-block" : "none";
+  }
+}
+
+// ----------------------------------------------------
+// Mission Mode Action Handlers
+// ----------------------------------------------------
+
+/**
+ * Enter editing mode - start tracking changes to environment
+ */
+function enterEditMode() {
+  const perms = getUiPermissions();
+  if (!perms.canEnterEdit) {
+    appendDebugLine("Cannot enter edit mode in current state");
+    return;
+  }
+
+  // Save a copy of current env as draft
+  if (state.env) {
+    missionState.draftEnv = JSON.parse(JSON.stringify(state.env));
+  }
+
+  setMissionMode(MissionMode.EDITING_ENV, "entered edit mode");
+  state.editMode = true;
+
+  const btn = $("btn-toggle-edit");
+  if (btn) {
+    btn.textContent = "Editing...";
+    btn.classList.remove("off");
+  }
+}
+
+/**
+ * Accept edits - commit the draft environment
+ */
+function acceptEdits() {
+  const perms = getUiPermissions();
+  if (!perms.canAcceptEdits) {
+    appendDebugLine("Cannot accept edits in current state");
+    return;
+  }
+
+  // Commit the draft environment
+  missionState.acceptedEnv = JSON.parse(JSON.stringify(state.env));
+  missionState.draftEnv = null;
+
+  // Determine next state
+  const hasCommittedPlan = missionState.committedSegments.length > 0;
+
+  if (hasCommittedPlan) {
+    // If we have a committed plan, we're in checkpoint mode - need to replan
+    setMissionMode(MissionMode.CHECKPOINT, "edits accepted, ready to replan");
+  } else {
+    // No committed plan yet - go back to IDLE
+    setMissionMode(MissionMode.IDLE, "edits accepted");
+  }
+
+  state.editMode = false;
+  const btn = $("btn-toggle-edit");
+  if (btn) {
+    btn.textContent = "Edit";
+    btn.classList.add("off");
+  }
+
+  appendDebugLine("✅ Edits accepted");
+  drawEnvironment();
+}
+
+/**
+ * Cancel editing - discard draft changes
+ */
+function cancelEdits() {
+  if (missionState.mode !== MissionMode.EDITING_ENV) return;
+
+  // Restore from draft or accepted env
+  if (missionState.draftEnv) {
+    state.env = JSON.parse(JSON.stringify(missionState.draftEnv));
+  } else if (missionState.acceptedEnv) {
+    state.env = JSON.parse(JSON.stringify(missionState.acceptedEnv));
+  }
+  missionState.draftEnv = null;
+
+  // Determine which state to return to
+  const hasCommittedPlan = missionState.committedSegments.length > 0;
+  if (hasCommittedPlan) {
+    setMissionMode(MissionMode.CHECKPOINT, "edits cancelled");
+  } else {
+    setMissionMode(MissionMode.IDLE, "edits cancelled");
+  }
+
+  state.editMode = false;
+  const btn = $("btn-toggle-edit");
+  if (btn) {
+    btn.textContent = "Edit";
+    btn.classList.add("off");
+  }
+
+  appendDebugLine("❌ Edits cancelled, reverted to previous state");
+  drawEnvironment();
+}
+
+/**
+ * Accept solution - commit the draft solution as the next segment
+ */
+function acceptSolution() {
+  const perms = getUiPermissions();
+  if (!perms.canAcceptSolution) {
+    appendDebugLine("Cannot accept solution in current state");
+    return;
+  }
+
+  if (!missionState.draftSolution) {
+    appendDebugLine("No draft solution to accept");
+    return;
+  }
+
+  // Add the draft solution to committed segments
+  const segment = {
+    index: missionState.committedSegments.length,
+    solution: JSON.parse(JSON.stringify(missionState.draftSolution)),
+    env: JSON.parse(JSON.stringify(missionState.acceptedEnv || state.env)),
+    timestamp: new Date().toISOString(),
+  };
+  missionState.committedSegments.push(segment);
+  missionState.currentSegmentIndex = segment.index;
+
+  // Clear the draft
+  missionState.draftSolution = null;
+
+  // Transition to READY_TO_ANIMATE
+  setMissionMode(MissionMode.READY_TO_ANIMATE, "solution accepted");
+
+  appendDebugLine(`✅ Solution accepted as segment ${segment.index + 1}`);
+  drawEnvironment();
+}
+
+/**
+ * Discard draft solution - go back to previous state
+ */
+function discardDraftSolution() {
+  const perms = getUiPermissions();
+  if (!perms.canDiscardDraft) {
+    appendDebugLine("Cannot discard draft in current state");
+    return;
+  }
+
+  // Clear the draft solution
+  missionState.draftSolution = null;
+
+  // Clear visual routes
+  state.routes = {};
+
+  // Determine which state to return to
+  const hasCommittedPlan = missionState.committedSegments.length > 0;
+  if (hasCommittedPlan) {
+    // Restore previous segment's routes for display
+    const lastSegment = missionState.committedSegments[missionState.committedSegments.length - 1];
+    if (lastSegment && lastSegment.solution && lastSegment.solution.drone_routes) {
+      lastSegment.solution.drone_routes.forEach(r => {
+        state.routes[String(r.drone_id)] = {
+          route: r.route,
+          trajectory: r.trajectory,
+          distance: r.distance,
+          fuel_budget: r.fuel_budget,
+          points: r.points || 0,
+        };
+      });
+    }
+    setMissionMode(MissionMode.CHECKPOINT, "draft discarded, back to checkpoint");
+  } else {
+    setMissionMode(MissionMode.IDLE, "draft discarded");
+  }
+
+  appendDebugLine("❌ Draft solution discarded");
+  drawEnvironment();
+}
+
+/**
+ * Reset mission - return to initial state with first solution visible
+ * Goes to READY_TO_ANIMATE so user can replay from the beginning
+ */
+function resetMission() {
+  const perms = getUiPermissions();
+  if (!perms.canReset) {
+    appendDebugLine("Cannot reset in current state");
+    return;
+  }
+
+  // Must have at least one committed segment to reset to
+  if (missionState.committedSegments.length === 0) {
+    appendDebugLine("No committed segments to reset to");
+    return;
+  }
+
+  // Stop any animation first (without triggering state change)
+  if (state.animation.animationId) {
+    cancelAnimationFrame(state.animation.animationId);
+    state.animation.animationId = null;
+  }
+  state.animation.active = false;
+  state.animation.drones = {};
+
+  // Restore initial environment if we have it
+  if (state.initialEnvSnapshot) {
+    state.env = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
+    missionState.acceptedEnv = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
+  }
+
+  // Keep only the first committed segment, discard subsequent replans
+  const firstSegment = missionState.committedSegments[0];
+  missionState.committedSegments = [firstSegment];
+  missionState.currentSegmentIndex = 0;
+
+  // Clear draft state
+  missionState.draftEnv = null;
+  missionState.draftSolution = null;
+  missionState.pauseContext = null;
+
+  // Restore the first segment's solution to the UI
+  if (firstSegment && firstSegment.solution) {
+    applyDraftSolutionToUI(firstSegment.solution);
+  }
+
+  // Clear checkpoint state
+  state.checkpoint = { active: false, pct: 0.5, segments: {} };
+  state.checkpointReplanPrefixDistances = null;
+  state.missionHistory = [];
+  state.visitedTargets = [];
+
+  // Reset to READY_TO_ANIMATE so user can replay from beginning
+  setMissionMode(MissionMode.READY_TO_ANIMATE, "mission reset to start");
+
+  appendDebugLine("🔄 Mission reset - ready to replay from beginning");
+  updateAirportDropdowns();
+  updateAnimationButtonStates();
+  drawEnvironment();
+}
 
 // ----------------------------------------------------
 // Utility helpers
@@ -194,19 +667,16 @@ if (!window.__resetMissionKeyInstalled) {
           return;
         }
 
-        console.log("R key pressed, animation.active =", state.animation?.active);
+        console.log("R key pressed, mode =", missionState.mode);
         appendDebugLine("R key pressed - attempting reset...");
 
-        // Only reset if not actively animating
-        if (!state.animation?.active) {
+        // Use state machine permissions
+        const perms = getUiPermissions();
+        if (perms.canReset) {
           console.log("Calling resetMission()");
-          const didReset = resetMission();
-          console.log("resetMission returned:", didReset);
-          if (didReset) {
-            appendDebugLine("🔄 Mission reset via R key");
-          }
+          resetMission();
         } else {
-          appendDebugLine("Cannot reset while animating");
+          appendDebugLine("Cannot reset in current state: " + missionState.mode);
         }
       }
     },
@@ -879,31 +1349,54 @@ function drawEnvironment() {
 // Edit mode toggle
 // ----------------------------------------------------
 function setEditMode(on) {
-  state.editMode = !!on;
-  const btn = $("btn-toggle-edit");
-  if (!btn) return;
+  const perms = getUiPermissions();
 
-  if (state.editMode) {
-    btn.textContent = "Edit";
-    btn.classList.remove("off");
-    appendDebugLine("✏️ Edit mode ENABLED.");
+  if (on) {
+    // Entering edit mode
+    if (!perms.canEnterEdit) {
+      appendDebugLine("Cannot enter edit mode in current state");
+      return;
+    }
+    enterEditMode();
   } else {
-    btn.textContent = "View";
-    btn.classList.add("off");
-    appendDebugLine("🔒 Edit mode DISABLED.");
-    state.addMode = null;
-    state.selectedObject = null;
-    state.dragging = null;
-    drawEnvironment();
+    // Exiting edit mode - if currently editing, this cancels edits
+    if (missionState.mode === MissionMode.EDITING_ENV) {
+      cancelEdits();
+    } else {
+      // Not in EDITING_ENV, just update the low-level edit flag
+      state.editMode = false;
+      const btn = $("btn-toggle-edit");
+      if (btn) {
+        btn.textContent = "View";
+        btn.classList.add("off");
+      }
+      state.addMode = null;
+      state.selectedObject = null;
+      state.dragging = null;
+      drawEnvironment();
+    }
   }
 }
 
 function attachEditToggle() {
   const btn = $("btn-toggle-edit");
   if (!btn) return;
-  setEditMode(true);
+
+  // Start with edit mode OFF for the state machine
+  state.editMode = false;
+
   btn.addEventListener("click", () => {
-    setEditMode(!state.editMode);
+    const perms = getUiPermissions();
+
+    if (missionState.mode === MissionMode.EDITING_ENV) {
+      // Currently editing - toggle OFF means cancel
+      cancelEdits();
+    } else if (perms.canEnterEdit) {
+      // Can enter edit mode
+      enterEditMode();
+    } else {
+      appendDebugLine("Cannot toggle edit mode in current state");
+    }
   });
 }
 
@@ -2151,56 +2644,18 @@ function getJoinedTrajectories() {
   return joined;
 }
 
-/**
- * Reset mission to initial state for full replay
- */
-function resetMission() {
-  if (!state.initialEnvSnapshot) {
-    appendDebugLine("No initial snapshot to reset to. Run Planner first.");
-    return false;
-  }
-
-  // Restore initial environment
-  state.env = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
-
-  // Clear checkpoint state
-  state.checkpoint = {
-    active: false,
-    pct: 0.5,
-    segments: {},
-  };
-
-  // Clear checkpoint replan prefix distances
-  state.checkpointReplanPrefixDistances = null;
-
-  // Clear visited targets
-  state.visitedTargets = [];
-
-  // Clear mission history
-  state.missionHistory = [];
-
-  // Clear routes - user needs to re-solve after reset
-  state.routes = {};
-  state.sequences = {};
-
-  // Stop any animation
-  if (state.animation.animationId) {
-    cancelAnimationFrame(state.animation.animationId);
-    state.animation.animationId = null;
-  }
-  state.animation.active = false;
-  state.animation.drones = {};
-
-  drawEnvironment();
-  updateAnimationButtonStates();
-  appendDebugLine("Mission reset to initial state. Run Planner to start fresh.");
-
-  return true;
-}
+// resetMission() is now defined in the Mission Mode Action Handlers section
 
 async function runPlanner() {
   if (!state.env) {
     alert("No environment loaded yet.");
+    return;
+  }
+
+  // Check if we can solve in current state
+  const perms = getUiPermissions();
+  if (!perms.canSolve) {
+    appendDebugLine("Cannot run planner in current state");
     return;
   }
 
@@ -2226,16 +2681,16 @@ async function runPlanner() {
   const strategy = strategySelect ? strategySelect.value : "efficient";
 
   // Check if this is a checkpoint replan (solve from frozen positions)
+  const isCheckpointMode = missionState.mode === MissionMode.CHECKPOINT;
   const { env: envToSolve, droneConfigs: configsToSolve, isCheckpointReplan } = buildCheckpointEnv();
 
   // If this is the first solve (no history), save the initial snapshot
-  if (state.missionHistory.length === 0 && !isCheckpointReplan) {
+  if (missionState.committedSegments.length === 0 && !isCheckpointMode) {
     saveInitialEnvSnapshot();
-  }
-
-  // If checkpoint replan, save current segment before solving new one
-  if (isCheckpointReplan && Object.keys(state.routes).length > 0) {
-    pushMissionSegment("Pre-replan segment");
+    // Also set the accepted env if not already set
+    if (!missionState.acceptedEnv) {
+      missionState.acceptedEnv = JSON.parse(JSON.stringify(state.env));
+    }
   }
 
   const payload = {
@@ -2324,68 +2779,32 @@ async function runPlanner() {
       console.log("checkpointReplanPrefixDistances:", state.checkpointReplanPrefixDistances);
     }
 
-    state.sequences = data.sequences || {};
-    state.routes = data.routes || {};
-    state.wrappedPolygons = data.wrapped_polygons || [];
-    state.allocations = data.allocations || {};
-    state.allocationStrategy = data.allocation_strategy || null;
-    state.distanceMatrix = data.distance_matrix || null;
+    // Store as draft solution (two-phase commit)
+    missionState.draftSolution = {
+      sequences: data.sequences || {},
+      routes: data.routes || {},
+      wrappedPolygons: data.wrapped_polygons || [],
+      allocations: data.allocations || {},
+      allocationStrategy: data.allocation_strategy || null,
+      distanceMatrix: data.distance_matrix || null,
+      isCheckpointReplan: isCheckpointReplan,
+      checkpointSegments: isCheckpointReplan ? JSON.parse(JSON.stringify(state.checkpoint.segments)) : null,
+    };
 
-    // After checkpoint replan, update animation drones to show at their new starting positions
-    if (isCheckpointReplan && state.animation.drones) {
-      Object.keys(state.animation.drones).forEach((did) => {
-        if (state.routes[did] && state.checkpointReplanPrefixDistances && state.checkpointReplanPrefixDistances[did]) {
-          const routeInfo = state.routes[did];
-          const trajectory = routeInfo.trajectory || [];
+    // Apply the draft solution visually (but not committed yet)
+    applyDraftSolutionToUI(missionState.draftSolution);
 
-          // Recalculate cumulative distances for the new spliced trajectory
-          let cumulativeDistances = [0];
-          let totalDistance = 0;
-          if (trajectory.length >= 2) {
-            for (let i = 1; i < trajectory.length; i++) {
-              const dx = trajectory[i][0] - trajectory[i - 1][0];
-              const dy = trajectory[i][1] - trajectory[i - 1][1];
-              totalDistance += Math.sqrt(dx * dx + dy * dy);
-              cumulativeDistances.push(totalDistance);
-            }
-          }
-
-          const prefixDist = state.checkpointReplanPrefixDistances[did];
-          state.animation.drones[did] = {
-            progress: totalDistance > 0 ? prefixDist / totalDistance : 0,
-            distanceTraveled: prefixDist,
-            animating: false,  // Not animating yet, just showing position
-            cumulativeDistances,
-            totalDistance,
-          };
-        }
-      });
-    }
-
-    // Clear checkpoint state after successful replan
+    // Clear checkpoint state after successful replan (now in draft)
     state.checkpoint = {
       active: false,
       pct: 0.5,
       segments: {},
     };
 
-    // Debug: Log what allocations we received
-    console.log("🎯 data.allocations from server:", data.allocations);
-    console.log("🎯 state.allocations after assignment:", state.allocations);
-    appendDebugLine("🎯 Allocations received: " + JSON.stringify(data.allocations));
+    // Transition to DRAFT_READY
+    setMissionMode(MissionMode.DRAFT_READY, isCheckpointReplan ? "checkpoint replan ready" : "solution ready");
 
-    // Display allocations in Env tab
-    updateAllocationDisplay(state.allocations, state.allocationStrategy);
-
-    const cur = state.currentDroneForSeq;
-    const curSeq = state.sequences[cur] || "";
-    const seqInput = $("sequence-input");
-    if (seqInput) seqInput.value = curSeq;
-
-    updateStatsFromRoutes();
-
-    drawEnvironment();
-    const resultLabel = isCheckpointReplan ? "✅ Checkpoint replan applied." : "✅ Planner solution applied.";
+    const resultLabel = isCheckpointReplan ? "✅ Checkpoint replan ready for review." : "✅ Solution ready for review.";
     appendDebugLine(resultLabel);
   } catch (err) {
     if (err.name === 'AbortError') {
@@ -2405,7 +2824,69 @@ async function runPlanner() {
       btnRun.style.opacity = "1";
       btnRun.style.cursor = "pointer";
     }
+    updateButtonStates();
   }
+}
+
+/**
+ * Apply a draft solution to the UI for visualization
+ * (without committing it to missionState.committedSegments)
+ */
+function applyDraftSolutionToUI(draft) {
+  if (!draft) return;
+
+  state.sequences = draft.sequences || {};
+  state.routes = draft.routes || {};
+  state.wrappedPolygons = draft.wrappedPolygons || [];
+  state.allocations = draft.allocations || {};
+  state.allocationStrategy = draft.allocationStrategy || null;
+  state.distanceMatrix = draft.distanceMatrix || null;
+
+  // After checkpoint replan, update animation drones to show at their new starting positions
+  if (draft.isCheckpointReplan && state.animation.drones) {
+    Object.keys(state.animation.drones).forEach((did) => {
+      if (state.routes[did] && state.checkpointReplanPrefixDistances && state.checkpointReplanPrefixDistances[did]) {
+        const routeInfo = state.routes[did];
+        const trajectory = routeInfo.trajectory || [];
+
+        // Recalculate cumulative distances for the new spliced trajectory
+        let cumulativeDistances = [0];
+        let totalDistance = 0;
+        if (trajectory.length >= 2) {
+          for (let i = 1; i < trajectory.length; i++) {
+            const dx = trajectory[i][0] - trajectory[i - 1][0];
+            const dy = trajectory[i][1] - trajectory[i - 1][1];
+            totalDistance += Math.sqrt(dx * dx + dy * dy);
+            cumulativeDistances.push(totalDistance);
+          }
+        }
+
+        const prefixDist = state.checkpointReplanPrefixDistances[did];
+        state.animation.drones[did] = {
+          progress: totalDistance > 0 ? prefixDist / totalDistance : 0,
+          distanceTraveled: prefixDist,
+          animating: false,  // Not animating yet, just showing position
+          cumulativeDistances,
+          totalDistance,
+        };
+      }
+    });
+  }
+
+  // Debug: Log what allocations we received
+  console.log("🎯 draft.allocations:", draft.allocations);
+  appendDebugLine("🎯 Allocations received: " + JSON.stringify(draft.allocations));
+
+  // Display allocations in Env tab
+  updateAllocationDisplay(state.allocations, state.allocationStrategy);
+
+  const cur = state.currentDroneForSeq;
+  const curSeq = state.sequences[cur] || "";
+  const seqInput = $("sequence-input");
+  if (seqInput) seqInput.value = curSeq;
+
+  updateStatsFromRoutes();
+  drawEnvironment();
 }
 
 // Cancel any running solve request
@@ -2653,6 +3134,20 @@ console.log("freezeAtCheckpoint defined?", typeof freezeAtCheckpoint, "line mark
 // Animation controls
 // ----------------------------------------------------
 function startAnimation(droneIds) {
+  const perms = getUiPermissions();
+
+  // Check if we can animate or resume
+  if (!perms.canAnimate && !perms.canResume) {
+    appendDebugLine("⚠️ Cannot animate in current state. Accept a solution first.");
+    return;
+  }
+
+  // If we're resuming from pause, restore context
+  if (perms.canResume && missionState.pauseContext) {
+    resumeAnimation();
+    return;
+  }
+
   // Stop any existing animation
   stopAnimation();
 
@@ -2797,15 +3292,23 @@ function animate(currentTime) {
     state.animation.frameId = requestAnimationFrame(animate);
   } else {
     state.animation.active = false;
+    // Animation completed naturally - go to READY_TO_ANIMATE
+    setMissionMode(MissionMode.READY_TO_ANIMATE, "animation complete");
     updateAnimationButtonStates();
   }
 }
 
     state.animation.animationId = requestAnimationFrame(animate);
+
+    // Transition to ANIMATING state
+    setMissionMode(MissionMode.ANIMATING, "animation started");
+
     appendDebugLine(`Started animation for: ${droneIds.map((d) => `D${d}`).join(", ")}`);
   }
 
 function stopAnimation() {
+  const wasAnimating = state.animation.active;
+
   if (state.animation.animationId) {
     cancelAnimationFrame(state.animation.animationId);
     state.animation.animationId = null;
@@ -2813,10 +3316,135 @@ function stopAnimation() {
 
   state.animation.active = false;
   state.animation.drones = {};
+  missionState.pauseContext = null;
+
+  // If we were animating, transition back to READY_TO_ANIMATE
+  if (wasAnimating && missionState.mode === MissionMode.ANIMATING) {
+    setMissionMode(MissionMode.READY_TO_ANIMATE, "animation stopped");
+  }
 
   updateAnimationButtonStates();
   drawEnvironment();
   appendDebugLine("Animation stopped.");
+}
+
+/**
+ * Pause animation - save state for resuming
+ */
+function pauseAnimation() {
+  const perms = getUiPermissions();
+  if (!perms.canPause) {
+    appendDebugLine("Cannot pause in current state");
+    return;
+  }
+
+  // Save the current animation state for resume
+  missionState.pauseContext = {
+    droneStates: JSON.parse(JSON.stringify(state.animation.drones)),
+    animatingDrones: Object.keys(state.animation.drones).filter(
+      did => state.animation.drones[did].animating
+    ),
+  };
+
+  // Stop the animation frame loop but keep drone positions
+  if (state.animation.animationId) {
+    cancelAnimationFrame(state.animation.animationId);
+    state.animation.animationId = null;
+  }
+  state.animation.active = false;
+
+  // Transition to PAUSED state
+  setMissionMode(MissionMode.PAUSED_MID_ANIMATION, "animation paused");
+
+  updateAnimationButtonStates();
+  drawEnvironment();
+  appendDebugLine("Animation paused. Click Animate to resume.");
+}
+
+/**
+ * Resume animation from pause state
+ */
+function resumeAnimation() {
+  if (!missionState.pauseContext) {
+    appendDebugLine("No pause context to resume from");
+    return;
+  }
+
+  // Restore animation state
+  state.animation.drones = missionState.pauseContext.droneStates;
+  state.animation.active = true;
+
+  // Clear pause context
+  missionState.pauseContext = null;
+
+  // Restart animation loop
+  const speedUnitsPerSec = 20;
+  let lastTime = null;
+
+  function animate(currentTime) {
+    if (lastTime === null) lastTime = currentTime;
+
+    const deltaTime = Math.min(currentTime - lastTime, 100);
+    lastTime = currentTime;
+
+    const dt = deltaTime / 1000;
+    let anyAnimating = false;
+
+    Object.entries(state.animation.drones).forEach(([did, droneState]) => {
+      if (!droneState.animating) return;
+
+      droneState.distanceTraveled += speedUnitsPerSec * dt;
+
+      if (droneState.distanceTraveled >= droneState.totalDistance) {
+        droneState.distanceTraveled = droneState.totalDistance;
+        droneState.animating = false;
+      } else {
+        anyAnimating = true;
+      }
+
+      droneState.progress = (droneState.totalDistance > 0)
+        ? (droneState.distanceTraveled / droneState.totalDistance)
+        : 1;
+    });
+
+    drawEnvironment();
+
+    if (anyAnimating) {
+      state.animation.frameId = requestAnimationFrame(animate);
+    } else {
+      state.animation.active = false;
+      // Animation completed naturally - go to READY_TO_ANIMATE
+      setMissionMode(MissionMode.READY_TO_ANIMATE, "animation complete");
+      updateAnimationButtonStates();
+    }
+  }
+
+  state.animation.animationId = requestAnimationFrame(animate);
+
+  // Transition to ANIMATING state
+  setMissionMode(MissionMode.ANIMATING, "animation resumed");
+
+  updateAnimationButtonStates();
+  appendDebugLine("Animation resumed.");
+}
+
+/**
+ * Cut/Checkpoint - freeze current position and truncate future
+ */
+function cutAtCheckpoint() {
+  const perms = getUiPermissions();
+  if (!perms.canCut) {
+    appendDebugLine("Cannot cut in current state");
+    return;
+  }
+
+  // Use the existing freezeAtCheckpoint logic
+  freezeAtCheckpoint();
+
+  // Transition to CHECKPOINT state
+  setMissionMode(MissionMode.CHECKPOINT, "cut at checkpoint");
+
+  appendDebugLine("Cut at checkpoint. Edit environment and Run Planner to continue.");
 }
 
 function updateAnimationButtonStates() {
@@ -3025,8 +3653,28 @@ window.addEventListener("load", () => {
     });
   }
 
+  // Status banner action buttons
+  const btnAcceptEdits = $("btn-accept-edits");
+  if (btnAcceptEdits) {
+    btnAcceptEdits.addEventListener("click", acceptEdits);
+  }
+
+  const btnAcceptSolution = $("btn-accept-solution");
+  if (btnAcceptSolution) {
+    btnAcceptSolution.addEventListener("click", acceptSolution);
+  }
+
+  const btnDiscardDraft = $("btn-discard-draft");
+  if (btnDiscardDraft) {
+    btnDiscardDraft.addEventListener("click", discardDraftSolution);
+  }
+
   // Agent Send button
   attachAgentHandlers();
+
+  // Initialize status banner
+  updateStatusBanner();
+  updateButtonStates();
 
   initialLoadEnv();
 });
@@ -3492,12 +4140,32 @@ function applyAgentRoute(route, points, fuel) {
 
 window.addEventListener("keydown", (e) => {
   if (String(e.key).toLowerCase() === "c") {
-    appendDebugLine("Keypress: C detected (attempting freeze)");
+    // Skip if user is typing in an input field
+    const activeTag = document.activeElement?.tagName?.toLowerCase();
+    if (activeTag === "input" || activeTag === "textarea" || activeTag === "select") {
+      return;
+    }
+
+    appendDebugLine("Keypress: C detected (attempting cut/checkpoint)");
     try {
-      freezeAtCheckpoint(0.5);
+      cutAtCheckpoint();
     } catch (err) {
-      console.error("freezeAtCheckpoint failed:", err);
-      appendDebugLine("Freeze failed (see console)");
+      console.error("cutAtCheckpoint failed:", err);
+      appendDebugLine("Cut failed (see console)");
+    }
+  }
+
+  // P key for Pause
+  if (String(e.key).toLowerCase() === "p") {
+    // Skip if user is typing in an input field
+    const activeTag = document.activeElement?.tagName?.toLowerCase();
+    if (activeTag === "input" || activeTag === "textarea" || activeTag === "select") {
+      return;
+    }
+
+    const perms = getUiPermissions();
+    if (perms.canPause) {
+      pauseAnimation();
     }
   }
 });

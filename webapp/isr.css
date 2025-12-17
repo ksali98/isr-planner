@@ -865,6 +865,97 @@ body {
   color: #e5e7eb;
 }
 
+/* Status Banner */
+.status-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.status-banner-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.status-action-btn {
+  padding: 0.3rem 0.7rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 0.3rem;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  background: #22c55e;
+  color: #022c22;
+}
+
+.status-action-btn:hover {
+  background: #16a34a;
+}
+
+.status-action-btn.danger {
+  background: #dc2626;
+  color: white;
+}
+
+.status-action-btn.danger:hover {
+  background: #b91c1c;
+}
+
+/* Status Banner mode-specific styles */
+.status-idle {
+  background: #1f2937;
+  border: 1px solid #374151;
+  color: #9ca3af;
+}
+
+.status-editing {
+  background: #422006;
+  border: 2px solid #f59e0b;
+  color: #fef3c7;
+}
+
+.status-draft-ready {
+  background: #1e3a5f;
+  border: 2px solid #3b82f6;
+  color: #bfdbfe;
+}
+
+.status-ready-to-animate {
+  background: #052e16;
+  border: 2px solid #22c55e;
+  color: #bbf7d0;
+}
+
+.status-animating {
+  background: #14532d;
+  border: 2px solid #22c55e;
+  color: #bbf7d0;
+  animation: pulse-green 1.5s infinite;
+}
+
+.status-paused {
+  background: #3b0764;
+  border: 2px solid #a855f7;
+  color: #e9d5ff;
+}
+
+.status-checkpoint {
+  background: #7c2d12;
+  border: 2px solid #f97316;
+  color: #fed7aa;
+}
+
+@keyframes pulse-green {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
 /* Responsive: only stack columns on very small screens */
 @media (max-width: 900px) {
   .main-layout {

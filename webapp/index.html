@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>ISR Web Editor + Planner</title>
-  <link rel="stylesheet" href="/static/isr.css?v=20251204memory" />
+  <link rel="stylesheet" href="/static/isr.css?v=20251217statemachine1" />
 </head>
 <body>
   <div id="app-root">
@@ -20,6 +20,16 @@
     <main class="main-layout">
       <!-- LEFT COLUMN: Canvas + sequence + edit toolbar placeholder -->
       <section class="left-panel">
+        <!-- Status Banner -->
+        <div id="status-banner" class="status-banner status-idle">
+          <span id="status-banner-text">Ready</span>
+          <div id="status-banner-actions" class="status-banner-actions">
+            <button id="btn-accept-edits" class="status-action-btn" style="display:none;">Accept Edits</button>
+            <button id="btn-accept-solution" class="status-action-btn" style="display:none;">Accept Solution</button>
+            <button id="btn-discard-draft" class="status-action-btn danger" style="display:none;">Discard</button>
+          </div>
+        </div>
+
         <!-- Canvas / environment -->
         <div class="canvas-card">
           <div class="card-header">
@@ -459,6 +469,6 @@
     </main>
   </div>
 
-  <script src="/static/isr.js?v=20251216checkpoint6"></script>
+  <script src="/static/isr.js?v=20251217statemachine4"></script>
 </body>
 </html>
