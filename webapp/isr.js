@@ -399,7 +399,8 @@ function getUiPermissions() {
     // Editing controls
     canEnterEdit: mode === MissionMode.IDLE ||
                   mode === MissionMode.CHECKPOINT ||
-                  mode === MissionMode.PAUSED_MID_ANIMATION,
+                  mode === MissionMode.PAUSED_MID_ANIMATION ||
+                  mode === MissionMode.READY_TO_ANIMATE,
     canAcceptEdits: mode === MissionMode.EDITING_ENV,
 
     // Planning controls
