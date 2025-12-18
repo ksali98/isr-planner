@@ -4535,6 +4535,12 @@ function attachMissionControlHandlers() {
   const mcCut = $("mc-cut");
   const mcReset = $("mc-reset");
 
+  // Set up segment switch callback to update UI when segment changes during animation
+  missionReplay.onSegmentSwitch((fromIndex, toIndex, newSegment) => {
+    console.log(`[UI] Segment switch: ${fromIndex} -> ${toIndex}`);
+    updateMissionControlState();
+  });
+
   // Run Planner button
   if (mcRunPlanner) {
     mcRunPlanner.addEventListener("click", () => {
@@ -4752,9 +4758,9 @@ function updateMissionControlState() {
   // Update segment info
   if (mcSegmentInfo) {
     const segmentCount = missionReplay.getSegmentCount();
-    const currentSegment = missionState.currentSegmentIndex + 1;
+    const currentSegmentIdx = missionReplay.getCurrentSegmentIndex();
     if (segmentCount > 0) {
-      mcSegmentInfo.textContent = `Segment ${currentSegment}/${segmentCount}`;
+      mcSegmentInfo.textContent = `Segment ${currentSegmentIdx + 1}/${segmentCount}`;
     } else {
       mcSegmentInfo.textContent = "Segment 1";
     }
