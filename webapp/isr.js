@@ -1313,7 +1313,7 @@ function drawEnvironment() {
   // Airports
   airports.forEach((a, idx) => {
     const [x, y] = w2c(a.x, a.y);
-    const size = 6;
+    const size = 10;  // Larger than drone radius (6) so airport is visible when drone is home
     ctx.fillStyle = "#3b82f6";
     ctx.strokeStyle = "#1d4ed8";
     ctx.lineWidth = 1;
