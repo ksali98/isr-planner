@@ -414,6 +414,11 @@ function setMissionMode(newMode, reason = "") {
   // Update UI elements based on new mode
   updateStatusBanner();
   updateButtonStates();
+
+  // Update Mission Control panel
+  if (typeof updateMissionControlState === "function") {
+    updateMissionControlState();
+  }
 }
 
 /**
@@ -2308,6 +2313,62 @@ function updateStatsFromRoutes() {
   setText("stat-mission-pf", missionPf.toFixed(2));
 }
 
+/**
+ * Update stats from actual animation state (real-time distance traveled)
+ * This shows the actual fuel/distance used during animation, not the planned values
+ */
+function updateStatsFromAnimation() {
+  if (!state.animation || !state.animation.drones) return;
+
+  let missionDistanceTraveled = 0;
+  let missionBudget = 0;
+  let missionPoints = 0;
+  let missionVisited = 0;
+
+  for (let did = 1; did <= 5; did++) {
+    const idStr = String(did);
+    const droneState = state.animation.drones[idStr];
+    const droneConfig = state.droneConfigs[idStr] || {};
+    const routeInfo = state.routes[idStr] || {};
+    const route = routeInfo.route || [];
+    const points = Number(routeInfo.points || 0);
+    const budget = Number(droneConfig.fuel_budget || routeInfo.fuel_budget || 0);
+
+    // Get actual distance traveled (use animation state if available, else route distance)
+    let distanceTraveled = 0;
+    if (droneState) {
+      distanceTraveled = droneState.distanceTraveled || 0;
+    } else {
+      // Fallback to planned distance if no animation state
+      distanceTraveled = Number(routeInfo.distance || 0);
+    }
+
+    // Count visited targets for this drone
+    const visitedCount = route.filter((label) =>
+      String(label).toUpperCase().startsWith("T") && state.visitedTargets.includes(label)
+    ).length;
+
+    const pf = distanceTraveled > 0 ? points / distanceTraveled : 0;
+
+    // Update individual drone stats with actual distance
+    setText(`stat-d${did}-tp`, `${visitedCount} / ${points}`);
+    setText(`stat-d${did}-fuel`, `${Math.round(distanceTraveled)} / ${Math.round(budget)}`);
+    setText(`stat-d${did}-pf`, pf.toFixed(2));
+
+    if (route && route.length > 0) {
+      missionPoints += points;
+      missionDistanceTraveled += distanceTraveled;
+      missionBudget += budget;
+      missionVisited += visitedCount;
+    }
+  }
+
+  const missionPf = missionDistanceTraveled > 0 ? missionPoints / missionDistanceTraveled : 0;
+  setText("stat-mission-tp", `${missionVisited} / ${missionPoints}`);
+  setText("stat-mission-fuel", `${Math.round(missionDistanceTraveled)} / ${Math.round(missionBudget)}`);
+  setText("stat-mission-pf", missionPf.toFixed(2));
+}
+
 function updateAllocationDisplay(allocations, strategy) {
   const container = $("allocation-display");
   if (!container) return;
@@ -3662,6 +3723,13 @@ function startAnimation(droneIds) {
       // 1) advance by distance (single source of truth)
       droneState.distanceTraveled += speedUnitsPerSec * dt;
 
+      // DEBUG: Log distance periodically (every 50 units)
+      const lastDistLog = droneState._lastDistLog || 0;
+      if (droneState.distanceTraveled - lastDistLog > 50) {
+        droneState._lastDistLog = droneState.distanceTraveled;
+        console.log(`📍 D${did}: distanceTraveled=${droneState.distanceTraveled.toFixed(1)}, totalDistance=${droneState.totalDistance.toFixed(1)}`);
+      }
+
       // 2) clamp and stop if finished
       if (droneState.distanceTraveled >= droneState.totalDistance) {
         droneState.distanceTraveled = droneState.totalDistance;
@@ -3768,6 +3836,14 @@ function startAnimation(droneIds) {
               state.visitedTargets.push(wp);
               console.log(`🎯 D${did} passed target ${wp} at distance ${targetDistance.toFixed(1)} (minDist=${minDist.toFixed(2)})`);
               appendDebugLine(`🎯 D${did} visited ${wp}`);
+            } else {
+              // Debug: Log why target not yet passed (periodically)
+              const logKey = `_debugNotYet_${wp}`;
+              const lastLog = droneState[logKey] || 0;
+              if (currentDistance - lastLog > 20) {  // Log every 20 units of travel
+                droneState[logKey] = currentDistance;
+                console.log(`⏳ D${did} target ${wp}: currentDist=${currentDistance.toFixed(1)} < targetDist=${targetDistance.toFixed(1)} (need ${(targetDistance - currentDistance).toFixed(1)} more)`);
+              }
             }
           } else if (!droneState[`_debugSkip_${wp}`] && closestIdx >= 0) {
             // Debug: Log why target was skipped (only once)
@@ -3803,7 +3879,10 @@ function startAnimation(droneIds) {
       appendDebugLine(`🔄 Environment updated with ${state.env.targets?.length || 0} targets`);
 
       // Switch trajectories to the spliced versions from this segment
+      // DEBUG: Log what we're getting from newSegment
+      console.log(`🔄 SEGMENT SWITCH: newSegment.solution.routes keys:`, Object.keys(newSegment.solution.routes || {}));
       Object.entries(newSegment.solution.routes || {}).forEach(([did, routeData]) => {
+        console.log(`🔄 D${did} from segment: trajectory=${routeData.trajectory?.length || 0} pts, route=[${(routeData.route || []).join(",")}]`);
         if (state.routes[did] && routeData.trajectory) {
           const oldLen = state.routes[did].trajectory?.length || 0;
           state.routes[did].trajectory = JSON.parse(JSON.stringify(routeData.trajectory));
@@ -3843,10 +3922,62 @@ function startAnimation(droneIds) {
 
       appendDebugLine(`🔄 === SEGMENT SWITCH COMPLETE ===`);
 
+      // Clear debug flags so targets get re-evaluated with new trajectory
+      Object.entries(state.animation.drones).forEach(([did, ds]) => {
+        // Clear _debugDist_ flags so we log distances for targets in new segment
+        Object.keys(ds).filter(k => k.startsWith('_debug')).forEach(k => delete ds[k]);
+        console.log(`🔄 Cleared debug flags for D${did}`);
+      });
+
+      // IMPORTANT: After segment switch, immediately mark any targets that should
+      // have been passed based on current distanceTraveled. This catches targets
+      // whose cumulative distance is <= distanceTraveled but weren't marked due
+      // to the segment boundary.
+      Object.entries(state.animation.drones).forEach(([did, droneState]) => {
+        const routeInfo = state.routes[did];
+        if (!routeInfo || !routeInfo.route || !routeInfo.trajectory) return;
+
+        const trajectory = routeInfo.trajectory;
+        const route = routeInfo.route;
+        const cumulativeDistances = droneState.cumulativeDistances || [];
+        const currentDistance = droneState.distanceTraveled;
+
+        route.forEach((wp) => {
+          if (!String(wp).startsWith("T")) return;
+          if (state.visitedTargets.includes(wp)) return;
+
+          const target = state.env.targets?.find(t => t.id === wp);
+          if (!target) return;
+
+          // Find closest trajectory point to this target
+          let minDist = Infinity;
+          let closestIdx = -1;
+          trajectory.forEach((pt, idx) => {
+            const dist = Math.sqrt(Math.pow(pt[0] - target.x, 2) + Math.pow(pt[1] - target.y, 2));
+            if (dist < minDist) {
+              minDist = dist;
+              closestIdx = idx;
+            }
+          });
+
+          // If trajectory passes close enough and we've already traveled past it, mark it
+          if (closestIdx >= 0 && minDist < 20.0 && cumulativeDistances[closestIdx] !== undefined) {
+            const targetDistance = cumulativeDistances[closestIdx];
+            if (currentDistance >= targetDistance) {
+              state.visitedTargets.push(wp);
+              console.log(`🎯 SEGMENT-SWITCH: D${did} passed target ${wp} at distance ${targetDistance.toFixed(1)} (current=${currentDistance.toFixed(1)})`);
+              appendDebugLine(`🎯 D${did} visited ${wp} (at segment switch)`);
+            }
+          }
+        });
+      });
+
       // Pause for 1000ms at the C point to make the transition visible
       drawEnvironment();
+      updateStatsFromAnimation();  // Update stats at segment switch
       setTimeout(() => {
         if (state.animation.active) {
+          console.log(`🔄 Resuming animation after segment switch pause`);
           state.animation.animationId = requestAnimationFrame(animate);
         }
       }, 1000);
@@ -3854,6 +3985,9 @@ function startAnimation(droneIds) {
     }
 
     drawEnvironment();
+
+    // Update stats with real-time distance traveled
+    updateStatsFromAnimation();
 
     if (anyAnimating && state.animation.active) {
       state.animation.animationId = requestAnimationFrame(animate);
@@ -3865,6 +3999,8 @@ function startAnimation(droneIds) {
       // Animation completed naturally - go to READY_TO_ANIMATE
       setMissionMode(MissionMode.READY_TO_ANIMATE, "animation complete");
       updateAnimationButtonStates();
+      // Final stats update when animation completes
+      updateStatsFromAnimation();
     }
   }
 
@@ -4254,6 +4390,9 @@ window.addEventListener("load", () => {
     btnDiscardDraft.addEventListener("click", discardDraftSolution);
   }
 
+  // Mission Control Panel handlers
+  attachMissionControlHandlers();
+
   // Agent Send button
   attachAgentHandlers();
 
@@ -4262,7 +4401,208 @@ window.addEventListener("load", () => {
   updateButtonStates();
 
   initialLoadEnv();
+
+  // Initialize Mission Control state
+  updateMissionControlState();
 });
+
+// ----------------------------------------------------
+// Mission Control Panel
+// ----------------------------------------------------
+function attachMissionControlHandlers() {
+  const mcRunPlanner = $("mc-run-planner");
+  const mcAccept = $("mc-accept");
+  const mcDiscard = $("mc-discard");
+  const mcAnimate = $("mc-animate");
+  const mcPause = $("mc-pause");
+  const mcStop = $("mc-stop");
+  const mcCut = $("mc-cut");
+  const mcReset = $("mc-reset");
+
+  // Run Planner button
+  if (mcRunPlanner) {
+    mcRunPlanner.addEventListener("click", () => {
+      runPlanner();
+    });
+  }
+
+  // Accept solution button
+  if (mcAccept) {
+    mcAccept.addEventListener("click", () => {
+      acceptSolution();
+    });
+  }
+
+  // Discard draft button
+  if (mcDiscard) {
+    mcDiscard.addEventListener("click", () => {
+      discardDraftSolution();
+    });
+  }
+
+  // Animate button - starts or resumes animation
+  if (mcAnimate) {
+    mcAnimate.addEventListener("click", () => {
+      const perms = getUiPermissions();
+      if (perms.canResume) {
+        resumeAnimation();
+      } else if (perms.canAnimate) {
+        // Start animation for all enabled drones
+        const enabledDrones = [];
+        for (let did = 1; did <= 5; did++) {
+          const cfg = state.droneConfigs[String(did)];
+          if (cfg && cfg.enabled && state.routes[String(did)]?.trajectory) {
+            enabledDrones.push(did);
+          }
+        }
+        if (enabledDrones.length > 0) {
+          startAnimation(enabledDrones);
+        } else {
+          appendDebugLine("No enabled drones with routes to animate");
+        }
+      }
+    });
+  }
+
+  // Pause button
+  if (mcPause) {
+    mcPause.addEventListener("click", () => {
+      pauseAnimation();
+    });
+  }
+
+  // Stop button
+  if (mcStop) {
+    mcStop.addEventListener("click", () => {
+      stopAnimation();
+    });
+  }
+
+  // Cut/Checkpoint button
+  if (mcCut) {
+    mcCut.addEventListener("click", () => {
+      cutAtCheckpoint();
+    });
+  }
+
+  // Reset button
+  if (mcReset) {
+    mcReset.addEventListener("click", () => {
+      resetMission();
+    });
+  }
+}
+
+/**
+ * Update Mission Control panel button states and status based on current mode
+ */
+function updateMissionControlState() {
+  const perms = getUiPermissions();
+  const mode = missionState.mode;
+
+  // Get all Mission Control buttons
+  const mcRunPlanner = $("mc-run-planner");
+  const mcAccept = $("mc-accept");
+  const mcDiscard = $("mc-discard");
+  const mcAnimate = $("mc-animate");
+  const mcPause = $("mc-pause");
+  const mcStop = $("mc-stop");
+  const mcCut = $("mc-cut");
+  const mcReset = $("mc-reset");
+  const mcStatusText = $("mc-status-text");
+  const mcSegmentInfo = $("mc-segment-info");
+  const mcPanel = $("mission-control");
+
+  // Update button enabled/disabled states
+  if (mcRunPlanner) {
+    mcRunPlanner.disabled = !perms.canSolve;
+  }
+
+  if (mcAccept) {
+    mcAccept.disabled = !perms.canAcceptSolution;
+  }
+
+  if (mcDiscard) {
+    mcDiscard.disabled = !perms.canDiscardDraft;
+  }
+
+  if (mcAnimate) {
+    const canStart = perms.canAnimate || perms.canResume;
+    mcAnimate.disabled = !canStart;
+    mcAnimate.textContent = perms.canResume ? "▶ Resume" : "▶ Animate";
+  }
+
+  if (mcPause) {
+    mcPause.disabled = !perms.canPause;
+  }
+
+  if (mcStop) {
+    // Stop is available when animating or paused
+    mcStop.disabled = mode !== MissionMode.ANIMATING && mode !== MissionMode.PAUSED_MID_ANIMATION;
+  }
+
+  if (mcCut) {
+    mcCut.disabled = !perms.canCut;
+  }
+
+  if (mcReset) {
+    mcReset.disabled = !perms.canReset;
+  }
+
+  // Update status text based on mode
+  if (mcStatusText) {
+    let statusText = "";
+    switch (mode) {
+      case MissionMode.IDLE:
+        statusText = "Ready - Load environment or Run Planner";
+        break;
+      case MissionMode.EDITING_ENV:
+        statusText = "Editing environment...";
+        break;
+      case MissionMode.DRAFT_READY:
+        statusText = "Draft ready - Accept or Discard";
+        break;
+      case MissionMode.READY_TO_ANIMATE:
+        statusText = "Solution accepted - Click Animate";
+        break;
+      case MissionMode.ANIMATING:
+        statusText = "Animating... Cut to checkpoint";
+        break;
+      case MissionMode.PAUSED_MID_ANIMATION:
+        statusText = "Paused - Resume or Stop";
+        break;
+      case MissionMode.CHECKPOINT:
+        statusText = "Checkpoint - Edit & Re-plan";
+        break;
+      default:
+        statusText = `Mode: ${mode}`;
+    }
+    mcStatusText.textContent = statusText;
+  }
+
+  // Update segment info
+  if (mcSegmentInfo) {
+    const segmentCount = missionReplay.getSegmentCount();
+    const currentSegment = missionState.currentSegmentIndex + 1;
+    if (segmentCount > 0) {
+      mcSegmentInfo.textContent = `Segment ${currentSegment}/${segmentCount}`;
+    } else {
+      mcSegmentInfo.textContent = "Segment 1";
+    }
+  }
+
+  // Update panel state class for visual feedback
+  if (mcPanel) {
+    mcPanel.classList.remove("mc-state-animating", "mc-state-checkpoint", "mc-state-draft");
+    if (mode === MissionMode.ANIMATING) {
+      mcPanel.classList.add("mc-state-animating");
+    } else if (mode === MissionMode.CHECKPOINT) {
+      mcPanel.classList.add("mc-state-checkpoint");
+    } else if (mode === MissionMode.DRAFT_READY) {
+      mcPanel.classList.add("mc-state-draft");
+    }
+  }
+}
 
 // ----------------------------------------------------
 // Agent Communication

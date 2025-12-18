@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>ISR Web Editor + Planner</title>
-  <link rel="stylesheet" href="/static/isr.css?v=20251217statemachine38" />
+  <link rel="stylesheet" href="/static/isr.css?v=20251218statemachine46" />
 </head>
 <body>
   <div id="app-root">
@@ -20,13 +20,30 @@
     <main class="main-layout">
       <!-- LEFT COLUMN: Canvas + sequence + edit toolbar placeholder -->
       <section class="left-panel">
-        <!-- Status Banner -->
-        <div id="status-banner" class="status-banner status-idle">
-          <span id="status-banner-text">Ready</span>
-          <div id="status-banner-actions" class="status-banner-actions">
-            <button id="btn-accept-edits" class="status-action-btn" style="display:none;">Accept Edits</button>
-            <button id="btn-accept-solution" class="status-action-btn" style="display:none;">Accept Solution</button>
-            <button id="btn-discard-draft" class="status-action-btn danger" style="display:none;">Discard</button>
+        <!-- Mission Control Panel -->
+        <div id="mission-control" class="mission-control-panel">
+          <div class="mc-header">
+            <span class="mc-title">Mission Control</span>
+            <span id="mc-segment-info" class="mc-segment-info">Segment 1</span>
+          </div>
+          <div class="mc-button-rows">
+            <!-- Row 1: Planning buttons -->
+            <div class="mc-row mc-row-planning">
+              <button id="mc-run-planner" class="mc-btn mc-btn-primary">Run Planner</button>
+              <button id="mc-accept" class="mc-btn mc-btn-success" disabled>Accept</button>
+              <button id="mc-discard" class="mc-btn mc-btn-danger" disabled>Discard</button>
+            </div>
+            <!-- Row 2: Animation buttons -->
+            <div class="mc-row mc-row-animation">
+              <button id="mc-animate" class="mc-btn mc-btn-play" disabled>▶ Animate</button>
+              <button id="mc-pause" class="mc-btn mc-btn-pause" disabled>⏸ Pause</button>
+              <button id="mc-stop" class="mc-btn mc-btn-stop" disabled>⏹ Stop</button>
+              <button id="mc-cut" class="mc-btn mc-btn-cut" disabled>✂ Cut</button>
+              <button id="mc-reset" class="mc-btn mc-btn-reset" disabled>↺ Reset</button>
+            </div>
+          </div>
+          <div class="mc-status">
+            <span id="mc-status-text">Ready - Load an environment to begin</span>
           </div>
         </div>
 
@@ -34,8 +51,7 @@
         <div class="canvas-card">
           <div class="card-header">
             <span>Mission Map</span>
-            <button id="btn-run-planner" class="primary-btn">Run Planner</button>
-            <button id="btn-cancel-solve" class="small-btn" style="background:#dc3545;color:white;margin-left:5px;">Cancel</button>
+            <button id="btn-cancel-solve" class="small-btn" style="background:#dc3545;color:white;display:none;">Cancel Solve</button>
           </div>
           <canvas id="env-canvas" width="800" height="800"></canvas>
         </div>
@@ -469,6 +485,6 @@
     </main>
   </div>
 
-  <script src="/static/isr.js?v=20251217statemachine41"></script>
+  <script src="/static/isr.js?v=20251218statemachine46"></script>
 </body>
 </html>
