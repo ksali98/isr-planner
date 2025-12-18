@@ -635,9 +635,9 @@ def solve_mission_with_allocation(
             route_ids = [start_id, effective_end] if start_id and effective_end else []
             seq = ",".join(route_ids)
 
-            # Still need to generate SAM-avoiding trajectory for airport-to-airport!
+            # Still need to generate trajectory for airport-to-airport route!
             trajectory = []
-            if route_ids and len(route_ids) >= 2 and sams:
+            if route_ids and len(route_ids) >= 2:
                 trajectory_planner = ISRTrajectoryPlanner(sams)
                 waypoint_positions = {wp["id"]: [wp["x"], wp["y"]] for wp in dist_data.get("waypoints", [])}
                 trajectory = trajectory_planner.generate_trajectory(route_ids, waypoint_positions, drone_id=did)
