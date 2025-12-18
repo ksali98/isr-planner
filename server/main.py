@@ -1064,19 +1064,22 @@ async def agent_chat_v4(req: AgentChatRequest):
         mission_id = req.mission_id
         existing_solution: Optional[Dict[str, Any]] = None
 
-        # If mission_id exists, load stored mission snapshot
+        # If mission_id exists, load stored mission snapshot for solution continuity
+        # BUT always use the incoming env/configs (user may have edited targets)
         if mission_id and mission_id in MISSION_STORE:
             mission = MISSION_STORE[mission_id]
-            # For consistency, prefer stored env/configs over incoming ones
-            env = mission.get("env", env)
-            drone_configs = mission.get("drone_configs", drone_configs)
+            # Use incoming env if provided, fallback to stored env
+            if not req.env:
+                env = mission.get("env", env)
+            if not req.drone_configs:
+                drone_configs = mission.get("drone_configs", drone_configs)
 
             existing_solution = {
                 "routes": mission.get("routes") or {},
                 "allocation": mission.get("allocation") or {},
                 # total_points/total_fuel are computed from routes when needed
             }
-            print(f"[v4] Loaded existing mission {mission_id} from store", flush=True)
+            print(f"[v4] Loaded existing mission {mission_id} from store (using fresh env from request)", flush=True)
         elif mission_id:
             print(f"[v4] mission_id={mission_id} not found; treating as new mission", flush=True)
             mission_id = None  # will create a new one below
