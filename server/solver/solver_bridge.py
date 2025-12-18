@@ -637,19 +637,27 @@ def solve_mission_with_allocation(
 
             # Still need to generate trajectory for airport-to-airport route!
             trajectory = []
+            route_distance = 0.0
             if route_ids and len(route_ids) >= 2:
                 trajectory_planner = ISRTrajectoryPlanner(sams)
                 waypoint_positions = {wp["id"]: [wp["x"], wp["y"]] for wp in dist_data.get("waypoints", [])}
                 trajectory = trajectory_planner.generate_trajectory(route_ids, waypoint_positions, drone_id=did)
+
+                # Calculate actual distance from trajectory waypoints
+                if trajectory and len(trajectory) >= 2:
+                    for i in range(len(trajectory) - 1):
+                        dx = trajectory[i+1][0] - trajectory[i][0]
+                        dy = trajectory[i+1][1] - trajectory[i][1]
+                        route_distance += math.sqrt(dx*dx + dy*dy)
 
             sequences[did] = seq
             routes_detail[did] = {
                 "route": route_ids,
                 "sequence": seq,
                 "points": 0,
-                "distance": 0.0,
+                "distance": route_distance,
                 "fuel_budget": fuel_budget,
-                "trajectory": trajectory,  # SAM-avoiding path even for no-target routes
+                "trajectory": trajectory,
             }
             continue
 
