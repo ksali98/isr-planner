@@ -2526,6 +2526,11 @@ function attachIOHandlers() {
           state.animation.drones = {};
         }
 
+        // Reset mission state machine and replay
+        missionReplay.clear();
+        missionState.draftSolution = null;
+        setMissionMode(MissionMode.IDLE, "new environment loaded");
+
         // Update filename label
         const envNameEl = $("env-filename");
         if (envNameEl) {
