@@ -287,6 +287,27 @@ class MissionReplay {
   }
 
   /**
+   * Update the solution in the current segment (e.g., after optimization)
+   */
+  updateCurrentSegmentSolution(routes, sequences) {
+    const segment = this.getCurrentSegment();
+    if (!segment) {
+      console.warn("[MissionReplay] No current segment to update");
+      return false;
+    }
+    // Update the solution's routes and sequences
+    if (segment.solution) {
+      segment.solution.routes = JSON.parse(JSON.stringify(routes));
+      if (sequences) {
+        segment.solution.sequences = JSON.parse(JSON.stringify(sequences));
+      }
+      console.log(`[MissionReplay] Updated segment ${segment.index} solution with optimized routes`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Set callback for segment switches
    */
   onSegmentSwitch(callback) {
@@ -2569,6 +2590,9 @@ function attachOptimizationHandlers() {
             await regenerateTrajectories();
             updateStatsFromRoutes();
             drawEnvironment();
+
+            // Update the committed segment so Reset preserves optimizer changes
+            missionReplay.updateCurrentSegmentSolution(state.routes, state.sequences);
           } else {
             appendDebugLine("Insert optimization: No insertions possible (all visited or fuel exhausted).");
           }
@@ -2678,6 +2702,9 @@ function attachOptimizationHandlers() {
             await regenerateTrajectories();
             updateStatsFromRoutes();
             drawEnvironment();
+
+            // Update the committed segment so Reset preserves optimizer changes
+            missionReplay.updateCurrentSegmentSolution(state.routes, state.sequences);
           } else {
             appendDebugLine(`Swap optimization: No beneficial swaps found (${iterations} iteration${iterations > 1 ? 's' : ''}).`);
           }
@@ -2739,6 +2766,9 @@ function attachOptimizationHandlers() {
             await regenerateTrajectories();
             updateStatsFromRoutes();
             drawEnvironment();
+
+            // Update the committed segment so Reset preserves optimizer changes
+            missionReplay.updateCurrentSegmentSolution(state.routes, state.sequences);
           } else {
             appendDebugLine("Crossing removal: No crossings found.");
           }
