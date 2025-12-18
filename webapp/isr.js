@@ -373,7 +373,7 @@ function getUiPermissions() {
     canAnimate: mode === MissionMode.READY_TO_ANIMATE,
     canResume: mode === MissionMode.PAUSED_MID_ANIMATION,
     canPause: mode === MissionMode.ANIMATING,
-    canCut: mode === MissionMode.ANIMATING,
+    canCut: mode === MissionMode.ANIMATING || mode === MissionMode.PAUSED_MID_ANIMATION,
 
     // Editing controls
     canEnterEdit: mode === MissionMode.IDLE ||
@@ -4473,7 +4473,6 @@ function attachMissionControlHandlers() {
   const mcDiscard = $("mc-discard");
   const mcAcceptEdits = $("mc-accept-edits");
   const mcAnimate = $("mc-animate");
-  const mcPause = $("mc-pause");
   const mcStop = $("mc-stop");
   const mcCut = $("mc-cut");
   const mcReset = $("mc-reset");
@@ -4506,11 +4505,14 @@ function attachMissionControlHandlers() {
     });
   }
 
-  // Animate button - starts or resumes animation
+  // Animate/Pause toggle button - starts, resumes, or pauses animation
   if (mcAnimate) {
     mcAnimate.addEventListener("click", () => {
       const perms = getUiPermissions();
-      if (perms.canResume) {
+      // If animating, this button acts as Pause
+      if (perms.canPause) {
+        pauseAnimation();
+      } else if (perms.canResume) {
         resumeAnimation();
       } else if (perms.canAnimate) {
         // Start animation for all enabled drones
@@ -4527,13 +4529,6 @@ function attachMissionControlHandlers() {
           appendDebugLine("No enabled drones with routes to animate");
         }
       }
-    });
-  }
-
-  // Pause button
-  if (mcPause) {
-    mcPause.addEventListener("click", () => {
-      pauseAnimation();
     });
   }
 
@@ -4572,7 +4567,6 @@ function updateMissionControlState() {
   const mcDiscard = $("mc-discard");
   const mcAcceptEdits = $("mc-accept-edits");
   const mcAnimate = $("mc-animate");
-  const mcPause = $("mc-pause");
   const mcStop = $("mc-stop");
   const mcCut = $("mc-cut");
   const mcReset = $("mc-reset");
@@ -4600,13 +4594,32 @@ function updateMissionControlState() {
   }
 
   if (mcAnimate) {
-    const canStart = perms.canAnimate || perms.canResume;
-    mcAnimate.disabled = !canStart;
-    mcAnimate.textContent = perms.canResume ? "▶ Resume" : "▶ Animate";
-  }
-
-  if (mcPause) {
-    mcPause.disabled = !perms.canPause;
+    // Toggle button: shows Pause when animating, Resume when paused, Animate otherwise
+    if (perms.canPause) {
+      // Currently animating - show Pause
+      mcAnimate.disabled = false;
+      mcAnimate.textContent = "⏸ Pause";
+      mcAnimate.classList.remove("mc-btn-play");
+      mcAnimate.classList.add("mc-btn-pause");
+    } else if (perms.canResume) {
+      // Currently paused - show Resume
+      mcAnimate.disabled = false;
+      mcAnimate.textContent = "▶ Resume";
+      mcAnimate.classList.remove("mc-btn-pause");
+      mcAnimate.classList.add("mc-btn-play");
+    } else if (perms.canAnimate) {
+      // Ready to animate - show Animate
+      mcAnimate.disabled = false;
+      mcAnimate.textContent = "▶ Animate";
+      mcAnimate.classList.remove("mc-btn-pause");
+      mcAnimate.classList.add("mc-btn-play");
+    } else {
+      // Not available
+      mcAnimate.disabled = true;
+      mcAnimate.textContent = "▶ Animate";
+      mcAnimate.classList.remove("mc-btn-pause");
+      mcAnimate.classList.add("mc-btn-play");
+    }
   }
 
   if (mcStop) {
