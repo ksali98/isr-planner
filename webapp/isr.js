@@ -1677,8 +1677,9 @@ function attachEditToggle() {
     const perms = getUiPermissions();
 
     if (missionState.mode === MissionMode.EDITING_ENV) {
-      // Currently editing - toggle OFF means cancel
-      cancelEdits();
+      // Currently editing - toggle OFF means ACCEPT edits (save changes)
+      // User can use Mission Control "Discard" or reload to cancel
+      acceptEdits();
     } else if (perms.canEnterEdit) {
       // Can enter edit mode
       enterEditMode();
@@ -4021,8 +4022,14 @@ function stopAnimation() {
   }
 
   state.animation.active = false;
-  state.animation.drones = {};
+  // DON'T clear drones - keep their current positions visible
+  // state.animation.drones = {};  // Removed - drones should stay visible
   missionState.pauseContext = null;
+
+  // Mark all animating drones as stopped (not animating)
+  Object.values(state.animation.drones).forEach(droneState => {
+    droneState.animating = false;
+  });
 
   // If we were animating, transition back to READY_TO_ANIMATE
   if (wasAnimating && missionState.mode === MissionMode.ANIMATING) {
@@ -4031,7 +4038,7 @@ function stopAnimation() {
 
   updateAnimationButtonStates();
   drawEnvironment();
-  appendDebugLine("Animation stopped.");
+  appendDebugLine("Animation stopped. Drones remain at current positions.");
 }
 
 /**
@@ -4069,6 +4076,7 @@ function pauseAnimation() {
 
 /**
  * Resume animation from pause state
+ * Uses full animation loop with target marking (same as startAnimation)
  */
 function resumeAnimation() {
   if (!missionState.pauseContext) {
@@ -4080,14 +4088,23 @@ function resumeAnimation() {
   state.animation.drones = missionState.pauseContext.droneStates;
   state.animation.active = true;
 
+  // Re-enable animating flag for drones that were animating
+  missionState.pauseContext.animatingDrones.forEach(did => {
+    if (state.animation.drones[did]) {
+      state.animation.drones[did].animating = true;
+    }
+  });
+
   // Clear pause context
   missionState.pauseContext = null;
 
-  // Restart animation loop
+  // Restart animation loop with FULL target marking logic (same as startAnimation)
   const speedUnitsPerSec = 20;
   let lastTime = null;
 
   function animate(currentTime) {
+    if (!state.animation.active) return;
+
     if (lastTime === null) lastTime = currentTime;
 
     const deltaTime = Math.min(currentTime - lastTime, 100);
@@ -4111,17 +4128,58 @@ function resumeAnimation() {
       droneState.progress = (droneState.totalDistance > 0)
         ? (droneState.distanceTraveled / droneState.totalDistance)
         : 1;
+
+      // TARGET MARKING: Check if drone has passed any target waypoints
+      const routeInfo = state.routes[did];
+      if (routeInfo && routeInfo.route && routeInfo.trajectory) {
+        const trajectory = routeInfo.trajectory;
+        const route = routeInfo.route;
+        const cumulativeDistances = droneState.cumulativeDistances || [];
+        const currentDistance = droneState.distanceTraveled;
+
+        route.forEach((wp) => {
+          if (!String(wp).startsWith("T")) return;
+          if (state.visitedTargets.includes(wp)) return;
+
+          const target = state.env.targets?.find(t => t.id === wp);
+          if (!target) return;
+
+          // Find closest trajectory point to this target
+          let minDist = Infinity;
+          let closestIdx = -1;
+          trajectory.forEach((pt, idx) => {
+            const dist = Math.sqrt(Math.pow(pt[0] - target.x, 2) + Math.pow(pt[1] - target.y, 2));
+            if (dist < minDist) {
+              minDist = dist;
+              closestIdx = idx;
+            }
+          });
+
+          // If trajectory passes close enough and we've traveled past it, mark visited
+          if (closestIdx >= 0 && minDist < 20.0 && cumulativeDistances[closestIdx] !== undefined) {
+            const targetDistance = cumulativeDistances[closestIdx];
+            if (currentDistance >= targetDistance) {
+              state.visitedTargets.push(wp);
+              console.log(`🎯 D${did} visited ${wp} at distance ${currentDistance.toFixed(1)}`);
+              appendDebugLine(`🎯 D${did} visited ${wp}`);
+            }
+          }
+        });
+      }
     });
 
     drawEnvironment();
+    updateStatsFromAnimation();
 
-    if (anyAnimating) {
+    if (anyAnimating && state.animation.active) {
       state.animation.animationId = requestAnimationFrame(animate);
+    } else if (!state.animation.active) {
+      return;  // Stopped externally
     } else {
       state.animation.active = false;
-      // Animation completed naturally - go to READY_TO_ANIMATE
       setMissionMode(MissionMode.READY_TO_ANIMATE, "animation complete");
       updateAnimationButtonStates();
+      updateStatsFromAnimation();
     }
   }
 
@@ -4131,7 +4189,7 @@ function resumeAnimation() {
   setMissionMode(MissionMode.ANIMATING, "animation resumed");
 
   updateAnimationButtonStates();
-  appendDebugLine("Animation resumed.");
+  appendDebugLine("Animation resumed with target marking.");
 }
 
 /**
@@ -4413,6 +4471,7 @@ function attachMissionControlHandlers() {
   const mcRunPlanner = $("mc-run-planner");
   const mcAccept = $("mc-accept");
   const mcDiscard = $("mc-discard");
+  const mcAcceptEdits = $("mc-accept-edits");
   const mcAnimate = $("mc-animate");
   const mcPause = $("mc-pause");
   const mcStop = $("mc-stop");
@@ -4437,6 +4496,13 @@ function attachMissionControlHandlers() {
   if (mcDiscard) {
     mcDiscard.addEventListener("click", () => {
       discardDraftSolution();
+    });
+  }
+
+  // Accept Edits button
+  if (mcAcceptEdits) {
+    mcAcceptEdits.addEventListener("click", () => {
+      acceptEdits();
     });
   }
 
@@ -4504,6 +4570,7 @@ function updateMissionControlState() {
   const mcRunPlanner = $("mc-run-planner");
   const mcAccept = $("mc-accept");
   const mcDiscard = $("mc-discard");
+  const mcAcceptEdits = $("mc-accept-edits");
   const mcAnimate = $("mc-animate");
   const mcPause = $("mc-pause");
   const mcStop = $("mc-stop");
@@ -4524,6 +4591,12 @@ function updateMissionControlState() {
 
   if (mcDiscard) {
     mcDiscard.disabled = !perms.canDiscardDraft;
+  }
+
+  // Accept Edits button - only show when editing
+  if (mcAcceptEdits) {
+    mcAcceptEdits.style.display = perms.isEditing ? "flex" : "none";
+    mcAcceptEdits.disabled = !perms.canAcceptEdits;
   }
 
   if (mcAnimate) {
