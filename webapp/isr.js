@@ -4471,7 +4471,7 @@ function attachMissionControlHandlers() {
   const mcRunPlanner = $("mc-run-planner");
   const mcAccept = $("mc-accept");
   const mcDiscard = $("mc-discard");
-  const mcAcceptEdits = $("mc-accept-edits");
+  const mcEdit = $("mc-edit");
   const mcAnimate = $("mc-animate");
   const mcStop = $("mc-stop");
   const mcCut = $("mc-cut");
@@ -4484,24 +4484,41 @@ function attachMissionControlHandlers() {
     });
   }
 
-  // Accept solution button
+  // Edit button - toggles edit mode
+  if (mcEdit) {
+    mcEdit.addEventListener("click", () => {
+      const perms = getUiPermissions();
+      if (perms.isEditing) {
+        // Currently editing - accept edits and exit
+        acceptEdits();
+      } else if (perms.canEnterEdit) {
+        // Enter edit mode
+        enterEditMode();
+      }
+    });
+  }
+
+  // Unified Accept button - works for both draft solution and edits
   if (mcAccept) {
     mcAccept.addEventListener("click", () => {
-      acceptSolution();
+      const perms = getUiPermissions();
+      if (perms.isEditing) {
+        acceptEdits();
+      } else if (perms.canAcceptSolution) {
+        acceptSolution();
+      }
     });
   }
 
-  // Discard draft button
+  // Unified Discard button - works for both draft solution and edits
   if (mcDiscard) {
     mcDiscard.addEventListener("click", () => {
-      discardDraftSolution();
-    });
-  }
-
-  // Accept Edits button
-  if (mcAcceptEdits) {
-    mcAcceptEdits.addEventListener("click", () => {
-      acceptEdits();
+      const perms = getUiPermissions();
+      if (perms.isEditing) {
+        cancelEdits();
+      } else if (perms.canDiscardDraft) {
+        discardDraftSolution();
+      }
     });
   }
 
@@ -4565,7 +4582,7 @@ function updateMissionControlState() {
   const mcRunPlanner = $("mc-run-planner");
   const mcAccept = $("mc-accept");
   const mcDiscard = $("mc-discard");
-  const mcAcceptEdits = $("mc-accept-edits");
+  const mcEdit = $("mc-edit");
   const mcAnimate = $("mc-animate");
   const mcStop = $("mc-stop");
   const mcCut = $("mc-cut");
@@ -4579,18 +4596,26 @@ function updateMissionControlState() {
     mcRunPlanner.disabled = !perms.canSolve;
   }
 
+  // Edit button - toggle active state and enable/disable
+  if (mcEdit) {
+    mcEdit.disabled = !perms.canEnterEdit && !perms.isEditing;
+    if (perms.isEditing) {
+      mcEdit.classList.add("active");
+      mcEdit.textContent = "Editing...";
+    } else {
+      mcEdit.classList.remove("active");
+      mcEdit.textContent = "Edit";
+    }
+  }
+
+  // Unified Accept - enabled when can accept solution OR can accept edits
   if (mcAccept) {
-    mcAccept.disabled = !perms.canAcceptSolution;
+    mcAccept.disabled = !perms.canAcceptSolution && !perms.canAcceptEdits;
   }
 
+  // Unified Discard - enabled when can discard draft OR is editing
   if (mcDiscard) {
-    mcDiscard.disabled = !perms.canDiscardDraft;
-  }
-
-  // Accept Edits button - only show when editing
-  if (mcAcceptEdits) {
-    mcAcceptEdits.style.display = perms.isEditing ? "flex" : "none";
-    mcAcceptEdits.disabled = !perms.canAcceptEdits;
+    mcDiscard.disabled = !perms.canDiscardDraft && !perms.isEditing;
   }
 
   if (mcAnimate) {
