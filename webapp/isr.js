@@ -4948,6 +4948,12 @@ async function sendAgentMessage() {
   if (btnSend) btnSend.disabled = true;
 
   try {
+    // Debug: log what we're sending
+    const targetCount = state.env?.targets?.length || 0;
+    const targetIds = (state.env?.targets || []).map(t => t.id).join(", ");
+    console.log(`🚀 Agent request: ${targetCount} targets [${targetIds}], mission_id=${state.missionId || 'null'}`);
+    appendDebugLine(`🚀 Agent: ${targetCount} targets [${targetIds}]`);
+
     const response = await fetch("/api/agents/chat-v4", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -4956,7 +4962,7 @@ async function sendAgentMessage() {
         env: state.env,
         sequences: state.sequences,
         drone_configs: state.droneConfigs,
-        mission_id: state.missionId,   // <-- NEW
+        mission_id: state.missionId,
       }),
     });
 
