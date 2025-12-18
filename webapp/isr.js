@@ -738,16 +738,20 @@ function discardDraftSolution() {
   // Clear the draft solution
   missionState.draftSolution = null;
 
-  // Clear visual routes
-  state.routes = {};
+  // Check if we have a committed solution to restore from MissionReplay
+  const currentSegment = missionReplay.getCurrentSegment();
+  const hasCommittedPlan = currentSegment && currentSegment.solution;
 
-  // Determine which state to return to
-  const hasCommittedPlan = missionState.committedSegments.length > 0;
   if (hasCommittedPlan) {
-    // Restore previous segment's routes for display
-    const lastSegment = missionState.committedSegments[missionState.committedSegments.length - 1];
-    if (lastSegment && lastSegment.solution && lastSegment.solution.drone_routes) {
-      lastSegment.solution.drone_routes.forEach(r => {
+    // Restore the committed segment's routes
+    const solution = currentSegment.solution;
+    if (solution.routes) {
+      // Solution already has routes in the new format
+      state.routes = JSON.parse(JSON.stringify(solution.routes));
+    } else if (solution.drone_routes) {
+      // Legacy format
+      state.routes = {};
+      solution.drone_routes.forEach(r => {
         state.routes[String(r.drone_id)] = {
           route: r.route,
           trajectory: r.trajectory,
@@ -757,9 +761,28 @@ function discardDraftSolution() {
         };
       });
     }
-    setMissionMode(MissionMode.CHECKPOINT, "draft discarded, back to checkpoint");
+    // Go back to ready to animate (we have a valid solution)
+    setMissionMode(MissionMode.READY_TO_ANIMATE, "draft discarded, restored committed solution");
   } else {
-    setMissionMode(MissionMode.IDLE, "draft discarded");
+    // Fallback to old system
+    const oldSegment = missionState.committedSegments[missionState.committedSegments.length - 1];
+    if (oldSegment && oldSegment.solution && oldSegment.solution.drone_routes) {
+      state.routes = {};
+      oldSegment.solution.drone_routes.forEach(r => {
+        state.routes[String(r.drone_id)] = {
+          route: r.route,
+          trajectory: r.trajectory,
+          distance: r.distance,
+          fuel_budget: r.fuel_budget,
+          points: r.points || 0,
+        };
+      });
+      setMissionMode(MissionMode.READY_TO_ANIMATE, "draft discarded, restored committed solution");
+    } else {
+      // No committed solution - clear routes and go to IDLE
+      state.routes = {};
+      setMissionMode(MissionMode.IDLE, "draft discarded");
+    }
   }
 
   appendDebugLine("❌ Draft solution discarded");
