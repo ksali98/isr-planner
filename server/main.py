@@ -26,6 +26,7 @@ from .agents.agent_memory import (
     delete_memory,
 )
 from .database.mission_ledger import create_mission_run, log_event
+from .agents.mission_executive import get_executive, TickRequest, TickResponse
 from .solver import sam_distance_matrix
 from .solver.post_optimizer import get_coverage_stats, trajectory_swap_optimize, crossing_removal_optimize, post_optimize_solution
 from .solver.solver_bridge import (
@@ -97,6 +98,24 @@ class ApplySequenceResponse(BaseModel):
     error: Optional[str] = None
 
 
+class ExecutiveTickRequest(BaseModel):
+    mission_id: Optional[str] = None
+    ui_state: Dict[str, Any] = {}
+    events: List[Dict[str, Any]] = []
+    env: Optional[Dict[str, Any]] = None
+    drone_configs: Optional[Dict[str, Any]] = None
+
+
+class ExecutiveTickResponse(BaseModel):
+    action: str
+    mission_id: str
+    draft_plan: Optional[Dict[str, Any]] = None
+    joined_plan: Optional[Dict[str, Any]] = None
+    visited_targets: List[str] = []
+    markers: Dict[str, List[str]] = {}
+    message: str = ""
+
+
 # Support both local development and Docker deployment paths
 if Path("/app/webapp").exists():
     # Docker deployment
@@ -144,6 +163,40 @@ def supabase_test():
         "ok": ok,
         "run_id": run_id
     }
+
+
+@app.post("/api/executive/tick", response_model=ExecutiveTickResponse)
+def executive_tick(req: ExecutiveTickRequest):
+    """
+    Mission Executive tick endpoint.
+
+    Called by UI to:
+    - Report current state (positions, progress)
+    - Send events (commands, edits)
+    - Receive next action to take
+    """
+    executive = get_executive()
+
+    tick_request = TickRequest(
+        mission_id=req.mission_id,
+        ui_state=req.ui_state,
+        events=req.events,
+        env=req.env,
+        drone_configs=req.drone_configs
+    )
+
+    response = executive.tick(tick_request)
+
+    return ExecutiveTickResponse(
+        action=response.action.value,
+        mission_id=response.mission_id,
+        draft_plan=response.draft_plan,
+        joined_plan=response.joined_plan,
+        visited_targets=response.visited_targets,
+        markers=response.markers,
+        message=response.message
+    )
+
 
 # serve static files (index.html, isr.js, etc.)
 app.mount("/static", StaticFiles(directory=str(WEBAPP)), name="static")
