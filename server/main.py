@@ -25,6 +25,7 @@ from .agents.agent_memory import (
     clear_memory,
     delete_memory,
 )
+from .database.mission_ledger import create_mission_run, log_event
 from .solver import sam_distance_matrix
 from .solver.post_optimizer import get_coverage_stats, trajectory_swap_optimize, crossing_removal_optimize, post_optimize_solution
 from .solver.solver_bridge import (
@@ -119,6 +120,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.post("/api/debug/supabase-test")
+def supabase_test():
+    run_id = create_mission_run(
+        system_version="debug",
+        mission_name="supabase-test"
+    )
+
+    if not run_id:
+        return {
+            "ok": False,
+            "error": "Failed to create mission run (check Railway logs)"
+        }
+
+    ok = log_event(
+        run_id,
+        "SUPABASE_TEST_EVENT",
+        {"ok": True}
+    )
+
+    return {
+        "ok": ok,
+        "run_id": run_id
+    }
 
 # serve static files (index.html, isr.js, etc.)
 app.mount("/static", StaticFiles(directory=str(WEBAPP)), name="static")
