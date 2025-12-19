@@ -828,6 +828,26 @@ def solve_with_allocation(req: SolveWithAllocationRequest):
 
     This is the recommended endpoint for multi-drone missions.
     """
+    # Create mission run for Supabase logging
+    run_id = create_mission_run(
+        system_version="solve_with_allocation",
+        mission_name="planner-solve",
+        objective_weights={"allocation_strategy": req.allocation_strategy},
+        constraints={"is_checkpoint_replan": req.is_checkpoint_replan},
+    )
+
+    # Log solve request
+    if run_id:
+        num_targets = len(req.env.get("targets", []))
+        num_drones = len(req.drone_configs) if req.drone_configs else 0
+        log_event(run_id, "SOLVE_REQUESTED", {
+            "num_targets": num_targets,
+            "num_drones": num_drones,
+            "allocation_strategy": req.allocation_strategy,
+            "is_checkpoint_replan": req.is_checkpoint_replan,
+            "visited_targets": req.visited_targets or [],
+        })
+
     # Filter out visited targets (for checkpoint replanning or any solve with visited targets)
     env_to_solve = req.env
     if req.visited_targets:
@@ -897,6 +917,17 @@ def solve_with_allocation(req: SolveWithAllocationRequest):
 
     # Extract distance matrix from result (needed for post-optimization)
     distance_matrix = result.get("distance_matrix", {})
+
+    # Log solve completion
+    if run_id:
+        total_points = sum(r.get("points", 0) for r in routes.values())
+        total_distance = sum(r.get("distance", 0) for r in routes.values())
+        log_event(run_id, "SOLVE_COMPLETED", {
+            "num_routes": len(routes),
+            "total_points": total_points,
+            "total_distance": round(total_distance, 2),
+            "allocations": allocations,
+        })
 
     return SolveResponse(
         success=True,
