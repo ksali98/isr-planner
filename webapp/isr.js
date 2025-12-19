@@ -4906,6 +4906,7 @@ function attachMissionControlHandlers() {
   const mcAccept = $("mc-accept");
   const mcDiscard = $("mc-discard");
   const mcEdit = $("mc-edit");
+  const mcDisplay = $("mc-display");
   const mcAnimate = $("mc-animate");
   const mcStop = $("mc-stop");
   const mcCut = $("mc-cut");
@@ -4921,6 +4922,13 @@ function attachMissionControlHandlers() {
   if (mcRunPlanner) {
     mcRunPlanner.addEventListener("click", () => {
       runPlanner();
+    });
+  }
+
+  // Display button - toggle all trajectories
+  if (mcDisplay) {
+    mcDisplay.addEventListener("click", () => {
+      toggleAllTrajectories();
     });
   }
 
@@ -5023,6 +5031,7 @@ function updateMissionControlState() {
   const mcAccept = $("mc-accept");
   const mcDiscard = $("mc-discard");
   const mcEdit = $("mc-edit");
+  const mcDisplay = $("mc-display");
   const mcAnimate = $("mc-animate");
   const mcStop = $("mc-stop");
   const mcCut = $("mc-cut");
@@ -5034,6 +5043,12 @@ function updateMissionControlState() {
   // Update button enabled/disabled states
   if (mcRunPlanner) {
     mcRunPlanner.disabled = !perms.canSolve;
+  }
+
+  // Display button - enabled when there are routes to display
+  if (mcDisplay) {
+    const hasRoutes = Object.keys(state.routes).length > 0;
+    mcDisplay.disabled = !hasRoutes;
   }
 
   // Edit button - toggle active state and enable/disable
