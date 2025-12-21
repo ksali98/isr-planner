@@ -38,6 +38,15 @@ from .solver.solver_bridge import (
 )
 from .solver.trajectory_planner import ISRTrajectoryPlanner
 
+from server.database.mission_ledger import (
+    create_mission_run,
+    create_env_version,
+    log_event,
+)
+
+_current_run_id = None
+_current_env_version_id = None
+
 # Import polygon wrapping for visualization (same as delivery planner)
 # Add paths for both local dev and Docker deployment
 project_root = Path(__file__).parent.parent.parent.parent
@@ -544,17 +553,61 @@ def receive_environment(payload: Dict[str, Any]):
     Payload: { "environment": { airports: [...], targets: [...], sams: [...] } }
 
     Automatically recalculates SAM-aware distance matrix after each edit.
+    Also snapshots the env into Supabase (env_versions) and logs events.
     """
-    global _current_env
+    global _current_env, _current_run_id, _current_env_version_id
+
     env = payload.get("environment")
     if not isinstance(env, dict):
         return {"success": False, "error": "Invalid payload"}
 
+    # ---- Update in-memory + on-disk env (existing behavior) ----
     _current_env = env
     ENV_PATH.write_text(json.dumps(env, indent=2))
     print("📥 [ISR_WEB] Environment updated", flush=True)
 
-    # Automatically recalculate SAM-aware distance matrix for fast solving
+    # ---- Supabase: ensure a run exists ----
+    # We create ONE run per session (until you explicitly reset/close it).
+    if _current_run_id is None:
+        _current_run_id = create_mission_run(system_version="v4", mission_name="isr-run")
+        if _current_run_id:
+            log_event(
+                _current_run_id,
+                "RUN_CREATED",
+                {"source": "api/environment"}
+            )
+
+    # ---- Supabase: snapshot env version on every environment update ----
+    # Decide event type: first import vs subsequent edits
+    event_type = "ENV_IMPORTED" if _current_env_version_id is None else "ENV_EDITED"
+
+    if _current_run_id is not None:
+        _current_env_version_id = create_env_version(
+            run_id=_current_run_id,
+            env_snapshot=env,
+            source="human",
+            reason=event_type.lower(),   # "env_imported" or "env_edited"
+        )
+
+        # Log env event with lightweight summary (avoid storing huge payload twice)
+        try:
+            airports_n = len(env.get("airports", []))
+            targets_n = len(env.get("targets", []))
+            sams_n = len(env.get("sams", []))
+        except Exception:
+            airports_n = targets_n = sams_n = None
+
+        log_event(
+            _current_run_id,
+            event_type,
+            {
+                "env_version_id": _current_env_version_id,
+                "counts": {"airports": airports_n, "targets": targets_n, "sams": sams_n},
+                "has_sams": bool(env.get("sams", [])),
+            },
+        )
+
+    # ---- Existing behavior: matrix recompute ----
     sams = env.get("sams", [])
     if sams:
         print("⏳ Recalculating SAM-aware distance matrix...", flush=True)
@@ -566,11 +619,16 @@ def receive_environment(payload: Dict[str, Any]):
         except Exception as e:
             print(f"⚠️ Matrix calculation failed: {e}", flush=True)
     else:
-        # No SAMs - clear the matrix cache
         clear_cached_matrix()
         print("✅ No SAMs - using direct distances", flush=True)
 
-    return {"success": True}
+    return {
+        "success": True,
+        "run_id": _current_run_id,
+        "env_version_id": _current_env_version_id,
+        "event_type": event_type,
+    }
+
 
 
 @app.get("/api/environment")
