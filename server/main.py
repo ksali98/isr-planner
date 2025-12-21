@@ -26,7 +26,7 @@ from .agents.agent_memory import (
     clear_memory,
     delete_memory,
 )
-from .database.mission_ledger import create_mission_run, log_event
+
 from .agents.mission_executive import get_executive, TickRequest, TickResponse
 from .solver import sam_distance_matrix
 from .solver.post_optimizer import get_coverage_stats, trajectory_swap_optimize, crossing_removal_optimize, post_optimize_solution
@@ -42,10 +42,9 @@ from .solver.trajectory_planner import ISRTrajectoryPlanner
 from server.database.mission_ledger import (
     create_mission_run,
     create_env_version,
+    create_plan,
     log_event,
 )
-
-from server.database.mission_ledger import create_env_version, create_plan, log_event, create_mission_run
 
 _current_env = None
 _current_run_id = None
@@ -871,7 +870,7 @@ def solve(req: SolveRequest):
     if _current_run_id is not None:
         trajectories = {d: r.get("trajectory", []) for d, r in routes.items()}
 
-        metrics = {}
+        metrics: Dict[str, Any] = {}
         for d, r in routes.items():
             metrics[d] = {
                 "distance": r.get("distance", 0.0),
@@ -880,24 +879,25 @@ def solve(req: SolveRequest):
                 "route": r.get("route", []),
                 "sequence": sequences.get(d, ""),
             }
-    print("✅ About to create_plan. env_version_id =", _current_env_version_id, flush=True)
-    try:
-        _current_plan_id = create_plan(
-            run_id=_current_run_id,
-            env_version_id=_current_env_version_id,
-            status="draft",
-            starts_by_drone={},
-            allocation={},
-            trajectories=trajectories,
-            metrics=metrics,
-            notes="draft from /api/solve",
-        )
-        print("✅ create_plan returned:", _current_plan_id, flush=True)
-    except Exception as e:
-        print("❌ create_plan raised:", repr(e), flush=True)
-        raise
 
+        print("✅ About to create_plan. env_version_id =", _current_env_version_id, flush=True)
 
+        try:
+            _current_plan_id = create_plan(
+                run_id=_current_run_id,
+                env_version_id=_current_env_version_id,
+                status="draft",
+                starts_by_drone={},
+                allocation={},
+                trajectories=trajectories,
+                metrics=metrics,
+                notes="draft from /api/solve",
+            )
+            print("✅ create_plan returned:", _current_plan_id, flush=True)
+
+        except Exception as e:
+            print("❌ create_plan raised:", repr(e), flush=True)
+            raise
 
     return SolveResponse(
         success=True,
@@ -905,7 +905,6 @@ def solve(req: SolveRequest):
         sequences=sequences,
         wrapped_polygons=wrapped_polygons,
     )
-
 
 class SolveWithAllocationRequest(BaseModel):
     env: Dict[str, Any]
