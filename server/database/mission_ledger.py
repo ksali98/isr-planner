@@ -4,16 +4,7 @@ Mission Ledger Module
 Provides functions to log mission runs and events to Supabase.
 """
 
-import os
-from datetime import datetime
 from typing import Any, Dict, Optional
-from uuid import uuid4
-
-from .supabase_client import get_supabase_client
-
-
-from typing import Any, Dict, Optional
-from datetime import datetime
 from .supabase_client import get_supabase_client
 
 def create_mission_run(
@@ -22,7 +13,7 @@ def create_mission_run(
     objective_weights: Optional[Dict[str, Any]] = None,
     constraints: Optional[Dict[str, Any]] = None,
     notes: Optional[str] = None,
-) -> Optional[str]:
+) -> Optional[str]: 
     client = get_supabase_client()
     if client is None:
         print("[mission_ledger] Supabase not configured, skipping create_mission_run")
@@ -67,4 +58,77 @@ def log_event(
         return True
     except Exception as e:
         print(f"[mission_ledger] Error logging event: {e}")
+        return False
+
+def create_env_version(
+    run_id: str,
+    env_snapshot: Dict[str, Any],
+    source: str = "human",
+    reason: Optional[str] = None,
+) -> Optional[str]:
+    client = get_supabase_client()
+    if client is None:
+        print("[mission_ledger] Supabase not configured, skipping create_env_version")
+        return None
+
+    record = {
+        "run_id": run_id,
+        "source": source,
+        "reason": reason,
+        "env_snapshot": env_snapshot,
+    }
+
+    try:
+        result = client.table("env_versions").insert(record).execute()
+        env_version_id = result.data[0]["id"]
+        print(f"[mission_ledger] Created env_version: {env_version_id} for run {run_id}")
+        return env_version_id
+    except Exception as e:
+        print(f"[mission_ledger] Error creating env_version: {e}")
+        return None
+def create_plan(
+    run_id: str,
+    env_version_id: Optional[str],
+    status: str = "draft",
+    starts_by_drone: Optional[Dict[str, Any]] = None,
+    allocation: Optional[Dict[str, Any]] = None,
+    trajectories: Optional[Dict[str, Any]] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+    notes: Optional[str] = None,
+) -> Optional[str]:
+    client = get_supabase_client()
+    if client is None:
+        print("[mission_ledger] Supabase not configured, skipping create_plan")
+        return None
+
+    record = {
+        "run_id": run_id,
+        "env_version_id": env_version_id,
+        "status": status,
+        "starts_by_drone": starts_by_drone or {},
+        "allocation": allocation or {},
+        "trajectories": trajectories or {},
+        "metrics": metrics or {},
+        "notes": notes,
+    }
+
+    try:
+        result = client.table("plans").insert(record).execute()
+        plan_id = result.data[0]["id"]
+        print(f"[mission_ledger] Created plan: {plan_id} status={status} run={run_id}")
+        return plan_id
+    except Exception as e:
+        print(f"[mission_ledger] Error creating plan: {e}")
+        return None
+def set_plan_status(plan_id: str, status: str) -> bool:
+    client = get_supabase_client()
+    if client is None:
+        print("[mission_ledger] Supabase not configured, skipping set_plan_status")
+        return False
+    try:
+        client.table("plans").update({"status": status}).eq("id", plan_id).execute()
+        print(f"[mission_ledger] Updated plan {plan_id} -> {status}")
+        return True
+    except Exception as e:
+        print(f"[mission_ledger] Error updating plan status: {e}")
         return False

@@ -25,7 +25,10 @@ def get_supabase_client():
         return _supabase_client
 
     supabase_url = os.environ.get("SUPABASE_URL")
-    supabase_key = os.environ.get("SUPABASE_KEY")
+    supabase_key = os.environ.get("SUPABASE_KEY") # must be service_role key
+
+    if supabase_key and supabase_key.startswith("sb_"):
+        print("[supabase_client] WARNING: Using publishable key; service_role key is required")
 
     if not supabase_url or not supabase_key:
         print(f"[supabase_client] Missing env vars - SUPABASE_URL: {'set' if supabase_url else 'NOT SET'}, SUPABASE_KEY: {'set' if supabase_key else 'NOT SET'}")
@@ -46,7 +49,18 @@ def get_supabase_client():
         print(f"[supabase_client] Error creating Supabase client: {e}")
         return None
 
-
 def is_supabase_configured() -> bool:
     """Check if Supabase is properly configured."""
     return get_supabase_client() is not None
+
+def require_supabase_client():
+    """
+    Like get_supabase_client(), but raises if Supabase is not configured.
+    Use this for executive-critical paths where running without logging is unacceptable.
+    """
+    client = get_supabase_client()
+    if client is None:
+        raise RuntimeError(
+            "Supabase client not configured. Ensure SUPABASE_URL and SUPABASE_KEY (service_role) are set."
+        )
+    return client
