@@ -45,9 +45,13 @@ from server.database.mission_ledger import (
     log_event,
 )
 
+from server.database.mission_ledger import create_env_version, create_plan, log_event, create_mission_run
+
 _current_env = None
 _current_run_id = None
 _current_env_version_id = None
+_current_plan_id = None
+
 
 
 # Import polygon wrapping for visualization (same as delivery planner)
@@ -599,6 +603,8 @@ def receive_environment(payload: Dict[str, Any]):
             reason=event_type.lower(),   # "env_imported" or "env_edited"
         )
 
+        print(f"✅ create_env_version returned: {_current_env_version_id}", flush=True)
+
         # Log env event with lightweight summary (avoid storing huge payload twice)
         try:
             airports_n = len(env.get("airports", []))
@@ -802,6 +808,22 @@ def solve(req: SolveRequest):
     """
     env = req.env
     drone_configs = req.drone_configs
+
+    global _current_run_id, _current_env_version_id, _current_plan_id
+
+    # Ensure run exists (minimal)
+    if _current_run_id is None:
+        _current_run_id = create_mission_run(system_version="v4", mission_name="isr-run")
+
+    # Snapshot env used for this solve
+    if _current_run_id is not None:
+        _current_env_version_id = create_env_version(
+            run_id=_current_run_id,
+            env_snapshot=env,
+            source="human",
+            reason="solve",
+        )
+
     # allocation_strategy = req.allocation_strategy  # TODO: integrate with solve_mission
 
     # Use the original solver (allocation strategy integration pending)
@@ -838,6 +860,32 @@ def solve(req: SolveRequest):
         if sams_for_wrapping:
             wrapped_polygon_arrays, _ = wrap_sams(sams_for_wrapping)
             wrapped_polygons = [poly.tolist() for poly in wrapped_polygon_arrays]
+ 
+    # Store a draft plan for this solve
+    if _current_run_id is not None:
+        trajectories = {d: r.get("trajectory", []) for d, r in routes.items()}
+
+        metrics = {}
+        for d, r in routes.items():
+            metrics[d] = {
+                "distance": r.get("distance", 0.0),
+                "points": r.get("points", 0),
+                "fuel_budget": r.get("fuel_budget", 0.0),
+                "route": r.get("route", []),
+                "sequence": sequences.get(d, ""),
+            }
+
+        _current_plan_id = create_plan(
+            run_id=_current_run_id,
+            env_version_id=_current_env_version_id,
+            status="draft",
+            starts_by_drone={},
+            allocation={},
+            trajectories=trajectories,
+            metrics=metrics,
+            notes="draft from /api/solve",
+        )
+
 
     return SolveResponse(
         success=True,
