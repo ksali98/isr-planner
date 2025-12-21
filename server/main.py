@@ -1,7 +1,7 @@
+import os
 import json
 import math
 import sys
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -41,11 +41,7 @@ from .solver.trajectory_planner import ISRTrajectoryPlanner
 
 from server.database.mission_ledger import (
     create_mission_run,
-    print(f"✅ create_mission_run returned: {_current_run_id}", flush=True)
-
     create_env_version,
-    print(f"✅ create_env_version returned: {_current_env_version_id}", flush=True)
-
     log_event,
 )
 
