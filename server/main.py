@@ -1292,6 +1292,60 @@ async def agent_chat_v4(req: AgentChatRequest):
     """
     try:
         # -------------------------------
+        # Supabase logging for agent plans
+        # -------------------------------
+        global _current_run_id, _current_env_version_id, _current_plan_id
+
+        raw_routes = result.get("routes") or {}
+        trajectories = result.get("trajectories") or {}
+
+        if raw_routes:
+            # Ensure a run exists
+            if _current_run_id is None:
+                _current_run_id = create_mission_run(system_version="v4-agent", mission_name="isr-agent-run")
+
+            # Snapshot env for this agent solve
+            if _current_run_id is not None:
+                _current_env_version_id = create_env_version(
+                    run_id=_current_run_id,
+                    env_snapshot=env,
+                    source="agent",
+                    reason="agent_chat_v4",
+                )
+
+            # Build metrics similar to /api/solve
+            metrics = {}
+            for d, route_info in raw_routes.items():
+                if isinstance(route_info, dict):
+                    metrics[str(d)] = {
+                        "distance": route_info.get("distance", 0.0),
+                        "points": route_info.get("points", 0),
+                        "fuel_budget": route_info.get("fuel_budget", 0.0),
+                        "route": route_info.get("route", []),
+                        "sequence": route_info.get("sequence", ""),
+                    }
+
+            # Store a draft plan
+            if _current_run_id is not None:
+                _current_plan_id = create_plan(
+                    run_id=_current_run_id,
+                    env_version_id=_current_env_version_id,
+                    status="draft",
+                    starts_by_drone={},      # optional; fill later
+                    allocation=result.get("allocation") or {},
+                    trajectories=trajectories,
+                    metrics=metrics,
+                    notes="draft from /api/agents/chat-v4",
+                )
+
+                # Optional: log event
+                log_event(_current_run_id, "AGENT_PLAN_DRAFT_CREATED", {
+                    "env_version_id": _current_env_version_id,
+                    "plan_id": _current_plan_id,
+                    "num_drones": len(raw_routes),
+                })
+
+        # -------------------------------
         # 1. Resolve env & configs
         # -------------------------------
         env = req.env
