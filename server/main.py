@@ -817,12 +817,18 @@ def solve(req: SolveRequest):
 
     # Snapshot env used for this solve
     if _current_run_id is not None:
-        _current_env_version_id = create_env_version(
-            run_id=_current_run_id,
-            env_snapshot=env,
-            source="human",
-            reason="solve",
-        )
+        print("✅ About to create_env_version. run_id =", _current_run_id, flush=True)
+        try:
+            _current_env_version_id = create_env_version(
+                run_id=_current_run_id,
+                env_snapshot=env,
+                source="human",
+                reason="solve",
+            )
+            print("✅ create_env_version returned:", _current_env_version_id, flush=True)
+        except Exception as e:
+            print("❌ create_env_version raised:", repr(e), flush=True)
+            raise
 
     # allocation_strategy = req.allocation_strategy  # TODO: integrate with solve_mission
 
@@ -874,7 +880,8 @@ def solve(req: SolveRequest):
                 "route": r.get("route", []),
                 "sequence": sequences.get(d, ""),
             }
-
+    print("✅ About to create_plan. env_version_id =", _current_env_version_id, flush=True)
+    try:
         _current_plan_id = create_plan(
             run_id=_current_run_id,
             env_version_id=_current_env_version_id,
@@ -885,6 +892,11 @@ def solve(req: SolveRequest):
             metrics=metrics,
             notes="draft from /api/solve",
         )
+        print("✅ create_plan returned:", _current_plan_id, flush=True)
+    except Exception as e:
+        print("❌ create_plan raised:", repr(e), flush=True)
+        raise
+
 
 
     return SolveResponse(
