@@ -2887,6 +2887,21 @@ function attachIOHandlers() {
   } else {
     appendDebugLine("attachIOHandlers: no btn-export element found; export disabled.");
   }
+
+  // Agent tab Import/Export buttons (duplicate functionality for convenience)
+  const agentImportBtn = $("agent-import-btn");
+  const agentExportBtn = $("agent-export-btn");
+
+  if (agentImportBtn) {
+    agentImportBtn.addEventListener("click", () => {
+      fileInput.value = "";
+      fileInput.click();
+    });
+  }
+
+  if (agentExportBtn) {
+    agentExportBtn.addEventListener("click", exportEnvironment);
+  }
 }
 
 // ----------------------------------------------------
@@ -4903,12 +4918,10 @@ window.addEventListener("load", () => {
 // ----------------------------------------------------
 function attachMissionControlHandlers() {
   const mcRunPlanner = $("mc-run-planner");
-  const mcAccept = $("mc-accept");
   const mcDiscard = $("mc-discard");
   const mcEdit = $("mc-edit");
   const mcDisplay = $("mc-display");
   const mcAnimate = $("mc-animate");
-  const mcStop = $("mc-stop");
   const mcCut = $("mc-cut");
   const mcReset = $("mc-reset");
 
@@ -4918,10 +4931,17 @@ function attachMissionControlHandlers() {
     updateMissionControlState();
   });
 
-  // Run Planner button
+  // Run Planner / Accept toggle button
   if (mcRunPlanner) {
     mcRunPlanner.addEventListener("click", () => {
-      runPlanner();
+      const perms = getUiPermissions();
+      if (perms.canAcceptSolution) {
+        // In Accept mode - accept the solution
+        acceptSolution();
+      } else if (perms.canSolve) {
+        // In Run Planner mode - run the planner
+        runPlanner();
+      }
     });
   }
 
@@ -4932,12 +4952,12 @@ function attachMissionControlHandlers() {
     });
   }
 
-  // Edit button - toggles edit mode
+  // Edit button - toggles edit mode (Edit ↔ Done)
   if (mcEdit) {
     mcEdit.addEventListener("click", () => {
       const perms = getUiPermissions();
       if (perms.isEditing) {
-        // Currently editing - accept edits and exit
+        // Currently editing - accept edits and exit (Done)
         acceptEdits();
       } else if (perms.canEnterEdit) {
         // Enter edit mode
@@ -4946,19 +4966,7 @@ function attachMissionControlHandlers() {
     });
   }
 
-  // Unified Accept button - works for both draft solution and edits
-  if (mcAccept) {
-    mcAccept.addEventListener("click", () => {
-      const perms = getUiPermissions();
-      if (perms.isEditing) {
-        acceptEdits();
-      } else if (perms.canAcceptSolution) {
-        acceptSolution();
-      }
-    });
-  }
-
-  // Unified Discard button - works for both draft solution and edits
+  // Discard button - works for both draft solution and edits
   if (mcDiscard) {
     mcDiscard.addEventListener("click", () => {
       const perms = getUiPermissions();
@@ -4997,13 +5005,6 @@ function attachMissionControlHandlers() {
     });
   }
 
-  // Stop button
-  if (mcStop) {
-    mcStop.addEventListener("click", () => {
-      stopAnimation();
-    });
-  }
-
   // Cut/Checkpoint button
   if (mcCut) {
     mcCut.addEventListener("click", () => {
@@ -5028,21 +5029,43 @@ function updateMissionControlState() {
 
   // Get all Mission Control buttons
   const mcRunPlanner = $("mc-run-planner");
-  const mcAccept = $("mc-accept");
   const mcDiscard = $("mc-discard");
   const mcEdit = $("mc-edit");
   const mcDisplay = $("mc-display");
   const mcAnimate = $("mc-animate");
-  const mcStop = $("mc-stop");
   const mcCut = $("mc-cut");
   const mcReset = $("mc-reset");
   const mcStatusText = $("mc-status-text");
   const mcSegmentInfo = $("mc-segment-info");
   const mcPanel = $("mission-control");
 
-  // Update button enabled/disabled states
+  // Run Planner / Accept toggle button
   if (mcRunPlanner) {
-    mcRunPlanner.disabled = !perms.canSolve;
+    if (perms.canAcceptSolution) {
+      // Show as Accept button
+      mcRunPlanner.disabled = false;
+      mcRunPlanner.textContent = "✓ Accept";
+      mcRunPlanner.classList.remove("mc-btn-primary");
+      mcRunPlanner.classList.add("mc-btn-success");
+    } else if (perms.canSolve) {
+      // Show as Run Planner button
+      mcRunPlanner.disabled = false;
+      mcRunPlanner.textContent = "Run Planner";
+      mcRunPlanner.classList.remove("mc-btn-success");
+      mcRunPlanner.classList.add("mc-btn-primary");
+    } else if (mode === MissionMode.DRAFT_READY) {
+      // Solution ready but solving - keep as Accept
+      mcRunPlanner.disabled = false;
+      mcRunPlanner.textContent = "✓ Accept";
+      mcRunPlanner.classList.remove("mc-btn-primary");
+      mcRunPlanner.classList.add("mc-btn-success");
+    } else {
+      // Disabled state (e.g., while solving)
+      mcRunPlanner.disabled = true;
+      mcRunPlanner.textContent = "Run Planner";
+      mcRunPlanner.classList.remove("mc-btn-success");
+      mcRunPlanner.classList.add("mc-btn-primary");
+    }
   }
 
   // Display button - enabled when there are routes to display
@@ -5051,30 +5074,25 @@ function updateMissionControlState() {
     mcDisplay.disabled = !hasRoutes;
   }
 
-  // Edit button - toggle active state and enable/disable
+  // Edit button - toggle between Edit and Done
   if (mcEdit) {
     mcEdit.disabled = !perms.canEnterEdit && !perms.isEditing;
     if (perms.isEditing) {
       mcEdit.classList.add("active");
-      mcEdit.textContent = "Editing...";
+      mcEdit.textContent = "Done";
     } else {
       mcEdit.classList.remove("active");
       mcEdit.textContent = "Edit";
     }
   }
 
-  // Unified Accept - enabled when can accept solution OR can accept edits
-  if (mcAccept) {
-    mcAccept.disabled = !perms.canAcceptSolution && !perms.canAcceptEdits;
-  }
-
-  // Unified Discard - enabled when can discard draft OR is editing
+  // Discard - enabled when can discard draft OR is editing
   if (mcDiscard) {
     mcDiscard.disabled = !perms.canDiscardDraft && !perms.isEditing;
   }
 
+  // Animate/Pause toggle button
   if (mcAnimate) {
-    // Toggle button: shows Pause when animating, Resume when paused, Animate otherwise
     if (perms.canPause) {
       // Currently animating - show Pause
       mcAnimate.disabled = false;
@@ -5100,11 +5118,6 @@ function updateMissionControlState() {
       mcAnimate.classList.remove("mc-btn-pause");
       mcAnimate.classList.add("mc-btn-play");
     }
-  }
-
-  if (mcStop) {
-    // Stop is available when animating or paused
-    mcStop.disabled = mode !== MissionMode.ANIMATING && mode !== MissionMode.PAUSED_MID_ANIMATION;
   }
 
   if (mcCut) {

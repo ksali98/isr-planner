@@ -117,6 +117,16 @@ body {
   font-weight: 500;
 }
 
+.agent-header-buttons {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.agent-header-buttons .small-btn {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.75rem;
+}
+
 /* Canvas – SQUARE, DARK, NO STRETCHING */
 .canvas-card {
   display: flex;

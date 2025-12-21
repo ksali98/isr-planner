@@ -88,7 +88,6 @@
             <div class="mc-group mc-group-planning">
               <button id="mc-run-planner" class="mc-btn mc-btn-primary">Run Planner</button>
               <button id="mc-edit" class="mc-btn mc-btn-edit">Edit</button>
-              <button id="mc-accept" class="mc-btn mc-btn-success" disabled>Accept</button>
               <button id="mc-discard" class="mc-btn mc-btn-danger" disabled>Discard</button>
             </div>
             <span class="mc-divider"></span>
@@ -100,7 +99,6 @@
             <!-- Animation group -->
             <div class="mc-group mc-group-animation">
               <button id="mc-animate" class="mc-btn mc-btn-play" disabled>Animate</button>
-              <button id="mc-stop" class="mc-btn mc-btn-stop" disabled>Stop</button>
               <button id="mc-cut" class="mc-btn mc-btn-cut" disabled>Cut</button>
               <button id="mc-reset" class="mc-btn mc-btn-reset" disabled>Reset</button>
             </div>
@@ -463,6 +461,10 @@
           <section class="tab-pane" id="tab-agents">
           <div class="card-header">
             <span>ISR Mission Planner Agent</span>
+            <div class="agent-header-buttons">
+              <button id="agent-import-btn" class="small-btn">Import</button>
+              <button id="agent-export-btn" class="small-btn">Export</button>
+            </div>
           </div>
           <div class="agent-chat-container">
             <!-- Input area (at top) -->
@@ -504,6 +506,6 @@
     </main>
   </div>
 
-  <script src="/static/isr.js?v=20251218statemachine56"></script>
+  <script src="/static/isr.js?v=20251221togglebtns1"></script>
 </body>
 </html>
