@@ -1,6 +1,7 @@
 import json
 import math
 import sys
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -40,12 +41,18 @@ from .solver.trajectory_planner import ISRTrajectoryPlanner
 
 from server.database.mission_ledger import (
     create_mission_run,
+    print(f"✅ create_mission_run returned: {_current_run_id}", flush=True)
+
     create_env_version,
+    print(f"✅ create_env_version returned: {_current_env_version_id}", flush=True)
+
     log_event,
 )
 
+_current_env = None
 _current_run_id = None
 _current_env_version_id = None
+
 
 # Import polygon wrapping for visualization (same as delivery planner)
 # Add paths for both local dev and Docker deployment
@@ -556,6 +563,13 @@ def receive_environment(payload: Dict[str, Any]):
     Also snapshots the env into Supabase (env_versions) and logs events.
     """
     global _current_env, _current_run_id, _current_env_version_id
+
+
+    print("✅ HIT POST /api/environment", flush=True)
+    print("✅ SUPABASE_URL set:", bool(os.environ.get("SUPABASE_URL")), flush=True)
+    print("✅ SUPABASE_KEY set:", bool(os.environ.get("SUPABASE_KEY")), flush=True)
+    print("✅ payload keys:", list(payload.keys()), flush=True)
+
 
     env = payload.get("environment")
     if not isinstance(env, dict):
