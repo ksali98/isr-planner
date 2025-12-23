@@ -139,6 +139,10 @@ const missionState = {
   // "replay_cut" = checkpoint entered from animation cut (solve disabled)
   // null = checkpoint entered from edits/manual (solve enabled)
   checkpointSource: null,
+
+  // Segmented mission workflow - for solving N segments sequentially
+  segmentedMission: null,      // Full segmented mission definition from import
+  currentBuildSegmentIndex: 0, // Which segment we're currently solving (0-indexed)
 };
 
 // ----------------------------------------------------
@@ -408,9 +412,15 @@ function getUiPermissions() {
   // CHECKPOINT from replay/cut disables solve; CHECKPOINT from edits allows solve
   const checkpointAllowsSolve = (mode === MissionMode.CHECKPOINT && missionState.checkpointSource !== "replay_cut");
 
+  // Segmented mission: block animate until all segments solved and accepted
+  const segmented = !!missionState.segmentedMission;
+  const segCount = segmented ? missionState.segmentedMission.segments.length : 0;
+  const segIdx = segmented ? (missionState.currentBuildSegmentIndex || 0) : 0;
+  const segmentedComplete = !segmented || (segIdx >= segCount);
+
   return {
     // Animation controls
-    canAnimate: mode === MissionMode.READY_TO_ANIMATE,
+    canAnimate: mode === MissionMode.READY_TO_ANIMATE && segmentedComplete,
     canResume: mode === MissionMode.PAUSED_MID_ANIMATION,
     canPause: mode === MissionMode.ANIMATING,
     canCut: mode === MissionMode.ANIMATING || mode === MissionMode.PAUSED_MID_ANIMATION,
@@ -740,12 +750,44 @@ function acceptSolution() {
   // Clear the draft
   missionState.draftSolution = null;
 
-  // Transition to READY_TO_ANIMATE
-  setMissionMode(MissionMode.READY_TO_ANIMATE, "solution accepted");
-
   appendDebugLine(`✅ Solution accepted as segment ${segment.index + 1}`);
   appendDebugLine(`   Visited targets retained: [${state.visitedTargets.join(", ")}]`);
   appendDebugLine(`   MissionReplay: ${missionReplay.getSegmentCount()} segments`);
+
+  // --- Segmented mission workflow: advance to next segment or finish ---
+  if (missionState.segmentedMission) {
+    const nextIdx = (missionState.currentBuildSegmentIndex || 0) + 1;
+    missionState.currentBuildSegmentIndex = nextIdx;
+
+    const nextSeg = missionState.segmentedMission.segments[nextIdx];
+    if (nextSeg) {
+      // Load next segment env for solving
+      state.env = JSON.parse(JSON.stringify(nextSeg.env));
+      state.droneConfigs = JSON.parse(JSON.stringify(nextSeg.drone_configs || state.env.drone_configs || {}));
+      state.env.drone_configs = state.droneConfigs;
+
+      // Clear per-segment draft-only visuals
+      missionState.draftSolution = null;
+
+      // Back to IDLE so user can Solve next segment
+      setMissionMode(MissionMode.IDLE, `segment ${nextIdx + 1} ready to solve`);
+      appendDebugLine(`➡️ Loaded segment ${nextIdx + 1} env. Ready to Solve.`);
+
+      initDroneConfigsFromEnv();
+      updateSamWrappingClientSide();
+      drawEnvironment();
+      return;
+    } else {
+      // No more segments: now user may replay/animate full mission
+      setMissionMode(MissionMode.READY_TO_ANIMATE, "all segments accepted; ready to replay");
+      appendDebugLine("✅ All segments accepted. Ready to Animate full mission.");
+      drawEnvironment();
+      return;
+    }
+  }
+
+  // Non-segmented mission: normal flow
+  setMissionMode(MissionMode.READY_TO_ANIMATE, "solution accepted");
   drawEnvironment();
 }
 
@@ -1828,96 +1870,56 @@ async function exportEnvironment() {
 
     appendDebugLine("📤 Exporting environment...");
 
-    // --- Decide what we are exporting (segmented vs single) ---
-    // Priority:
-    // 1) Imported segmented file (missionState.importedSegments)
-    // 2) Draft segmented solve definition (missionState.draftSolution?.segmentedSolve?.segments)
-    // 3) Committed segmented solve definition (missionState.committedSegments[0]?.solution?.segmentedSolve?.segments)
-    // 4) Fallback: single segment wrapper
+    // Always capture current drone configs into env snapshot
+    const envSnapshot = JSON.parse(JSON.stringify(state.env));
+    envSnapshot.drone_configs = JSON.parse(JSON.stringify(state.droneConfigs || envSnapshot.drone_configs || {}));
 
-    const importedSegments =
-      Array.isArray(missionState.importedSegments) ? missionState.importedSegments : null;
+    // Check if MissionReplay has segments
+    const segments = (typeof missionReplay !== "undefined" && missionReplay.getSegmentCount)
+      ? missionReplay.getSegments()
+      : [];
 
-    const draftSegments =
-      missionState.draftSolution &&
-      missionState.draftSolution.segmentedSolve &&
-      Array.isArray(missionState.draftSolution.segmentedSolve.segments)
-        ? missionState.draftSolution.segmentedSolve.segments
-        : null;
-
-    const committedSegments =
-      missionState.committedSegments &&
-      missionState.committedSegments.length > 0 &&
-      missionState.committedSegments[0].solution &&
-      missionState.committedSegments[0].solution.segmentedSolve &&
-      Array.isArray(missionState.committedSegments[0].solution.segmentedSolve.segments)
-        ? missionState.committedSegments[0].solution.segmentedSolve.segments
-        : null;
-
-    const segments = importedSegments || draftSegments || committedSegments;
-
-    // --- Build base env snapshot WITHOUT mutating state.env ---
-    const baseEnv = JSON.parse(JSON.stringify(state.env));
-    baseEnv.drone_configs = JSON.parse(JSON.stringify(state.droneConfigs || baseEnv.drone_configs || {}));
-
+    // Build export object
     let exportObj;
 
     if (segments && segments.length > 0) {
-      // Segmented wrapper
+      // SEGMENTED export - export MissionReplay segments
       exportObj = {
-        meta: {
-          schema_version: 1,
-          segment_count: segments.length,
-          cut_mode: "global_clock",
-          exported_at: new Date().toISOString(),
-          source: "isr-ui",
-        },
-        base_env: baseEnv,
-        segments: JSON.parse(JSON.stringify(segments)),
+        schema: "isr_env_v1",
+        is_segmented: true,
+        segment_count: segments.length,
+        segments: segments.map(s => ({
+          index: s.index,
+          env: s.env,
+          solution: s.solution,
+          prefixDistances: s.prefixDistances || null,
+          isCheckpointReplan: !!s.isCheckpointReplan,
+          timestamp: s.timestamp || null,
+        })),
       };
     } else {
-      // Single segment wrapper (N=1) so naming + schema are consistent
+      // NON-segmented export (backward compatible)
       exportObj = {
-        meta: {
-          schema_version: 1,
-          segment_count: 1,
-          cut_mode: "none",
-          exported_at: new Date().toISOString(),
-          source: "isr-ui",
-        },
-        base_env: baseEnv,
-        segments: [
-          {
-            segment_id: 1,
-            cut_global_clock: null,
-            killed_drones: [],
-            env: JSON.parse(JSON.stringify(baseEnv)),
-            drone_configs: JSON.parse(JSON.stringify(baseEnv.drone_configs)),
-            visited_targets: [],
-          },
-        ],
+        schema: "isr_env_v1",
+        is_segmented: false,
+        segment_count: 1,
+        env: envSnapshot,
       };
     }
 
-    // --- Filename: include segment count ---
-    // Determine segment count N from multiple sources
-    const N =
-      (state.env && Array.isArray(state.env.segments)) ? state.env.segments.length :
-      (missionReplay && typeof missionReplay.getSegmentCount === "function" && missionReplay.getSegmentCount() > 0) ? missionReplay.getSegmentCount() :
-      1;
-
-    // Example: isr_env2512231030_N3_12.json
+    // Filename with segment count
     const now = new Date();
     const yy = String(now.getFullYear()).slice(-2);
     const mo = String(now.getMonth() + 1).padStart(2, "0");
     const dd = String(now.getDate()).padStart(2, "0");
     const hh = String(now.getHours()).padStart(2, "0");
     const mm = String(now.getMinutes()).padStart(2, "0");
+    const N = exportObj.segment_count || 1;
 
     const filename = `isr_env${yy}${mo}${dd}${hh}${mm}_N${N}_${_exportCounter}.json`;
     _exportCounter++;
 
-    // --- Download ---
+    // Download
     const blob = new Blob([JSON.stringify(exportObj, null, 2)], {
       type: "application/json",
     });
@@ -2586,16 +2588,40 @@ function updateAllocationDisplay(allocations, strategy) {
 
 /**
  * Check if JSON data is a segmented mission file (vs plain environment)
+ * Detection: data.segments is array and data.segments[0].env exists
  */
 function isSegmentedMissionJson(data) {
-  return !!(
-    data &&
-    typeof data === "object" &&
-    data.meta &&
-    typeof data.meta.segment_count === "number" &&
-    Array.isArray(data.segments) &&
-    data.base_env
-  );
+  return data && Array.isArray(data.segments) && data.segments.length > 0 && data.segments[0].env;
+}
+
+/**
+ * Load a segmented mission from JSON - loads only segment 1 initially
+ * User must solve each segment sequentially before animating
+ */
+function loadSegmentedMissionFromJson(data, filename = "") {
+  // Store whole definition for segment-by-segment workflow
+  missionState.segmentedMission = JSON.parse(JSON.stringify(data));
+  missionState.currentBuildSegmentIndex = 0;
+
+  // Load only segment 0 (first segment) env
+  const seg0 = data.segments[0];
+  state.env = JSON.parse(JSON.stringify(seg0.env));
+
+  // Drone configs: segment overrides env overrides current
+  state.droneConfigs = JSON.parse(JSON.stringify(seg0.drone_configs || state.env.drone_configs || {}));
+  state.env.drone_configs = state.droneConfigs;
+
+  // Reset mission/solution state
+  missionReplay.clear();
+  missionState.committedSegments = [];
+  missionState.draftSolution = null;
+  state.visitedTargets = [];
+  state.missionId = null;
+
+  // IMPORTANT: disable animation until all segments are solved and accepted
+  setMissionMode(MissionMode.IDLE, "segmented mission loaded (segment 1 only)");
+  appendDebugLine(`📥 Loaded SEGMENTED mission: ${data.segments.length} segments. Showing segment 1 env.`);
+  appendDebugLine(`   Solve each segment sequentially. Animate enabled after all accepted.`);
 }
 
 /**
@@ -2626,36 +2652,39 @@ function loadFromJson(data, filename = "") {
     state.animation.drones = {};
   }
 
-  // Reset replay + draft
+  // Reset replay + draft + segmented mission state
   missionReplay.clear();
   missionState.draftSolution = null;
   missionState.checkpointSource = null;
+  missionState.segmentedMission = null;
+  missionState.currentBuildSegmentIndex = 0;
 
-  // --- Case 1: segmented mission JSON ---
+  // --- Case 1: Segmented mission JSON ---
   if (isSegmentedMissionJson(data)) {
-    // Load base env as the current env
-    state.env = JSON.parse(JSON.stringify(data.base_env));
+    loadSegmentedMissionFromJson(data, filename);
+    initDroneConfigsFromEnv();
+    updateSamWrappingClientSide();
+    drawEnvironment();
+    const envNameEl = $("env-filename");
+    if (envNameEl) envNameEl.textContent = filename || "(imported)";
+    return;
+  }
 
-    // Store meta if you want
-    state.segmentMeta = JSON.parse(JSON.stringify(data.meta));
+  // --- Case 2: New non-segmented format (schema: isr_env_v1, is_segmented: false) ---
+  if (data && data.schema === "isr_env_v1" && data.is_segmented === false && data.env) {
+    state.env = JSON.parse(JSON.stringify(data.env));
+    setMissionMode(MissionMode.IDLE, "new environment loaded");
+    appendDebugLine(`Imported environment from ${filename}`);
 
-    // Build MissionReplay segments from JSON
-    // Segment 0 is typically the accepted solution of segment 1 after solving.
-    // For import: we just preload segment definitions so agentic solve can step them.
-    // We do NOT mark visited targets here.
-    //
-    // For now: just store segments in a normalized internal list so both systems can use it.
-    missionState.importedSegments = JSON.parse(JSON.stringify(data.segments));
-
-    // Put the UI in IDLE ready to solve segment 1
-    setMissionMode(MissionMode.IDLE, "segmented mission loaded");
-    appendDebugLine(`Imported SEGMENTED mission (${data.meta.segment_count} segments) from ${filename}`);
+  } else if (data && data.environment) {
+    // --- Case 3: Wrapped format (data.environment) ---
+    state.env = data.environment;
+    setMissionMode(MissionMode.IDLE, "new environment loaded");
+    appendDebugLine(`Imported environment from ${filename}`);
 
   } else {
-    // --- Case 2: plain env JSON (existing behavior) ---
-    if (data.environment) state.env = data.environment;
-    else state.env = data;
-
+    // --- Case 4: Plain env JSON (legacy/backward compatible) ---
+    state.env = data;
     setMissionMode(MissionMode.IDLE, "new environment loaded");
     appendDebugLine(`Imported environment from ${filename}`);
   }
