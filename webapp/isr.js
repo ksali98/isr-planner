@@ -134,6 +134,11 @@ const missionState = {
 
   // Runtime state for animation resume
   pauseContext: null,          // { droneStates: {...} } - saved state for resume
+
+  // Checkpoint source tracking - distinguishes replay cuts from manual replan
+  // "replay_cut" = checkpoint entered from animation cut (solve disabled)
+  // null = checkpoint entered from edits/manual (solve enabled)
+  checkpointSource: null,
 };
 
 // ----------------------------------------------------
@@ -400,6 +405,9 @@ function getUiPermissions() {
   const hasCommittedPlan = missionState.committedSegments.length > 0;
   const hasDraftSolution = missionState.draftSolution !== null;
 
+  // CHECKPOINT from replay/cut disables solve; CHECKPOINT from edits allows solve
+  const checkpointAllowsSolve = (mode === MissionMode.CHECKPOINT && missionState.checkpointSource !== "replay_cut");
+
   return {
     // Animation controls
     canAnimate: mode === MissionMode.READY_TO_ANIMATE,
@@ -415,7 +423,7 @@ function getUiPermissions() {
     canAcceptEdits: mode === MissionMode.EDITING_ENV,
 
     // Planning controls
-    canSolve: mode === MissionMode.IDLE || mode === MissionMode.CHECKPOINT,
+    canSolve: (mode === MissionMode.IDLE) || checkpointAllowsSolve,
     canOptimize: mode === MissionMode.DRAFT_READY,
     canAcceptSolution: mode === MissionMode.DRAFT_READY,
     canDiscardDraft: mode === MissionMode.DRAFT_READY,
@@ -639,6 +647,8 @@ function acceptEdits() {
 
   if (hasCommittedPlan) {
     // If we have a committed plan, we're in checkpoint mode - need to replan
+    // Clear replay_cut flag since this is intentional replan from edits
+    missionState.checkpointSource = null;
     setMissionMode(MissionMode.CHECKPOINT, "edits accepted, ready to replan");
   } else {
     // No committed plan yet - go back to IDLE
@@ -673,6 +683,8 @@ function cancelEdits() {
   // Determine which state to return to
   const hasCommittedPlan = missionState.committedSegments.length > 0;
   if (hasCommittedPlan) {
+    // Clear replay_cut flag since this is intentional replan from edits
+    missionState.checkpointSource = null;
     setMissionMode(MissionMode.CHECKPOINT, "edits cancelled");
   } else {
     setMissionMode(MissionMode.IDLE, "edits cancelled");
@@ -849,6 +861,7 @@ function resetMission() {
   missionState.draftEnv = null;
   missionState.draftSolution = null;
   missionState.pauseContext = null;
+  missionState.checkpointSource = null;
 
   // Restore the first segment's solution to the UI using MissionReplay
   const firstSegment = missionReplay.getSegment(0);
@@ -1815,21 +1828,97 @@ async function exportEnvironment() {
 
     appendDebugLine("📤 Exporting environment...");
 
-    // Include drone configs in the environment
-    state.env.drone_configs = state.droneConfigs;
+    // --- Decide what we are exporting (segmented vs single) ---
+    // Priority:
+    // 1) Imported segmented file (missionState.importedSegments)
+    // 2) Draft segmented solve definition (missionState.draftSolution?.segmentedSolve?.segments)
+    // 3) Committed segmented solve definition (missionState.committedSegments[0]?.solution?.segmentedSolve?.segments)
+    // 4) Fallback: single segment wrapper
 
-    // Generate filename: isr_envYYMMDDHHMM_n.json
+    const importedSegments =
+      Array.isArray(missionState.importedSegments) ? missionState.importedSegments : null;
+
+    const draftSegments =
+      missionState.draftSolution &&
+      missionState.draftSolution.segmentedSolve &&
+      Array.isArray(missionState.draftSolution.segmentedSolve.segments)
+        ? missionState.draftSolution.segmentedSolve.segments
+        : null;
+
+    const committedSegments =
+      missionState.committedSegments &&
+      missionState.committedSegments.length > 0 &&
+      missionState.committedSegments[0].solution &&
+      missionState.committedSegments[0].solution.segmentedSolve &&
+      Array.isArray(missionState.committedSegments[0].solution.segmentedSolve.segments)
+        ? missionState.committedSegments[0].solution.segmentedSolve.segments
+        : null;
+
+    const segments = importedSegments || draftSegments || committedSegments;
+
+    // --- Build base env snapshot WITHOUT mutating state.env ---
+    const baseEnv = JSON.parse(JSON.stringify(state.env));
+    baseEnv.drone_configs = JSON.parse(JSON.stringify(state.droneConfigs || baseEnv.drone_configs || {}));
+
+    let exportObj;
+
+    if (segments && segments.length > 0) {
+      // Segmented wrapper
+      exportObj = {
+        meta: {
+          schema_version: 1,
+          segment_count: segments.length,
+          cut_mode: "global_clock",
+          exported_at: new Date().toISOString(),
+          source: "isr-ui",
+        },
+        base_env: baseEnv,
+        segments: JSON.parse(JSON.stringify(segments)),
+      };
+    } else {
+      // Single segment wrapper (N=1) so naming + schema are consistent
+      exportObj = {
+        meta: {
+          schema_version: 1,
+          segment_count: 1,
+          cut_mode: "none",
+          exported_at: new Date().toISOString(),
+          source: "isr-ui",
+        },
+        base_env: baseEnv,
+        segments: [
+          {
+            segment_id: 1,
+            cut_global_clock: null,
+            killed_drones: [],
+            env: JSON.parse(JSON.stringify(baseEnv)),
+            drone_configs: JSON.parse(JSON.stringify(baseEnv.drone_configs)),
+            visited_targets: [],
+          },
+        ],
+      };
+    }
+
+    // --- Filename: include segment count ---
+    // Determine segment count N from multiple sources
+    const N =
+      (state.env && Array.isArray(state.env.segments)) ? state.env.segments.length :
+      (missionReplay && typeof missionReplay.getSegmentCount === "function" && missionReplay.getSegmentCount() > 0) ? missionReplay.getSegmentCount() :
+      1;
+
+    // Example: isr_env2512231030_N3_12.json
     const now = new Date();
     const yy = String(now.getFullYear()).slice(-2);
-    const mo = String(now.getMonth() + 1).padStart(2, '0');
-    const dd = String(now.getDate()).padStart(2, '0');
-    const hh = String(now.getHours()).padStart(2, '0');
-    const mm = String(now.getMinutes()).padStart(2, '0');
-    const filename = `isr_env${yy}${mo}${dd}${hh}${mm}_${_exportCounter}.json`;
+    const mo = String(now.getMonth() + 1).padStart(2, "0");
+    const dd = String(now.getDate()).padStart(2, "0");
+    const hh = String(now.getHours()).padStart(2, "0");
+    const mm = String(now.getMinutes()).padStart(2, "0");
+
+    const filename = `isr_env${yy}${mo}${dd}${hh}${mm}_N${N}_${_exportCounter}.json`;
     _exportCounter++;
 
-    // Create blob and download
-    const blob = new Blob([JSON.stringify(state.env, null, 2)], {
+    // --- Download ---
+    const blob = new Blob([JSON.stringify(exportObj, null, 2)], {
       type: "application/json",
     });
     const url = URL.createObjectURL(blob);
@@ -1842,7 +1931,6 @@ async function exportEnvironment() {
     URL.revokeObjectURL(url);
 
     appendDebugLine(`✅ Exported as ${filename}`);
-
   } catch (err) {
     appendDebugLine(`❌ Export error: ${err.message}`);
   }
@@ -2495,9 +2583,95 @@ function updateAllocationDisplay(allocations, strategy) {
 // ----------------------------------------------------
 // Import / Export
 // ----------------------------------------------------
-// ----------------------------------------------------
-// Import / Export
-// ----------------------------------------------------
+
+/**
+ * Check if JSON data is a segmented mission file (vs plain environment)
+ */
+function isSegmentedMissionJson(data) {
+  return !!(
+    data &&
+    typeof data === "object" &&
+    data.meta &&
+    typeof data.meta.segment_count === "number" &&
+    Array.isArray(data.segments) &&
+    data.base_env
+  );
+}
+
+/**
+ * Load environment or segmented mission from JSON data
+ * Centralizes all import logic for both plain env and segmented mission files
+ */
+function loadFromJson(data, filename = "") {
+  // Full reset for any import
+  state.envFilename = filename || "";
+  state.missionId = null;
+  state.routes = {};
+  state.sequences = {};
+  state.trajectoryVisible = {};
+  state.visitedTargets = [];
+  state.initialEnvSnapshot = null;
+  state.missionHistory = [];
+  state.targetSegmentMap = {};
+  state.currentCutSegment = 1;
+  state.previouslyAssignedTargets = [];
+
+  // Stop animation if running
+  if (state.animation) {
+    if (state.animation.animationId) {
+      cancelAnimationFrame(state.animation.animationId);
+      state.animation.animationId = null;
+    }
+    state.animation.active = false;
+    state.animation.drones = {};
+  }
+
+  // Reset replay + draft
+  missionReplay.clear();
+  missionState.draftSolution = null;
+  missionState.checkpointSource = null;
+
+  // --- Case 1: segmented mission JSON ---
+  if (isSegmentedMissionJson(data)) {
+    // Load base env as the current env
+    state.env = JSON.parse(JSON.stringify(data.base_env));
+
+    // Store meta if you want
+    state.segmentMeta = JSON.parse(JSON.stringify(data.meta));
+
+    // Build MissionReplay segments from JSON
+    // Segment 0 is typically the accepted solution of segment 1 after solving.
+    // For import: we just preload segment definitions so agentic solve can step them.
+    // We do NOT mark visited targets here.
+    //
+    // For now: just store segments in a normalized internal list so both systems can use it.
+    missionState.importedSegments = JSON.parse(JSON.stringify(data.segments));
+
+    // Put the UI in IDLE ready to solve segment 1
+    setMissionMode(MissionMode.IDLE, "segmented mission loaded");
+    appendDebugLine(`Imported SEGMENTED mission (${data.meta.segment_count} segments) from ${filename}`);
+
+  } else {
+    // --- Case 2: plain env JSON (existing behavior) ---
+    if (data.environment) state.env = data.environment;
+    else state.env = data;
+
+    setMissionMode(MissionMode.IDLE, "new environment loaded");
+    appendDebugLine(`Imported environment from ${filename}`);
+  }
+
+  // Initialize drone configs (from env if present)
+  initDroneConfigsFromEnv();
+
+  // Recompute SAM wrapping and redraw
+  updateSamWrappingClientSide();
+  drawEnvironment();
+
+  // Update filename label
+  const envNameEl = $("env-filename");
+  if (envNameEl) envNameEl.textContent = filename || "(imported)";
+}
+
 function attachIOHandlers() {
   const fileInput = $("file-input");
   const btnImport = $("btn-import");
@@ -2529,62 +2703,7 @@ function attachIOHandlers() {
       try {
         const text = e.target.result;
         const data = JSON.parse(text);
-
-        // Handle different formats:
-        // 1. Wrapped format: { environment: {...}, ... }
-        // 2. Raw format with drone_configs: { airports: [...], drone_configs: {...}, ... }
-        // 3. Old format: { airports: [...], ... } (no drone_configs)
-        if (data.environment) {
-          // Wrapped format from old API export
-          state.env = data.environment;
-        } else {
-          // Raw format
-          state.env = data;
-        }
-
-        state.envFilename = file.name;
-
-        // Reset mission when importing a new environment
-        state.missionId = null;
-        state.routes = {};
-        state.sequences = {};
-        state.trajectoryVisible = {};
-        state.visitedTargets = [];  // Clear visited targets for fresh import
-        state.initialEnvSnapshot = null;
-        state.missionHistory = [];
-        state.targetSegmentMap = {};  // Clear segment assignments
-        state.currentCutSegment = 1;  // Reset segment counter
-        state.previouslyAssignedTargets = [];  // Clear previously assigned targets
-
-        // Stop any running animation (guard in case animation object not yet initialized)
-        if (state.animation) {
-          if (state.animation.animationId) {
-            cancelAnimationFrame(state.animation.animationId);
-            state.animation.animationId = null;
-          }
-          state.animation.active = false;
-          state.animation.drones = {};
-        }
-
-        // Reset mission state machine and replay
-        missionReplay.clear();
-        missionState.draftSolution = null;
-        setMissionMode(MissionMode.IDLE, "new environment loaded");
-
-        // Update filename label
-        const envNameEl = $("env-filename");
-        if (envNameEl) {
-          envNameEl.textContent = file.name;
-        }
-
-        appendDebugLine(`Imported environment from ${file.name}`);
-
-        // Initialize drone configs (will use saved configs from env if present)
-        initDroneConfigsFromEnv();
-
-        // Recompute SAM wrapping client-side and redraw
-        updateSamWrappingClientSide();
-        drawEnvironment();
+        loadFromJson(data, file.name);
       } catch (err) {
         appendDebugLine("Error parsing JSON: " + err);
         console.error("Error parsing JSON:", err);
@@ -4331,7 +4450,8 @@ function cutAtCheckpoint() {
     appendDebugLine(`✅ Checkpoint set with ${Object.keys(state.checkpoint.segments || {}).length} drone segments`);
   }
 
-  // Transition to CHECKPOINT state
+  // Transition to CHECKPOINT state (from replay/cut - solve disabled)
+  missionState.checkpointSource = "replay_cut";
   setMissionMode(MissionMode.CHECKPOINT, "cut at checkpoint");
 
   // Assign segment numbers to newly visited targets
@@ -5025,6 +5145,24 @@ async function sendAgentMessage() {
   const message = inputEl.value.trim();
   if (!message) return;
 
+  // Hard guard: must have an environment loaded
+  if (!state.env) {
+    appendDebugLine("⚠️ No environment loaded. Import a JSON first.");
+    return;
+  }
+  // Optional: require at least one target (recommended)
+  if (!Array.isArray(state.env.targets) || state.env.targets.length === 0) {
+    appendDebugLine("⚠️ Environment has no targets. Add/import targets before Agent Solve.");
+    return;
+  }
+
+  // UI-permission guard: only allow agent solve when Solve is allowed by the mode machine
+  const perms = (typeof getUiPermissions === "function") ? getUiPermissions() : null;
+  if (perms && !perms.canSolve) {
+    appendDebugLine("⚠️ Agent Solve disabled in current mission mode. Reset or finish playback first.");
+    return;
+  }
+
   // Create a Q&A block container
   const qaBlock = createQABlock(message);
   chatHistory.appendChild(qaBlock);
@@ -5047,17 +5185,16 @@ async function sendAgentMessage() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        message: message,
+        message,
         env: state.env,
-        sequences: state.sequences,
         drone_configs: state.droneConfigs,
-        mission_id: state.missionId,
+        mission_id: state.missionId || null,
       }),
     });
 
     const data = await response.json();
 
-    // NEW: store mission_id returned by backend, if any
+    // Store mission_id returned by backend, if any
     if (data.mission_id) {
       state.missionId = data.mission_id;
       appendDebugLine("Current mission_id: " + state.missionId);
@@ -5069,32 +5206,34 @@ async function sendAgentMessage() {
     if (data.routes) {
       appendDebugLine("Agent routes: " + JSON.stringify(data.routes));
     }
-    
+
     // Update the Q&A block with the response
     const responseArea = qaBlock.querySelector(".qa-response");
-    if (data.reply) {
-      let replyContent = data.reply;
 
-      // Show route badges for multi-drone routes
+    if (data.reply) {
+      // 1) Escape model reply text
+      let safeReply = escapeHtml(String(data.reply || ""));
+      safeReply = safeReply.replace(/\n/g, "<br>");
+
+      // 2) Append badges (controlled HTML)
+      let badgesHtml = "";
       if (data.routes && Object.keys(data.routes).length > 0) {
-        replyContent += `\n\n`;
         for (const [did, route] of Object.entries(data.routes)) {
-          if (route && route.length > 0) {
-            replyContent += `<span class="agent-route-badge">D${did}: ${route.join(" → ")}</span> `;
+          if (Array.isArray(route) && route.length > 0) {
+            badgesHtml += ` <span class="agent-route-badge">D${escapeHtml(String(did))}: ${route.map(x => escapeHtml(String(x))).join(" → ")}</span>`;
           }
         }
-      } else if (data.route && data.route.length > 0) {
-        // Legacy single route
-        replyContent += `\n\n<span class="agent-route-badge">Route: ${data.route.join(" → ")}</span>`;
+      } else if (Array.isArray(data.route) && data.route.length > 0) {
+        badgesHtml += ` <span class="agent-route-badge">Route: ${data.route.map(x => escapeHtml(String(x))).join(" → ")}</span>`;
       }
-      responseArea.innerHTML = replyContent.replace(/\n/g, "<br>");
+
+      responseArea.innerHTML = safeReply + (badgesHtml ? "<br><br>" + badgesHtml : "");
       responseArea.classList.remove("thinking");
 
-      // If agent returned routes, apply them to the planner
+      // Apply routes to UI
       if (data.routes && Object.keys(data.routes).length > 0) {
         applyAgentRoutes(data.routes, data.trajectories, data.points, data.fuel);
-      } else if (data.route && data.route.length > 0) {
-        // Legacy single route (D1 only)
+      } else if (Array.isArray(data.route) && data.route.length > 0) {
         applyAgentRoute(data.route, data.points, data.fuel);
       }
     } else {
