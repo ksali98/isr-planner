@@ -1497,6 +1497,19 @@ def run_multi_agent_v4(
     # ---------------------------------------------------------------
     # 6) Extract routes & compute trajectories (existing logic)
     # ---------------------------------------------------------------
+
+    def get_waypoint_position(wp_id: str, env: Dict[str, Any]) -> Optional[List[float]]:
+        """Get waypoint position from environment."""
+        for airport in env.get("airports", []):
+            aid = airport.get("id", airport.get("label"))
+            if aid == wp_id:
+                return [float(airport["x"]), float(airport["y"])]
+        for target in env.get("targets", []):
+            tid = target.get("id", target.get("label"))
+            if tid == wp_id:
+                return [float(target["x"]), float(target["y"])]
+        return None
+
     routes = final_state.get("routes", {}) or {}
     response_text = final_state.get("final_response", "No response generated")
 
