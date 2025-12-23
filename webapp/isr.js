@@ -3335,6 +3335,15 @@ async function runPlanner() {
       body: bodyStr,
       signal: state.solveAbortController.signal,
     });
+
+    // Check if response is OK before parsing
+    if (!resp.ok) {
+      const errorText = await resp.text();
+      appendDebugLine(`❌ Server error (${resp.status}): ${errorText.substring(0, 200)}`);
+      $("debug-output").textContent = `Server returned ${resp.status}: ${errorText.substring(0, 500)}`;
+      return;
+    }
+
     const data = await resp.json();
 
     $("debug-output").textContent = JSON.stringify(data, null, 2);
