@@ -413,12 +413,20 @@ def solve_mission(
 
         # Build filtered matrix - ONLY include IDs that are actually in orig_labels
         # This ensures labels and matrix dimensions match
+        # CRITICAL: Always include start_id and end_id
         filtered_indices = []
         filtered_ids = []  # Track which IDs are actually included
         for fid in desired_ids:
             if fid in orig_labels:
                 filtered_indices.append(orig_labels.index(fid))
                 filtered_ids.append(fid)
+
+        # Ensure start and end airports are ALWAYS in the filtered matrix
+        for required_id in [start_id, end_id]:
+            if required_id not in filtered_ids and required_id in orig_labels:
+                filtered_indices.append(orig_labels.index(required_id))
+                filtered_ids.append(required_id)
+                print(f"   ⚠️ Added missing required airport {required_id} to filtered matrix", flush=True)
 
         n = len(filtered_indices)
         filtered_matrix = [[0.0] * n for _ in range(n)]
@@ -694,12 +702,20 @@ def solve_mission_with_allocation(
 
         # Build filtered matrix - ONLY include IDs that are actually in orig_labels
         # This ensures labels and matrix dimensions match
+        # CRITICAL: Always include start_id and end_id
         filtered_indices = []
         filtered_ids = []  # Track which IDs are actually included
         for fid in desired_ids:
             if fid in orig_labels:
                 filtered_indices.append(orig_labels.index(fid))
                 filtered_ids.append(fid)
+
+        # Ensure start and end airports are ALWAYS in the filtered matrix
+        for required_id in [start_id, end_id]:
+            if required_id not in filtered_ids and required_id in orig_labels:
+                filtered_indices.append(orig_labels.index(required_id))
+                filtered_ids.append(required_id)
+                print(f"   ⚠️ Added missing required airport {required_id} to filtered matrix", flush=True)
 
         n = len(filtered_indices)
         filtered_matrix = [[0.0] * n for _ in range(n)]
