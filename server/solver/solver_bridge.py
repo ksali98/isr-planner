@@ -456,9 +456,23 @@ def solve_mission(
             distance_matrix_data=filtered_dist_data,
         )
         env_for_solver["start_airport"] = start_id
-        env_for_solver["end_airport"] = end_id
-        env_for_solver["mode"] = "return" if end_id == start_id else "end"
 
+        # Handle flexible endpoint vs fixed endpoint
+        if flexible_endpoint:
+            print(f"   🔄 Flexible endpoint: solver will choose optimal end airport", flush=True)
+            env_for_solver["mode"] = "best_end"
+
+            # CRITICAL: Filter out synthetic starts from valid end airports
+            # Synthetic starts (e.g., D1_START) are used for checkpoint replanning
+            # but should NOT be valid endpoints - only real airports should be endpoints
+            real_airports = [a for a in airports if not a.get("is_synthetic", False)]
+            if real_airports:
+                env_for_solver["valid_end_airports"] = [a["id"] for a in real_airports]
+                print(f"   ✈️ Valid end airports (excluding synthetic): {env_for_solver['valid_end_airports']}", flush=True)
+        else:
+            # Fixed endpoint
+            env_for_solver["end_airport"] = end_id
+            env_for_solver["mode"] = "return" if end_id == start_id else "end"
 
         # Call your real orienteering solver
         solve_start = time.time()
