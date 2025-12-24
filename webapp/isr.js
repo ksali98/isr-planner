@@ -725,6 +725,13 @@ function acceptEdits() {
     return;
   }
 
+  // Check for duplicate target IDs (common cause of "only one target considered")
+  const ids = (state.env.targets || []).map(t => String(t.id));
+  const dup = ids.filter((id, i) => ids.indexOf(id) !== i);
+  if (dup.length) {
+    appendDebugLine(`❌ DUP target IDs: ${dup.join(", ")}`);
+  }
+
   // Commit the draft environment
   missionState.acceptedEnv = JSON.parse(JSON.stringify(state.env));
   missionState.draftEnv = null;
@@ -841,6 +848,8 @@ function acceptSolution() {
   appendDebugLine(`✅ Solution accepted as segment ${segment.index + 1}`);
   appendDebugLine(`   Visited targets retained: [${state.visitedTargets.join(", ")}]`);
   appendDebugLine(`   MissionReplay: ${missionReplay.getSegmentCount()} segments`);
+  appendDebugLine(`ACCEPT: now currentSegmentIndex=${missionState.currentSegmentIndex}, replayCount=${missionReplay.getSegmentCount()}`);
+  appendDebugLine(`ACCEPT: env targets now=${(state.env.targets||[]).map(t=>t.id).join(",")}`);
 
   // --- Segmented mission workflow: advance to next segment or finish ---
   if (missionState.segmentedMission) {
@@ -849,8 +858,9 @@ function acceptSolution() {
 
     const nextSeg = missionState.segmentedMission.segments[nextIdx];
     if (nextSeg) {
-      // Load next segment env for solving
+      // Load next segment env for solving (already merged with edits via mergeEnvForwardFromCurrent)
       state.env = JSON.parse(JSON.stringify(nextSeg.env));
+      missionState.acceptedEnv = JSON.parse(JSON.stringify(nextSeg.env));
       state.droneConfigs = JSON.parse(JSON.stringify(nextSeg.drone_configs || state.env.drone_configs || {}));
       state.env.drone_configs = state.droneConfigs;
 
@@ -859,6 +869,7 @@ function acceptSolution() {
 
       // Back to IDLE so user can Solve next segment
       setMissionMode(MissionMode.IDLE, `segment ${nextIdx + 1} ready to solve`);
+      appendDebugLine(`ADVANCE: moved to seg ${nextIdx + 1}, targets=${(state.env.targets||[]).length}`);
       appendDebugLine(`➡️ Loaded segment ${nextIdx + 1} env. Ready to Solve.`);
 
       initDroneConfigsFromEnv();
