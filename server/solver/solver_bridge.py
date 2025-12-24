@@ -462,6 +462,12 @@ def solve_mission(
             print(f"   🔄 Flexible endpoint: solver will choose optimal end airport", flush=True)
             env_for_solver["mode"] = "best_end"
 
+            # CRITICAL: Remove end_airport from env if it was set by build_environment_for_solver
+            # This prevents the solver from using a synthetic start as the endpoint
+            if "end_airport" in env_for_solver:
+                print(f"   🔍 DEBUG: Removing end_airport '{env_for_solver['end_airport']}' from env_for_solver", flush=True)
+                del env_for_solver["end_airport"]
+
             # CRITICAL: Filter out synthetic starts from valid end airports
             # Synthetic starts (e.g., D1_START) are used for checkpoint replanning
             # but should NOT be valid endpoints - only real airports should be endpoints
@@ -771,6 +777,12 @@ def solve_mission_with_allocation(
         if flexible_endpoint:
             print(f"   🔄 Flexible endpoint: solver will choose optimal end airport", flush=True)
             env_for_solver["mode"] = "best_end"
+
+            # CRITICAL: Remove end_airport from env if it was set by build_environment_for_solver
+            # This prevents the solver from using a synthetic start as the endpoint
+            if "end_airport" in env_for_solver:
+                print(f"   🔍 DEBUG: Removing end_airport '{env_for_solver['end_airport']}' from env_for_solver", flush=True)
+                del env_for_solver["end_airport"]
 
             # CRITICAL: Filter out synthetic starts from valid end airports
             # Synthetic starts (e.g., D1_START) are used for checkpoint replanning
