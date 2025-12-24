@@ -815,6 +815,10 @@ function acceptSolution() {
     return;
   }
 
+  // Debug: show what's in state.env at start of accept
+  appendDebugLine(`[ACCEPT START] state.env.targets=${(state.env.targets||[]).map(t=>t.id).join(",")}`);
+  appendDebugLine(`[ACCEPT START] currentBuildSegmentIndex=${missionState.currentBuildSegmentIndex}`);
+
   // Snapshot the authoritative current env (not stale acceptedEnv)
   const envSnapshot = JSON.parse(JSON.stringify(state.env));
 
