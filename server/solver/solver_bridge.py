@@ -353,7 +353,8 @@ def solve_mission(
         # Handle flexible endpoint: "-" means solver chooses optimal endpoint
         raw_end_id = cfg.get("end_airport") or start_id
         flexible_endpoint = (raw_end_id == "-")
-        end_id = start_id if flexible_endpoint else raw_end_id  # Initial end for solve
+        # Don't set end_id to start_id for flexible endpoints - solver will choose
+        end_id = raw_end_id if not flexible_endpoint else None
 
         # Filter targets by type access (A, B, C, D types)
         target_access = cfg.get("target_access", {})
@@ -422,8 +423,9 @@ def solve_mission(
                 filtered_ids.append(fid)
 
         # Ensure start and end airports are ALWAYS in the filtered matrix
+        # (skip end_id if None, which happens for flexible endpoints)
         for required_id in [start_id, end_id]:
-            if required_id not in filtered_ids and required_id in orig_labels:
+            if required_id and required_id not in filtered_ids and required_id in orig_labels:
                 filtered_indices.append(orig_labels.index(required_id))
                 filtered_ids.append(required_id)
                 print(f"   ⚠️ Added missing required airport {required_id} to filtered matrix", flush=True)
@@ -627,7 +629,8 @@ def solve_mission_with_allocation(
         # Handle flexible endpoint: "-" means solver chooses optimal endpoint
         raw_end_id = cfg.get("end_airport") or start_id
         flexible_endpoint = (raw_end_id == "-")
-        end_id = start_id if flexible_endpoint else raw_end_id  # Initial end for solve
+        # Don't set end_id to start_id for flexible endpoints - solver will choose
+        end_id = raw_end_id if not flexible_endpoint else None
 
         # Debug logging
         print(f"🔍 [Run Planner] D{did} config: {cfg}", flush=True)
@@ -711,8 +714,9 @@ def solve_mission_with_allocation(
                 filtered_ids.append(fid)
 
         # Ensure start and end airports are ALWAYS in the filtered matrix
+        # (skip end_id if None, which happens for flexible endpoints)
         for required_id in [start_id, end_id]:
-            if required_id not in filtered_ids and required_id in orig_labels:
+            if required_id and required_id not in filtered_ids and required_id in orig_labels:
                 filtered_indices.append(orig_labels.index(required_id))
                 filtered_ids.append(required_id)
                 print(f"   ⚠️ Added missing required airport {required_id} to filtered matrix", flush=True)
