@@ -3501,6 +3501,11 @@ async function runPlanner() {
   appendDebugLine(`   Payload targets: ${(envToSolve.targets||[]).map(t=>t.id).join(",")}`);
   appendDebugLine(`   Visited targets: ${state.visitedTargets.join(",") || "none"}`);
   appendDebugLine(`   state.env targets: ${(state.env.targets||[]).map(t=>t.id).join(",")}`);
+  // Show fuel budgets for each drone
+  const fuelInfo = Object.entries(configsToSolve).map(([did, cfg]) =>
+    `D${did}:${cfg.fuel_budget?.toFixed(0) || '?'}`
+  ).join(", ");
+  appendDebugLine(`   Fuel budgets: ${fuelInfo}`);
 
 
   let bodyStr;
