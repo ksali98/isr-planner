@@ -2188,13 +2188,28 @@ function attachCanvasEditing() {
         updateAirportDropdowns();
       } else if (state.addMode === "target") {
         const targets = state.env.targets || (state.env.targets = []);
-        const nextNum =
-          targets
-            .map((t) => {
+
+        // Find max target number across current env AND all segmented mission segments
+        // This prevents ID collisions when merging edits forward
+        let maxTargetNum = 0;
+
+        // Check current env targets
+        targets.forEach((t) => {
+          const m = String(t.id).match(/^T(\d+)$/i);
+          if (m) maxTargetNum = Math.max(maxTargetNum, parseInt(m[1], 10));
+        });
+
+        // Check all segments in segmented mission (if any)
+        if (missionState.segmentedMission && missionState.segmentedMission.segments) {
+          missionState.segmentedMission.segments.forEach((seg) => {
+            (seg.env?.targets || []).forEach((t) => {
               const m = String(t.id).match(/^T(\d+)$/i);
-              return m ? parseInt(m[1], 10) : 0;
-            })
-            .reduce((a, b) => Math.max(a, b), 0) + 1;
+              if (m) maxTargetNum = Math.max(maxTargetNum, parseInt(m[1], 10));
+            });
+          });
+        }
+
+        const nextNum = maxTargetNum + 1;
 
         // Read type and priority from dropdowns
         const typeSelect = $("new-target-type");
