@@ -163,7 +163,8 @@ class Segment {
     env,
     prefixDistances = null,
     isCheckpointReplan = false,
-    timestamp = new Date().toISOString()
+    timestamp = new Date().toISOString(),
+    cutPosition = null  // [x, y] position where segment was cut, or null
   }) {
     this.index = index;
     this.solution = Object.freeze(JSON.parse(JSON.stringify(solution)));
@@ -171,6 +172,7 @@ class Segment {
     this.prefixDistances = prefixDistances ? Object.freeze({...prefixDistances}) : null;
     this.isCheckpointReplan = isCheckpointReplan;
     this.timestamp = timestamp;
+    this.cutPosition = cutPosition ? Object.freeze([...cutPosition]) : null;
     Object.freeze(this);
   }
 
@@ -307,6 +309,24 @@ class MissionReplay {
   }
 
   /**
+   * Replace a segment at a given index with new data
+   * Creates a new frozen Segment with the provided data
+   */
+  replaceSegment(index, segmentData) {
+    if (index < 0 || index >= this._segments.length) {
+      console.warn(`[MissionReplay] Cannot replace segment at invalid index ${index}`);
+      return false;
+    }
+    const newSegment = new Segment({
+      index: index,
+      ...segmentData
+    });
+    this._segments[index] = newSegment;
+    console.log(`[MissionReplay] Replaced segment ${index}`);
+    return true;
+  }
+
+  /**
    * Update the solution in the current segment (e.g., after optimization)
    */
   updateCurrentSegmentSolution(routes, sequences) {
@@ -399,6 +419,47 @@ class MissionReplay {
 
 // Global mission replay instance
 const missionReplay = new MissionReplay();
+
+/**
+ * Merge arrays by ID - upserts objects from srcArr into baseArr
+ * Objects with matching IDs are replaced, new objects are added
+ */
+function mergeById(baseArr, srcArr) {
+  const m = new Map(baseArr.map(o => [String(o.id), o]));
+  srcArr.forEach(o => m.set(String(o.id), o));
+  return Array.from(m.values());
+}
+
+/**
+ * Merge current state.env forward into all future segments in missionReplay
+ * Call this after accepting a solution to propagate env edits to later segments
+ */
+function mergeEnvForwardFromCurrent(startSegmentIndex) {
+  const src = JSON.parse(JSON.stringify(state.env));
+
+  for (let i = startSegmentIndex; i < missionReplay.getSegmentCount(); i++) {
+    const seg = missionReplay.getSegment(i);
+    if (!seg) continue;
+
+    const merged = JSON.parse(JSON.stringify(seg.env));
+
+    merged.targets = mergeById(merged.targets || [], src.targets || []);
+    merged.sams = mergeById(merged.sams || [], src.sams || []);
+    merged.airports = mergeById(merged.airports || [], src.airports || []);
+
+    missionReplay.replaceSegment(i, {
+      solution: seg.solution,
+      env: merged,
+      prefixDistances: seg.prefixDistances,
+      isCheckpointReplan: seg.isCheckpointReplan,
+      cutPosition: seg.cutPosition,
+    });
+  }
+
+  if (startSegmentIndex < missionReplay.getSegmentCount()) {
+    console.log(`[mergeEnvForward] Merged env into segments ${startSegmentIndex} to ${missionReplay.getSegmentCount() - 1}`);
+  }
+}
 
 /**
  * Get UI permissions based on current mission mode
@@ -729,10 +790,18 @@ function acceptSolution() {
   // Add segment to MissionReplay (the clean way)
   const segment = missionReplay.addSegment({
     solution: missionState.draftSolution,
-    env: missionState.acceptedEnv || state.env,
+    env: JSON.parse(JSON.stringify(state.env)),
     prefixDistances: state.checkpointReplanPrefixDistances,
     isCheckpointReplan: missionState.draftSolution.isCheckpointReplan || false,
+    cutPosition: state.pendingCutPosition || null,
   });
+
+  // Clear the pending cut position after use
+  state.pendingCutPosition = null;
+
+  // Merge current env edits forward into all future segments
+  const currentIdx = missionReplay.getCurrentSegmentIndex();
+  mergeEnvForwardFromCurrent(currentIdx + 1);
 
   // Also keep in missionState.committedSegments for backward compatibility during transition
   missionState.committedSegments.push({
@@ -1729,6 +1798,30 @@ function drawEnvironment() {
     });
   }
 
+  // Draw cut markers from missionReplay segments
+  const segmentCount = missionReplay.getSegmentCount();
+  for (let i = 0; i < segmentCount; i++) {
+    const seg = missionReplay.getSegment(i);
+    if (seg && seg.cutPosition) {
+      const [mx, my] = w2c(seg.cutPosition[0], seg.cutPosition[1]);
+      const size = 6;  // half-width of square
+
+      // Blue square with white border
+      ctx.beginPath();
+      ctx.rect(mx - size, my - size, size * 2, size * 2);
+      ctx.fillStyle = "#3b82f6";  // blue-500
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2;
+      ctx.fill();
+      ctx.stroke();
+
+      // Optional: segment number label
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 8px system-ui";
+      ctx.fillText(`C${i + 1}`, mx + size + 3, my + 3);
+    }
+  }
+
   // Target Type Legend (top-right corner)
   const legendTypes = [
     { label: "A", color: "#93c5fd" },
@@ -1895,6 +1988,7 @@ async function exportEnvironment() {
           prefixDistances: s.prefixDistances || null,
           isCheckpointReplan: !!s.isCheckpointReplan,
           timestamp: s.timestamp || null,
+          cutPosition: s.cutPosition || null,
         })),
       };
     } else {
@@ -4486,6 +4580,19 @@ function cutAtCheckpoint() {
     appendDebugLine("⚠️ WARNING: freezeAtCheckpoint did not set checkpoint.active! Check drone data.");
   } else {
     appendDebugLine(`✅ Checkpoint set with ${Object.keys(state.checkpoint.segments || {}).length} drone segments`);
+  }
+
+  // Capture the cut position from the first active drone's splitPoint
+  state.pendingCutPosition = null;
+  if (state.checkpoint?.segments) {
+    for (const did of Object.keys(state.checkpoint.segments)) {
+      const sp = state.checkpoint.segments[did]?.splitPoint;
+      if (sp && sp.length === 2) {
+        state.pendingCutPosition = [sp[0], sp[1]];
+        appendDebugLine(`📍 Cut position captured at [${sp[0].toFixed(2)}, ${sp[1].toFixed(2)}]`);
+        break;
+      }
+    }
   }
 
   // Transition to CHECKPOINT state (from replay/cut - solve disabled)
