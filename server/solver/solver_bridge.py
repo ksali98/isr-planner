@@ -773,6 +773,9 @@ def solve_mission_with_allocation(
         )
         env_for_solver["start_airport"] = start_id
 
+        print(f"   🔍 DEBUG: After build_environment_for_solver, env_for_solver has end_airport: {env_for_solver.get('end_airport', 'NOT SET')}", flush=True)
+        print(f"   🔍 DEBUG: flexible_endpoint={flexible_endpoint}", flush=True)
+
         # If flexible endpoint, use best_end mode to let solver choose optimal end
         if flexible_endpoint:
             print(f"   🔄 Flexible endpoint: solver will choose optimal end airport", flush=True)
