@@ -748,7 +748,16 @@ def solve_mission_with_allocation(
         if flexible_endpoint:
             print(f"   🔄 Flexible endpoint: solver will choose optimal end airport", flush=True)
             env_for_solver["mode"] = "best_end"
-            # Don't set end_airport - let solver choose
+
+            # CRITICAL: Filter out synthetic starts from valid end airports
+            # Synthetic starts (e.g., D1_START) are used for checkpoint replanning
+            # but should NOT be valid endpoints - only real airports should be endpoints
+            real_airports = [a for a in airports if not a.get("is_synthetic", False)]
+            if real_airports:
+                env_for_solver["valid_end_airports"] = [a["id"] for a in real_airports]
+                print(f"   ✈️ Valid end airports (excluding synthetic): {env_for_solver['valid_end_airports']}", flush=True)
+
+            # Don't set end_airport - let solver choose from valid_end_airports
             sol = _solver.solve(env_for_solver, fuel_budget)
             # Extract the end airport chosen by solver
             end_id = sol.get("end_airport", start_id)

@@ -189,7 +189,19 @@ def solve_orienteering_with_matrix(env, start_id=None, mode=None, fuel_cap=None,
 
     airport_idxs = [i for i, lab in enumerate(labels) if is_airport(lab, airports)]
     cand_target_idxs = [i for i, lab in enumerate(labels) if i != start_idx and not is_airport(lab, airports)]
-    
+
+    # For best_end mode, filter airport_idxs to only include valid endpoints
+    # This excludes synthetic starts (e.g., D1_START) from being chosen as endpoints
+    valid_end_airport_ids = env.get("valid_end_airports", None)
+    if mode == "best_end" and valid_end_airport_ids:
+        valid_end_idxs = [i for i in airport_idxs if labels[i] in valid_end_airport_ids]
+        print(f"🔧 Filtering endpoints: {len(airport_idxs)} total airports → {len(valid_end_idxs)} valid endpoints")
+        print(f"🔧 Valid endpoint airports: {[labels[i] for i in valid_end_idxs]}")
+        # Use filtered list for best_end mode
+        best_end_airport_idxs = valid_end_idxs if valid_end_idxs else airport_idxs
+    else:
+        best_end_airport_idxs = airport_idxs
+
     print(f"🔧 Available airports: {[labels[i] for i in airport_idxs]}")
     print(f"🔧 Start airport index: {start_idx} ({start_id})")
     print(f"🔧 Available targets: {[labels[i] for i in cand_target_idxs]}")
@@ -224,7 +236,8 @@ def solve_orienteering_with_matrix(env, start_id=None, mode=None, fuel_cap=None,
             elif mode == "end":
                 cost, route = evaluate_path(D_full, labels, start_idx, combo, end_idx)
             else:  # best_end
-                end_choice = choose_best_end(D_full, labels, start_idx, combo, airport_idxs, fuel_cap)
+                # Use filtered airport list to exclude synthetic starts from endpoints
+                end_choice = choose_best_end(D_full, labels, start_idx, combo, best_end_airport_idxs, fuel_cap)
                 if end_choice:
                     cost, route = end_choice["len"], end_choice["route"]
                 else:
