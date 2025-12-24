@@ -240,6 +240,12 @@ body {
   color: #9ca3af;
 }
 
+/* Mission stat box - green text to stand out */
+#stat-mission .stat-title,
+#stat-mission .stat-line,
+#stat-mission .stat-line span {
+  color: #4ade80 !important;
+}
 
 /* RIGHT PANEL stays dark */
 .right-panel {
