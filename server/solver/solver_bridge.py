@@ -465,10 +465,15 @@ def solve_mission(
             # CRITICAL: Filter out synthetic starts from valid end airports
             # Synthetic starts (e.g., D1_START) are used for checkpoint replanning
             # but should NOT be valid endpoints - only real airports should be endpoints
+            print(f"   🔍 DEBUG: All airports: {[a['id'] for a in airports]}", flush=True)
             real_airports = [a for a in airports if not a.get("is_synthetic", False)]
+            print(f"   🔍 DEBUG: Real airports (non-synthetic): {[a['id'] for a in real_airports]}", flush=True)
+            print(f"   🔍 DEBUG: Synthetic airports: {[a['id'] for a in airports if a.get('is_synthetic', False)]}", flush=True)
             if real_airports:
                 env_for_solver["valid_end_airports"] = [a["id"] for a in real_airports]
                 print(f"   ✈️ Valid end airports (excluding synthetic): {env_for_solver['valid_end_airports']}", flush=True)
+            else:
+                print(f"   ⚠️ WARNING: No real airports found! All airports are synthetic.", flush=True)
         else:
             # Fixed endpoint
             env_for_solver["end_airport"] = end_id
