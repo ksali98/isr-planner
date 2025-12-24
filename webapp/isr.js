@@ -468,11 +468,21 @@ function mergeEnvForwardFromCurrent(startSegmentIndex) {
         appendDebugLine(`[mergeForward] seg ${i} has no env, skipping`);
         continue;
       }
-      const beforeCount = (seg.env.targets || []).length;
+      const beforeIds = (seg.env.targets || []).map(t => t.id);
+      const srcIds = (src.targets || []).map(t => t.id);
+      // Find IDs unique to this segment (not in src)
+      const uniqueToSeg = beforeIds.filter(id => !srcIds.includes(id));
+      appendDebugLine(`[mergeForward] seg ${i} BEFORE: ${beforeIds.join(",")}`);
+      if (uniqueToSeg.length > 0) {
+        appendDebugLine(`[mergeForward] seg ${i} UNIQUE targets (should be preserved): ${uniqueToSeg.join(",")}`);
+      }
+
       seg.env.targets = mergeById(seg.env.targets || [], src.targets || []);
       seg.env.sams = mergeById(seg.env.sams || [], src.sams || []);
       seg.env.airports = mergeById(seg.env.airports || [], src.airports || []);
-      appendDebugLine(`[mergeForward] seg ${i}: targets ${beforeCount} -> ${seg.env.targets.length}`);
+
+      const afterIds = seg.env.targets.map(t => t.id);
+      appendDebugLine(`[mergeForward] seg ${i} AFTER: ${afterIds.join(",")}`);
     }
     console.log(`[mergeEnvForward] Merged env into segmentedMission segments ${buildIdx + 1} to ${missionState.segmentedMission.segments.length - 1}`);
   }
