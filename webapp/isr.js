@@ -431,12 +431,14 @@ function mergeById(baseArr, srcArr) {
 }
 
 /**
- * Merge current state.env forward into all future segments in missionReplay
+ * Merge current state.env forward into all future segments
+ * Updates both missionReplay segments AND missionState.segmentedMission.segments
  * Call this after accepting a solution to propagate env edits to later segments
  */
 function mergeEnvForwardFromCurrent(startSegmentIndex) {
   const src = JSON.parse(JSON.stringify(state.env));
 
+  // Update missionReplay segments
   for (let i = startSegmentIndex; i < missionReplay.getSegmentCount(); i++) {
     const seg = missionReplay.getSegment(i);
     if (!seg) continue;
@@ -456,8 +458,22 @@ function mergeEnvForwardFromCurrent(startSegmentIndex) {
     });
   }
 
+  // Also update missionState.segmentedMission.segments (for segment-by-segment workflow)
+  if (missionState.segmentedMission && missionState.segmentedMission.segments) {
+    const buildIdx = missionState.currentBuildSegmentIndex || 0;
+    for (let i = buildIdx + 1; i < missionState.segmentedMission.segments.length; i++) {
+      const seg = missionState.segmentedMission.segments[i];
+      if (!seg || !seg.env) continue;
+
+      seg.env.targets = mergeById(seg.env.targets || [], src.targets || []);
+      seg.env.sams = mergeById(seg.env.sams || [], src.sams || []);
+      seg.env.airports = mergeById(seg.env.airports || [], src.airports || []);
+    }
+    console.log(`[mergeEnvForward] Merged env into segmentedMission segments ${buildIdx + 1} to ${missionState.segmentedMission.segments.length - 1}`);
+  }
+
   if (startSegmentIndex < missionReplay.getSegmentCount()) {
-    console.log(`[mergeEnvForward] Merged env into segments ${startSegmentIndex} to ${missionReplay.getSegmentCount() - 1}`);
+    console.log(`[mergeEnvForward] Merged env into missionReplay segments ${startSegmentIndex} to ${missionReplay.getSegmentCount() - 1}`);
   }
 }
 
@@ -787,10 +803,13 @@ function acceptSolution() {
     return;
   }
 
+  // Snapshot the authoritative current env (not stale acceptedEnv)
+  const envSnapshot = JSON.parse(JSON.stringify(state.env));
+
   // Add segment to MissionReplay (the clean way)
   const segment = missionReplay.addSegment({
     solution: missionState.draftSolution,
-    env: JSON.parse(JSON.stringify(state.env)),
+    env: envSnapshot,
     prefixDistances: state.checkpointReplanPrefixDistances,
     isCheckpointReplan: missionState.draftSolution.isCheckpointReplan || false,
     cutPosition: state.pendingCutPosition || null,
@@ -799,21 +818,21 @@ function acceptSolution() {
   // Clear the pending cut position after use
   state.pendingCutPosition = null;
 
-  // Merge current env edits forward into all future segments
-  const currentIdx = missionReplay.getCurrentSegmentIndex();
-  mergeEnvForwardFromCurrent(currentIdx + 1);
-
   // Also keep in missionState.committedSegments for backward compatibility during transition
   missionState.committedSegments.push({
     index: segment.index,
     solution: JSON.parse(JSON.stringify(missionState.draftSolution)),
-    env: JSON.parse(JSON.stringify(missionState.acceptedEnv || state.env)),
+    env: envSnapshot,
     timestamp: segment.timestamp,
     prefixDistances: state.checkpointReplanPrefixDistances
       ? JSON.parse(JSON.stringify(state.checkpointReplanPrefixDistances))
       : null,
     isCheckpointReplan: missionState.draftSolution.isCheckpointReplan || false,
   });
+
+  // Propagate env edits forward into all future segments (so added targets persist)
+  const currentIdx = missionReplay.getCurrentSegmentIndex();
+  mergeEnvForwardFromCurrent(currentIdx + 1);
   missionState.currentSegmentIndex = segment.index;
 
   // Clear the draft
