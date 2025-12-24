@@ -448,9 +448,17 @@ def solve_mission(
         actual_target_count = len(filtered_ids) - actual_airport_count
         print(f"   📊 Filtered matrix: {len(filtered_ids)} nodes ({actual_airport_count} airports + {actual_target_count} targets)", flush=True)
 
+        # CRITICAL: Filter out synthetic starts from airports list
+        # Synthetic starts should ONLY exist in the distance matrix, not in the airports list
+        # This prevents the orienteering solver from considering them as valid endpoints
+        real_airports = [a for a in airports if not a.get("is_synthetic", False)]
+        print(f"   🔍 DEBUG: Filtered airports: {len(airports)} total → {len(real_airports)} real airports", flush=True)
+        print(f"   🔍 DEBUG: Real airports: {[a['id'] for a in real_airports]}", flush=True)
+        print(f"   🔍 DEBUG: Synthetic starts filtered out: {[a['id'] for a in airports if a.get('is_synthetic', False)]}", flush=True)
+
         # Build a per-drone environment using your existing interface
         env_for_solver = _solver.build_environment_for_solver(
-            airports=airports,
+            airports=real_airports,  # ← CRITICAL FIX: Use real_airports instead of airports
             targets=candidate_targets,
             sams=sams,
             distance_matrix_data=filtered_dist_data,
@@ -764,9 +772,17 @@ def solve_mission_with_allocation(
         actual_target_count = len(filtered_ids) - actual_airport_count
         print(f"   📊 Filtered matrix: {len(filtered_ids)} nodes ({actual_airport_count} airports + {actual_target_count} targets)", flush=True)
 
-        # Build environment for solver with FILTERED matrix
+        # CRITICAL: Filter out synthetic starts from airports list
+        # Synthetic starts should ONLY exist in the distance matrix, not in the airports list
+        # This prevents the orienteering solver from considering them as valid endpoints
+        real_airports = [a for a in airports if not a.get("is_synthetic", False)]
+        print(f"   🔍 DEBUG: Filtered airports: {len(airports)} total → {len(real_airports)} real airports", flush=True)
+        print(f"   🔍 DEBUG: Real airports: {[a['id'] for a in real_airports]}", flush=True)
+        print(f"   🔍 DEBUG: Synthetic starts filtered out: {[a['id'] for a in airports if a.get('is_synthetic', False)]}", flush=True)
+
+        # Build environment for solver with FILTERED matrix and REAL airports only
         env_for_solver = _solver.build_environment_for_solver(
-            airports=airports,
+            airports=real_airports,  # ← CRITICAL FIX: Use real_airports instead of airports
             targets=candidate_targets,
             sams=sams,
             distance_matrix_data=filtered_dist_data,
