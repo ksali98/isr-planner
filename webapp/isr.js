@@ -3498,6 +3498,10 @@ async function runPlanner() {
 
   const modeLabel = isCheckpointReplan ? "CHECKPOINT REPLAN" : "FRESH SOLVE";
   appendDebugLine(`➡ [${modeLabel}] Sending /api/solve_with_allocation (strategy: ${strategy})...`);
+  appendDebugLine(`   Payload targets: ${(envToSolve.targets||[]).map(t=>t.id).join(",")}`);
+  appendDebugLine(`   Visited targets: ${state.visitedTargets.join(",") || "none"}`);
+  appendDebugLine(`   state.env targets: ${(state.env.targets||[]).map(t=>t.id).join(",")}`);
+
 
   let bodyStr;
   try {
