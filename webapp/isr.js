@@ -867,8 +867,15 @@ function acceptSolution() {
 
     const nextSeg = missionState.segmentedMission.segments[nextIdx];
     appendDebugLine(`[LOAD] nextIdx=${nextIdx}, nextSeg exists=${!!nextSeg}, nextSeg.env exists=${!!(nextSeg && nextSeg.env)}`);
+    // Debug: show all segment target counts
+    if (missionState.segmentedMission.segments) {
+      const segInfo = missionState.segmentedMission.segments.map((s, i) =>
+        `seg${i}:${(s.env?.targets||[]).length}`
+      ).join(", ");
+      appendDebugLine(`[LOAD] All segments target counts: ${segInfo}`);
+    }
     if (nextSeg && nextSeg.env) {
-      appendDebugLine(`[LOAD] nextSeg.env.targets BEFORE load: ${(nextSeg.env.targets||[]).map(t=>t.id).join(",")}`);
+      appendDebugLine(`[LOAD] nextSeg.env.targets: ${(nextSeg.env.targets||[]).map(t=>t.id).join(",")}`);
     }
     if (nextSeg) {
       // Load next segment env for solving (already merged with edits via mergeEnvForwardFromCurrent)
