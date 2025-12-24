@@ -1449,6 +1449,11 @@ function drawEnvironment() {
   const sams = state.env.sams || [];
   const gridSize = 100.0; // world coordinates 0..100
 
+  // Debug: log target count being drawn (throttled to avoid spam)
+  if (_drawEnvFrameCount % 120 === 1) {
+    console.log(`[drawEnv] Drawing ${targets.length} targets: ${targets.map(t=>t.id).join(",")}`);
+  }
+
   // world -> canvas coordinates
   function w2c(x, y) {
     const pad = 20;
@@ -2766,6 +2771,12 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   setMissionMode(MissionMode.IDLE, "segmented mission loaded (segment 1 only)");
   appendDebugLine(`📥 Loaded SEGMENTED mission: ${data.segments.length} segments. Showing segment 1 env.`);
   appendDebugLine(`   Solve each segment sequentially. Animate enabled after all accepted.`);
+
+  // Debug: show original target counts for each segment
+  const segInfo = data.segments.map((s, i) =>
+    `seg${i}:${(s.env?.targets||[]).length}`
+  ).join(", ");
+  appendDebugLine(`📊 Original segment target counts: ${segInfo}`);
 }
 
 /**
