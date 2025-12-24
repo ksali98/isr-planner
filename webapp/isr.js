@@ -3767,7 +3767,9 @@ function toggleTrajectory(did) {
 }
 
 function toggleAllTrajectories() {
-  const allVisible = Object.values(state.trajectoryVisible).every((v) => v);
+  const visibleValues = Object.values(state.trajectoryVisible);
+  // If no trajectories set yet, or none visible, show all; otherwise toggle off
+  const allVisible = visibleValues.length > 0 && visibleValues.every((v) => v);
   const newState = !allVisible;
 
   for (let did = 1; did <= 5; did++) {
