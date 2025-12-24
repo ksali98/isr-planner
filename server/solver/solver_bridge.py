@@ -713,8 +713,7 @@ def solve_mission_with_allocation(
 
         # CRITICAL: Limit targets to prevent exponential solver blowup
         # Orienteering solver has O(n!) complexity - cap at reasonable max
-        # Increased from 12 to 20 to support larger missions
-        MAX_TARGETS_PER_SOLVE = 20
+        MAX_TARGETS_PER_SOLVE = 15
         if len(candidate_targets) > MAX_TARGETS_PER_SOLVE:
             # Sort by priority (highest first) and take top N
             candidate_targets = sorted(
