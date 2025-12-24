@@ -461,13 +461,18 @@ function mergeEnvForwardFromCurrent(startSegmentIndex) {
   // Also update missionState.segmentedMission.segments (for segment-by-segment workflow)
   if (missionState.segmentedMission && missionState.segmentedMission.segments) {
     const buildIdx = missionState.currentBuildSegmentIndex || 0;
+    appendDebugLine(`[mergeForward] buildIdx=${buildIdx}, src.targets=${(src.targets||[]).map(t=>t.id).join(",")}`);
     for (let i = buildIdx + 1; i < missionState.segmentedMission.segments.length; i++) {
       const seg = missionState.segmentedMission.segments[i];
-      if (!seg || !seg.env) continue;
-
+      if (!seg || !seg.env) {
+        appendDebugLine(`[mergeForward] seg ${i} has no env, skipping`);
+        continue;
+      }
+      const beforeCount = (seg.env.targets || []).length;
       seg.env.targets = mergeById(seg.env.targets || [], src.targets || []);
       seg.env.sams = mergeById(seg.env.sams || [], src.sams || []);
       seg.env.airports = mergeById(seg.env.airports || [], src.airports || []);
+      appendDebugLine(`[mergeForward] seg ${i}: targets ${beforeCount} -> ${seg.env.targets.length}`);
     }
     console.log(`[mergeEnvForward] Merged env into segmentedMission segments ${buildIdx + 1} to ${missionState.segmentedMission.segments.length - 1}`);
   }
@@ -857,6 +862,10 @@ function acceptSolution() {
     missionState.currentBuildSegmentIndex = nextIdx;
 
     const nextSeg = missionState.segmentedMission.segments[nextIdx];
+    appendDebugLine(`[LOAD] nextIdx=${nextIdx}, nextSeg exists=${!!nextSeg}, nextSeg.env exists=${!!(nextSeg && nextSeg.env)}`);
+    if (nextSeg && nextSeg.env) {
+      appendDebugLine(`[LOAD] nextSeg.env.targets BEFORE load: ${(nextSeg.env.targets||[]).map(t=>t.id).join(",")}`);
+    }
     if (nextSeg) {
       // Load next segment env for solving (already merged with edits via mergeEnvForwardFromCurrent)
       state.env = JSON.parse(JSON.stringify(nextSeg.env));
@@ -869,7 +878,7 @@ function acceptSolution() {
 
       // Back to IDLE so user can Solve next segment
       setMissionMode(MissionMode.IDLE, `segment ${nextIdx + 1} ready to solve`);
-      appendDebugLine(`ADVANCE: moved to seg ${nextIdx + 1}, targets=${(state.env.targets||[]).length}`);
+      appendDebugLine(`ADVANCE: moved to seg ${nextIdx + 1}, targets=${(state.env.targets||[]).length}, ids=${(state.env.targets||[]).map(t=>t.id).join(",")}`);
       appendDebugLine(`➡️ Loaded segment ${nextIdx + 1} env. Ready to Solve.`);
 
       initDroneConfigsFromEnv();
