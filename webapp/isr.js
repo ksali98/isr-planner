@@ -1582,20 +1582,30 @@ function drawEnvironment() {
     });
   }
 
-  // Airports
+  // Airports and Checkpoint Markers (synthetic starts)
   airports.forEach((a, idx) => {
     const [x, y] = w2c(a.x, a.y);
-    const size = 10;  // Larger than drone radius (6) so airport is visible when drone is home
-    ctx.fillStyle = "#3b82f6";
-    ctx.strokeStyle = "#1d4ed8";
-    ctx.lineWidth = 1;
+
+    // Check if this is a synthetic start (checkpoint marker)
+    const isSyntheticStart = a.id && (a.id.includes("_START") || a.id.startsWith("D") && a.id.endsWith("_START"));
+
+    // Use smaller size and white border for checkpoint markers
+    const size = isSyntheticStart ? 5 : 10;  // Checkpoint markers are half size (5 vs 10)
+    const fillColor = "#3b82f6";  // Same blue for both
+    const strokeColor = isSyntheticStart ? "#ffffff" : "#1d4ed8";  // White border for checkpoints
+    const strokeWidth = isSyntheticStart ? 2 : 1;  // Thicker white border for checkpoints
+
+    ctx.fillStyle = fillColor;
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = strokeWidth;
     ctx.beginPath();
     ctx.rect(x - size, y - size, size * 2, size * 2);
     ctx.fill();
     ctx.stroke();
 
+    // Draw label (smaller font for checkpoint markers)
     ctx.fillStyle = "#e5e7eb";
-    ctx.font = "10px system-ui";
+    ctx.font = isSyntheticStart ? "8px system-ui" : "10px system-ui";
     ctx.fillText(String(a.id), x + 8, y - 8);
 
     // Highlight if selected
