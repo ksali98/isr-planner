@@ -1283,12 +1283,72 @@ async def agent_chat(req: AgentChatRequest):
     
 @app.post("/api/agents/chat-v4", response_model=AgentChatResponse)
 async def agent_chat_v4(req: AgentChatRequest):
-    print(">>> /api/agents/chat-v4 (v4 endpoint) HIT <<<", flush=True)
     result = None
+    print(">>> /api/agents/chat-v4 (v4 endpoint) HIT <<<", flush=True)
+    """
+    ISR Agent v4 endpoint using the reasoning-based multi-agent system.
 
+    - If mission_id is omitted: create/solve a new mission and return mission_id.
+    - If mission_id is provided: load existing mission state and allow
+      question-only interaction (no recompute unless the request asks for it).
+    """
     try:
         # -------------------------------
-        # 1) Resolve env & configs
+        # Supabase logging for agent plans
+        # -------------------------------
+        global _current_run_id, _current_env_version_id, _current_plan_id
+
+        raw_routes = result.get("routes") or {}
+        trajectories = result.get("trajectories") or {}
+
+        if raw_routes:
+            # Ensure a run exists
+            if _current_run_id is None:
+                _current_run_id = create_mission_run(system_version="v4-agent", mission_name="isr-agent-run")
+
+            # Snapshot env for this agent solve
+            if _current_run_id is not None:
+                _current_env_version_id = create_env_version(
+                    run_id=_current_run_id,
+                    env_snapshot=env,
+                    source="agent",
+                    reason="agent_chat_v4",
+                )
+
+            # Build metrics similar to /api/solve
+            metrics = {}
+            for d, route_info in raw_routes.items():
+                if isinstance(route_info, dict):
+                    metrics[str(d)] = {
+                        "distance": route_info.get("distance", 0.0),
+                        "points": route_info.get("points", 0),
+                        "fuel_budget": route_info.get("fuel_budget", 0.0),
+                        "route": route_info.get("route", []),
+                        "sequence": route_info.get("sequence", ""),
+                    }
+
+            # Store a draft plan
+            if _current_run_id is not None:
+                _current_plan_id = create_plan(
+                    run_id=_current_run_id,
+                    env_version_id=_current_env_version_id,
+                    status="draft",
+                    starts_by_drone={},      # optional; fill later
+                    allocation=result.get("allocation") or {},
+                    trajectories=trajectories,
+                    metrics=metrics,
+                    notes="draft from /api/agents/chat-v4",
+                )
+
+                # Optional: log event
+                log_event(_current_run_id, "AGENT_PLAN_DRAFT_CREATED", {
+                    "env_version_id": _current_env_version_id,
+                    "plan_id": _current_plan_id,
+                    "num_drones": len(raw_routes),
+                })
+
+        # -------------------------------
+        # 1. Resolve env & configs
         # -------------------------------
         env = req.env
         drone_configs = req.drone_configs or env.get("drone_configs") or {}
@@ -1296,9 +1356,11 @@ async def agent_chat_v4(req: AgentChatRequest):
         mission_id = req.mission_id
         existing_solution: Optional[Dict[str, Any]] = None
 
+        # If mission_id exists, load stored mission snapshot for solution continuity
+        # BUT always use the incoming env/configs (user may have edited targets)
         if mission_id and mission_id in MISSION_STORE:
             mission = MISSION_STORE[mission_id]
-
+            # Use incoming env if provided, fallback to stored env
             if not req.env:
                 env = mission.get("env", env)
             if not req.drone_configs:
@@ -1307,14 +1369,15 @@ async def agent_chat_v4(req: AgentChatRequest):
             existing_solution = {
                 "routes": mission.get("routes") or {},
                 "allocation": mission.get("allocation") or {},
+                # total_points/total_fuel are computed from routes when needed
             }
-            print(f"[v4] Loaded existing mission {mission_id} from store", flush=True)
+            print(f"[v4] Loaded existing mission {mission_id} from store (using fresh env from request)", flush=True)
         elif mission_id:
             print(f"[v4] mission_id={mission_id} not found; treating as new mission", flush=True)
-            mission_id = None
+            mission_id = None  # will create a new one below
 
         # -------------------------------
-        # 2) Call the v4 multi-agent planner
+        # 2. Call the v4 multi-agent planner
         # -------------------------------
         result = run_multi_agent_v4(
             user_message=req.message,
@@ -1328,26 +1391,32 @@ async def agent_chat_v4(req: AgentChatRequest):
             raise RuntimeError(f"run_multi_agent_v4 returned non-dict: {type(result)}")
 
         # -------------------------------
-        # 3) Extract routes for the UI
+        # 3. Extract routes for the UI
         # -------------------------------
         raw_routes = result.get("routes") or {}
         routes_for_ui: Dict[str, List[str]] = {}
 
         for did, route_info in raw_routes.items():
+            # Normal case: route_info is a dict with a "route" key
             if isinstance(route_info, dict):
                 routes_for_ui[str(did)] = route_info.get("route", []) or []
+            # Fallback: if it's already a list, just use it
             elif isinstance(route_info, list):
                 routes_for_ui[str(did)] = route_info
             else:
                 routes_for_ui[str(did)] = []
 
+        # Legacy single route (D1) for older UI helpers
         legacy_route = routes_for_ui.get("1")
+
+        # Extract allocations and strategy
         allocations = result.get("allocation") or {}
         allocation_strategy = result.get("allocation_strategy", "unknown")
 
         # -------------------------------
-        # 4) Persist/refresh mission store
+        # 4. Persist/refresh mission state
         # -------------------------------
+        # We only persist if there is some solution data.
         has_solution = bool(raw_routes)
 
         if has_solution:
@@ -1368,57 +1437,7 @@ async def agent_chat_v4(req: AgentChatRequest):
             }
 
         # -------------------------------
-        # 5) Supabase logging for agent plans (ONLY AFTER result/env exist)
-        # -------------------------------
-        global _current_run_id, _current_env_version_id, _current_plan_id
-
-        if has_solution:
-            # Ensure a run exists
-            if _current_run_id is None:
-                _current_run_id = create_mission_run(system_version="v4-agent", mission_name="isr-agent-run")
-
-            # Snapshot env
-            if _current_run_id is not None:
-                _current_env_version_id = create_env_version(
-                    run_id=_current_run_id,
-                    env_snapshot=env,
-                    source="agent",
-                    reason="agent_chat_v4",
-                )
-
-            # trajectories + metrics
-            trajectories = result.get("trajectories") or {}
-            metrics = {}
-            for d, route_info in raw_routes.items():
-                if isinstance(route_info, dict):
-                    metrics[str(d)] = {
-                        "distance": route_info.get("distance", 0.0),
-                        "points": route_info.get("points", 0),
-                        "fuel_budget": route_info.get("fuel_budget", 0.0),
-                        "route": route_info.get("route", []),
-                        "sequence": route_info.get("sequence", ""),
-                    }
-
-            if _current_run_id is not None:
-                _current_plan_id = create_plan(
-                    run_id=_current_run_id,
-                    env_version_id=_current_env_version_id,
-                    status="draft",
-                    starts_by_drone={},
-                    allocation=allocations,
-                    trajectories=trajectories,
-                    metrics=metrics,
-                    notes="draft from /api/agents/chat-v4",
-                )
-
-                log_event(_current_run_id, "AGENT_PLAN_DRAFT_CREATED", {
-                    "env_version_id": _current_env_version_id,
-                    "plan_id": _current_plan_id,
-                    "num_drones": len(raw_routes),
-                })
-
-        # -------------------------------
-        # 6) Return response
+        # 5. Build response
         # -------------------------------
         return AgentChatResponse(
             reply=result.get("response", "(No v4 agent reply)"),
@@ -1431,7 +1450,6 @@ async def agent_chat_v4(req: AgentChatRequest):
             allocation_strategy=allocation_strategy,
             mission_id=mission_id,
         )
-
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1446,7 +1464,6 @@ async def agent_chat_v4(req: AgentChatRequest):
             allocation_strategy=None,
             mission_id=None,
         )
-
 
         import traceback
         traceback.print_exc()

@@ -93,6 +93,13 @@ const state = {
 
   // Track which targets were assigned in previous cuts (to avoid reassigning)
   previouslyAssignedTargets: [],
+
+  // Per-drone cut positions captured during freezeAtCheckpoint
+  // { [did]: [x,y] } - used when committing segments
+  pendingCutPositions: null,
+
+  // Legacy single cut position (backward compatibility)
+  pendingCutPosition: null,
 };
 
 // ----------------------------------------------------
@@ -164,7 +171,8 @@ class Segment {
     prefixDistances = null,
     isCheckpointReplan = false,
     timestamp = new Date().toISOString(),
-    cutPosition = null  // [x, y] position where segment was cut, or null
+    cutPosition = null,  // [x, y] position where segment was cut (legacy, drone 1)
+    cutPositions = null  // { [droneId]: [x, y] } per-drone cut positions
   }) {
     this.index = index;
     this.solution = Object.freeze(JSON.parse(JSON.stringify(solution)));
@@ -173,6 +181,12 @@ class Segment {
     this.isCheckpointReplan = isCheckpointReplan;
     this.timestamp = timestamp;
     this.cutPosition = cutPosition ? Object.freeze([...cutPosition]) : null;
+    // Per-drone cut positions (new model)
+    this.cutPositions = cutPositions ? Object.freeze(
+      Object.fromEntries(
+        Object.entries(cutPositions).map(([did, pos]) => [did, Object.freeze([...pos])])
+      )
+    ) : null;
     Object.freeze(this);
   }
 
@@ -455,6 +469,7 @@ function mergeEnvForwardFromCurrent(startSegmentIndex) {
       prefixDistances: seg.prefixDistances,
       isCheckpointReplan: seg.isCheckpointReplan,
       cutPosition: seg.cutPosition,
+      cutPositions: seg.cutPositions,
     });
   }
 
@@ -832,17 +847,31 @@ function acceptSolution() {
   // Snapshot the authoritative current env (not stale acceptedEnv)
   const envSnapshot = JSON.parse(JSON.stringify(state.env));
 
+  // Debug: show pendingCutPositions before adding segment
+  appendDebugLine(
+    `ACCEPT DEBUG: pendingCutPositions keys=${Object.keys(state.pendingCutPositions || {}).join(",") || "NONE"}, ` +
+    `pendingCutPosition=${state.pendingCutPosition ? `[${state.pendingCutPosition.map(v=>v.toFixed(1)).join(",")}]` : "null"}`
+  );
+
   // Add segment to MissionReplay (the clean way)
   const segment = missionReplay.addSegment({
     solution: missionState.draftSolution,
     env: envSnapshot,
     prefixDistances: state.checkpointReplanPrefixDistances,
     isCheckpointReplan: missionState.draftSolution.isCheckpointReplan || false,
-    cutPosition: state.pendingCutPosition || null,
+    // Per-drone cut positions (new model)
+    cutPositions: state.pendingCutPositions
+      ? JSON.parse(JSON.stringify(state.pendingCutPositions))
+      : null,
+    // Backward compatibility: single cutPosition from drone "1"
+    cutPosition: (state.pendingCutPositions && state.pendingCutPositions["1"])
+      ? [...state.pendingCutPositions["1"]]
+      : null,
   });
 
-  // Clear the pending cut position after use
-  state.pendingCutPosition = null;
+  // Clear the pending cut positions after use
+  state.pendingCutPositions = null;
+  state.pendingCutPosition = null; // safe cleanup if old code still sets it
 
   // Also keep in missionState.committedSegments for backward compatibility during transition
   missionState.committedSegments.push({
@@ -1417,6 +1446,28 @@ function resizeCanvasToContainer() {
 // ----------------------------------------------------
 // Environment drawing
 // ----------------------------------------------------
+
+// Helper: Draw a white dot cut marker with optional label
+function drawCutMarker(ctx, mx, my, label) {
+  const r = 5;
+  ctx.beginPath();
+  ctx.arc(mx, my, r, 0, Math.PI * 2);
+  ctx.fillStyle = "#ffffff";
+  ctx.fill();
+
+  // Subtle outline for visibility
+  ctx.strokeStyle = "rgba(0,0,0,0.35)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Optional label
+  if (label) {
+    ctx.font = "bold 9px system-ui";
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(label, mx + r + 3, my + 3);
+  }
+}
+
 let _drawEnvFrameCount = 0;
 function drawEnvironment() {
   const canvas = $("env-canvas");
@@ -1877,23 +1928,22 @@ function drawEnvironment() {
   const segmentCount = missionReplay.getSegmentCount();
   for (let i = 0; i < segmentCount; i++) {
     const seg = missionReplay.getSegment(i);
-    if (seg && seg.cutPosition) {
+    if (!seg) continue;
+
+    // NEW path: per-drone cut positions
+    if (seg.cutPositions && typeof seg.cutPositions === "object") {
+      Object.entries(seg.cutPositions).forEach(([did, pos]) => {
+        if (!pos || pos.length !== 2) return;
+        const [mx, my] = w2c(pos[0], pos[1]);
+        drawCutMarker(ctx, mx, my, `C${i + 1} D${did}`);
+      });
+      continue;
+    }
+
+    // Legacy path: single cut position
+    if (seg.cutPosition && seg.cutPosition.length === 2) {
       const [mx, my] = w2c(seg.cutPosition[0], seg.cutPosition[1]);
-      const size = 6;  // half-width of square
-
-      // Blue square with white border
-      ctx.beginPath();
-      ctx.rect(mx - size, my - size, size * 2, size * 2);
-      ctx.fillStyle = "#3b82f6";  // blue-500
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 2;
-      ctx.fill();
-      ctx.stroke();
-
-      // Optional: segment number label
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "bold 8px system-ui";
-      ctx.fillText(`C${i + 1}`, mx + size + 3, my + 3);
+      drawCutMarker(ctx, mx, my, `C${i + 1}`);
     }
   }
 
@@ -2064,6 +2114,7 @@ async function exportEnvironment() {
           isCheckpointReplan: !!s.isCheckpointReplan,
           timestamp: s.timestamp || null,
           cutPosition: s.cutPosition || null,
+          cutPositions: s.cutPositions || null,
         })),
       };
     } else {
@@ -3892,10 +3943,16 @@ function freezeAtCheckpoint() {
     return;
   }
 
+  // Debug: confirm which drones are being frozen
+  appendDebugLine(`freezeAtCheckpoint: drones=${Object.keys(state.animation?.drones || {}).join(",")}`);
+
   // Ensure checkpoint container exists
   state.checkpoint = state.checkpoint || { active: false, pct: 0, segments: {} };
   state.checkpoint.active = true;
   state.checkpoint.segments = {};
+
+  // Initialize per-drone cut positions map
+  state.pendingCutPositions = {};
 
   // Track which targets are visited in the current (frozen) routes
   const targetsVisitedThisSegment = [];
@@ -3917,6 +3974,11 @@ function freezeAtCheckpoint() {
       splitPoint,
       checkpointDist: currentDist,
     };
+
+    // Capture per-drone cut position for later "Accept"
+    if (splitPoint && splitPoint.length === 2) {
+      state.pendingCutPositions[did] = [splitPoint[0], splitPoint[1]];
+    }
 
     // Mark ONLY targets that have been passed (are in the prefix trajectory)
     // Targets ahead of the frozen position should remain available for replanning
@@ -3996,6 +4058,9 @@ function freezeAtCheckpoint() {
     .map(d => (d.distanceTraveled || 0) / d.totalDistance)
     .reduce((a, b, _, arr) => a + b / arr.length, 0) * 100;
 
+  // Debug: log captured cut positions
+  appendDebugLine(`✂️ pendingCutPositions=${JSON.stringify(state.pendingCutPositions || {})}`);
+
   updateAnimationButtonStates();
   drawEnvironment();
   appendDebugLine(`Frozen at ${avgPct.toFixed(0)}% progress`);
@@ -4007,6 +4072,9 @@ console.log("freezeAtCheckpoint defined?", typeof freezeAtCheckpoint, "line mark
 // ----------------------------------------------------
 function startAnimation(droneIds) {
   const perms = getUiPermissions();
+
+  // Debug: log which drones are being passed to animation
+  appendDebugLine(`startAnimation called with droneIds=[${(droneIds || []).join(",")}]`);
 
   // Check if we can animate or resume
   if (!perms.canAnimate && !perms.canResume) {
@@ -4689,17 +4757,29 @@ function cutAtCheckpoint() {
     appendDebugLine(`✅ Checkpoint set with ${Object.keys(state.checkpoint.segments || {}).length} drone segments`);
   }
 
-  // Capture the cut position from the first active drone's splitPoint
-  state.pendingCutPosition = null;
-  if (state.checkpoint?.segments) {
-    for (const did of Object.keys(state.checkpoint.segments)) {
-      const sp = state.checkpoint.segments[did]?.splitPoint;
-      if (sp && sp.length === 2) {
-        state.pendingCutPosition = [sp[0], sp[1]];
-        appendDebugLine(`📍 Cut position captured at [${sp[0].toFixed(2)}, ${sp[1].toFixed(2)}]`);
-        break;
-      }
+  // Debug: show splitPoints for all drones at cut time
+  appendDebugLine(
+    `CUT DEBUG: checkpoint splitPoints = ` +
+    Object.entries(state.checkpoint?.segments || {})
+      .map(([did, s]) => `D${did}:${s?.splitPoint ? `[${s.splitPoint.map(v=>v.toFixed(1)).join(",")}]` : "null"}`)
+      .join(" ")
+  );
+
+  // Note: pendingCutPositions is now populated inside freezeAtCheckpoint()
+  // Log what was captured for debugging
+  if (state.pendingCutPositions && Object.keys(state.pendingCutPositions).length > 0) {
+    for (const [did, pos] of Object.entries(state.pendingCutPositions)) {
+      appendDebugLine(`📍 Cut pos D${did} at [${pos[0].toFixed(2)}, ${pos[1].toFixed(2)}]`);
     }
+    // Set legacy single cut position from first drone (backward compatibility)
+    const firstDid = Object.keys(state.pendingCutPositions)[0];
+    if (firstDid) {
+      const p = state.pendingCutPositions[firstDid];
+      state.pendingCutPosition = [p[0], p[1]];
+    }
+    appendDebugLine(`📍 Cut positions captured for drones: [${Object.keys(state.pendingCutPositions).join(", ")}]`);
+  } else {
+    appendDebugLine("⚠️ No cut positions captured - pendingCutPositions is empty");
   }
 
   // Transition to CHECKPOINT state (from replay/cut - solve disabled)
@@ -4769,15 +4849,15 @@ function attachAnimationControls() {
   const allBtn = $("anim-all");
   if (allBtn) {
     allBtn.addEventListener("click", () => {
-      const enabledDrones = [];
-      for (let did = 1; did <= 5; did++) {
-        const routeInfo = state.routes[String(did)];
-        if (routeInfo && routeInfo.route && routeInfo.route.length >= 2) {
-          enabledDrones.push(String(did));
-        }
-      }
-      if (enabledDrones.length > 0) {
-        startAnimation(enabledDrones);
+      // Start animation for all drones that have a valid trajectory
+      const animDrones = Object.keys(state.routes || {})
+        .map(String)
+        .filter(did => Array.isArray(state.routes[did]?.trajectory) && state.routes[did].trajectory.length >= 2);
+
+      appendDebugLine(`Anim All: animDrones=[${animDrones.join(",")}]`);
+
+      if (animDrones.length > 0) {
+        startAnimation(animDrones);
       } else {
         appendDebugLine("No routes to animate. Run planner first.");
       }
@@ -5046,18 +5126,17 @@ function attachMissionControlHandlers() {
       } else if (perms.canResume) {
         resumeAnimation();
       } else if (perms.canAnimate) {
-        // Start animation for all enabled drones
-        const enabledDrones = [];
-        for (let did = 1; did <= 5; did++) {
-          const cfg = state.droneConfigs[String(did)];
-          if (cfg && cfg.enabled && state.routes[String(did)]?.trajectory) {
-            enabledDrones.push(did);
-          }
-        }
-        if (enabledDrones.length > 0) {
-          startAnimation(enabledDrones);
+        // Start animation for all drones that have a valid trajectory
+        const animDrones = Object.keys(state.routes || {})
+          .map(String)
+          .filter(did => Array.isArray(state.routes[did]?.trajectory) && state.routes[did].trajectory.length >= 2);
+
+        appendDebugLine(`MC Animate: animDrones=[${animDrones.join(",")}] (routes=${Object.keys(state.routes||{}).join(",")})`);
+
+        if (animDrones.length > 0) {
+          startAnimation(animDrones);
         } else {
-          appendDebugLine("No enabled drones with routes to animate");
+          appendDebugLine("No drones with valid routes to animate");
         }
       }
     });
