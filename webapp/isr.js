@@ -901,6 +901,10 @@ function acceptSolution() {
   if (isSegmentInfoWorkflow) {
     // SegmentInfo workflow: update current segment with solution
     appendDebugLine(`[ACCEPT] SegmentInfo workflow: updating segment ${currentIdx} with solution`);
+    console.log(`[ACCEPT] SegmentInfo workflow: currentIdx=${currentIdx}, nextSegment exists=${!!nextSegment}`);
+    if (nextSegment) {
+      console.log(`[ACCEPT] nextSegment.cutDistance=${nextSegment.cutDistance}`);
+    }
 
     // Calculate cutPositions from the solution trajectory at the NEXT segment's cutDistance
     // This is where the white dot should appear
@@ -921,21 +925,31 @@ function acceptSolution() {
       };
 
       // For each drone, find position at nextCutDistance
+      console.log(`[ACCEPT] Calculating cutPositions at distance=${nextCutDistance}, draftSolution.routes keys:`, Object.keys(missionState.draftSolution.routes || {}));
       Object.entries(missionState.draftSolution.routes || {}).forEach(([droneId, routeData]) => {
         const trajectory = routeData.trajectory;
+        console.log(`[ACCEPT] Drone ${droneId}: trajectory length=${trajectory?.length || 0}`);
         if (trajectory && trajectory.length >= 2) {
           const result = split_polyline_at_distance(trajectory, nextCutDistance);
+          console.log(`[ACCEPT] Drone ${droneId}: splitPoint=${JSON.stringify(result.splitPoint)}`);
           if (result.splitPoint && !isAtAirport(result.splitPoint[0], result.splitPoint[1])) {
             calculatedCutPositions[droneId] = [...result.splitPoint];
+            console.log(`[ACCEPT] Drone ${droneId}: STORED cutPosition`);
+          } else if (result.splitPoint) {
+            console.log(`[ACCEPT] Drone ${droneId}: splitPoint is AT airport, not storing`);
           }
         }
       });
 
       if (Object.keys(calculatedCutPositions).length === 0) {
         calculatedCutPositions = null;
+        console.log(`[ACCEPT] No cutPositions calculated (all at airport or no trajectories)`);
       }
 
+      console.log(`[ACCEPT] Final calculatedCutPositions:`, calculatedCutPositions);
       appendDebugLine(`[ACCEPT] Calculated cutPositions at distance ${nextCutDistance.toFixed(1)} for ${Object.keys(calculatedCutPositions || {}).length} drones`);
+    } else {
+      console.log(`[ACCEPT] Skipping cutPositions calc: nextSegment=${!!nextSegment}, nextSegment?.cutDistance=${nextSegment?.cutDistance}`);
     }
 
     // Update current segment with the solution
@@ -949,6 +963,7 @@ function acceptSolution() {
 
     // Update NEXT segment with calculated cutPositions (for white dot display)
     if (nextSegment && calculatedCutPositions) {
+      console.log(`[ACCEPT] Storing cutPositions in segment ${currentIdx + 1}:`, calculatedCutPositions);
       appendDebugLine(`[ACCEPT] Storing cutPositions in segment ${currentIdx + 1}: ${JSON.stringify(calculatedCutPositions)}`);
       missionReplay.replaceSegment(currentIdx + 1, {
         solution: nextSegment.solution,
@@ -959,8 +974,10 @@ function acceptSolution() {
       });
       // Verify it was stored
       const verifySegment = missionReplay.getSegment(currentIdx + 1);
+      console.log(`[ACCEPT] Verified segment ${currentIdx + 1} cutPositions:`, verifySegment?.cutPositions);
       appendDebugLine(`[ACCEPT] Verified segment ${currentIdx + 1} cutPositions: ${JSON.stringify(verifySegment?.cutPositions)}`);
     } else {
+      console.log(`[ACCEPT] NOT storing cutPositions: nextSegment=${!!nextSegment}, calculatedCutPositions=`, calculatedCutPositions);
       appendDebugLine(`[ACCEPT] NOT storing cutPositions: nextSegment=${!!nextSegment}, calculatedCutPositions=${JSON.stringify(calculatedCutPositions)}`);
     }
 
@@ -3152,34 +3169,54 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   // Clear the old segmentedMission workflow - we use MissionReplay now
   missionState.segmentedMission = null;
 
-  // Calculate cut distances from segment solutions (if they have trajectories)
-  // The cut distance is the total trajectory length of the PREVIOUS segment
+  // Get cut distances from segment data
+  // New format: cutDistance is stored directly on each segment (segments[1+].cutDistance)
+  // Legacy format: calculate from solution.routes[].distance
   const segments = data.segments;
   state.importedSegmentCuts = [];
 
-  for (let i = 0; i < segments.length - 1; i++) {
-    const seg = segments[i];
-    const solution = seg.solution || {};
-    const routes = solution.routes || {};
+  // Check if this is new format (cutDistance stored directly on segments)
+  const hasDirectCutDistances = segments.length > 1 && segments[1].cutDistance != null;
 
-    // Find the max distance traveled in this segment (for the cut point)
-    let maxDistance = 0;
-    Object.values(routes).forEach(routeData => {
-      if (routeData.distance && routeData.distance > maxDistance) {
-        maxDistance = routeData.distance;
-      }
-    });
+  if (hasDirectCutDistances) {
+    // New format: read cutDistance directly from segments 1+
+    for (let i = 1; i < segments.length; i++) {
+      const seg = segments[i];
+      const cutDistance = seg.cutDistance || 0;
 
-    // Accumulate distances - cut N is the total distance up to segment N
-    const prevCutDistance = i > 0 ? state.importedSegmentCuts[i - 1].cutDistance : 0;
-    const cutDistance = prevCutDistance + maxDistance;
+      state.importedSegmentCuts.push({
+        cutDistance,
+        segmentIndex: i,
+      });
 
-    state.importedSegmentCuts.push({
-      cutDistance,
-      segmentIndex: i + 1,
-    });
+      appendDebugLine(`   Cut ${i}: distance=${cutDistance.toFixed(1)} (from segment data)`);
+    }
+  } else {
+    // Legacy format: calculate from solution.routes[].distance
+    for (let i = 0; i < segments.length - 1; i++) {
+      const seg = segments[i];
+      const solution = seg.solution || {};
+      const routes = solution.routes || {};
 
-    appendDebugLine(`   Cut ${i + 1}: distance=${cutDistance.toFixed(1)} (segment ${i} distance=${maxDistance.toFixed(1)})`);
+      // Find the max distance traveled in this segment (for the cut point)
+      let maxDistance = 0;
+      Object.values(routes).forEach(routeData => {
+        if (routeData.distance && routeData.distance > maxDistance) {
+          maxDistance = routeData.distance;
+        }
+      });
+
+      // Accumulate distances - cut N is the total distance up to segment N
+      const prevCutDistance = i > 0 ? state.importedSegmentCuts[i - 1].cutDistance : 0;
+      const cutDistance = prevCutDistance + maxDistance;
+
+      state.importedSegmentCuts.push({
+        cutDistance,
+        segmentIndex: i + 1,
+      });
+
+      appendDebugLine(`   Cut ${i + 1}: distance=${cutDistance.toFixed(1)} (calculated from segment ${i} distance=${maxDistance.toFixed(1)})`);
+    }
   }
 
   console.log(`[loadSegmentedMissionFromJson] Set state.importedSegmentCuts:`, state.importedSegmentCuts);
