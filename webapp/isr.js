@@ -1965,6 +1965,17 @@ function drawEnvironment() {
   }
 
   // Draw cut markers from missionReplay segments
+  // Helper: check if position is at an airport (don't draw cut markers at airports)
+  const isAtAirport = (x, y) => {
+    const airports = state.env?.airports || [];
+    const threshold = 2.0; // Distance threshold to consider "at" airport
+    return airports.some(a => {
+      const dx = a.x - x;
+      const dy = a.y - y;
+      return Math.sqrt(dx * dx + dy * dy) < threshold;
+    });
+  };
+
   const segmentCount = missionReplay.getSegmentCount();
   for (let i = 0; i < segmentCount; i++) {
     const seg = missionReplay.getSegment(i);
@@ -1974,6 +1985,8 @@ function drawEnvironment() {
     if (seg.cutPositions && typeof seg.cutPositions === "object") {
       Object.entries(seg.cutPositions).forEach(([did, pos]) => {
         if (!pos || pos.length !== 2) return;
+        // Skip if position is at an airport
+        if (isAtAirport(pos[0], pos[1])) return;
         const [mx, my] = w2c(pos[0], pos[1]);
         drawCutMarker(ctx, mx, my, `C${i + 1} D${did}`);
       });
@@ -1982,6 +1995,8 @@ function drawEnvironment() {
 
     // Legacy path: single cut position
     if (seg.cutPosition && seg.cutPosition.length === 2) {
+      // Skip if position is at an airport
+      if (isAtAirport(seg.cutPosition[0], seg.cutPosition[1])) continue;
       const [mx, my] = w2c(seg.cutPosition[0], seg.cutPosition[1]);
       drawCutMarker(ctx, mx, my, `C${i + 1}`);
     }
