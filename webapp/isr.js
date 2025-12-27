@@ -1968,7 +1968,7 @@ function drawEnvironment() {
   // Helper: check if position is at an airport (don't draw cut markers at airports)
   const isAtAirport = (x, y) => {
     const airports = state.env?.airports || [];
-    const threshold = 2.0; // Distance threshold to consider "at" airport
+    const threshold = 5.0; // Distance threshold to consider "at" airport
     return airports.some(a => {
       const dx = a.x - x;
       const dy = a.y - y;
@@ -2940,6 +2940,17 @@ function loadSegmentInfoFromJson(data, filename = "") {
     isCheckpointReplan: false,
   });
 
+  // Helper: check if position is at an airport
+  const isAtAirport = (x, y) => {
+    const airports = baseEnv.airports || [];
+    const threshold = 5.0; // Distance threshold to consider "at" airport
+    return airports.some(a => {
+      const dx = a.x - x;
+      const dy = a.y - y;
+      return Math.sqrt(dx * dx + dy * dy) < threshold;
+    });
+  };
+
   // Now create segments from each cut point
   for (let i = 0; i < segmentCuts.length; i++) {
     const cut = segmentCuts[i];
@@ -2950,10 +2961,14 @@ function loadSegmentInfoFromJson(data, filename = "") {
     const cutDistance = firstDronePos?.distanceTraveled || firstDronePos?.totalDistance || 0;
 
     // Build cutPositions map for marker display
+    // Skip positions that are at airports (no white dot at airports)
     const cutPositions = {};
     Object.entries(dronePositions).forEach(([droneId, pos]) => {
       if (pos.position && Array.isArray(pos.position)) {
-        cutPositions[droneId] = [...pos.position];
+        // Don't include positions at airports
+        if (!isAtAirport(pos.position[0], pos.position[1])) {
+          cutPositions[droneId] = [...pos.position];
+        }
       }
     });
 
@@ -2963,7 +2978,7 @@ function loadSegmentInfoFromJson(data, filename = "") {
       solution: { routes: {}, sequences: {} },
       env: JSON.parse(JSON.stringify(baseEnv)),
       cutDistance: cutDistance,
-      cutPositions: cutPositions,
+      cutPositions: Object.keys(cutPositions).length > 0 ? cutPositions : null,
       isCheckpointReplan: true,
     });
   }
