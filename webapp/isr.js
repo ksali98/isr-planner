@@ -1038,7 +1038,21 @@ function acceptSolution() {
 
     if (nextSeg && Object.keys(nextSeg.solution.routes || {}).length === 0) {
       // Next segment exists but needs solving
-      appendDebugLine(`➡️ Ready to Solve segment ${nextIdx + 1}`);
+      // Load the next segment's environment (with new targets)
+      if (nextSeg.env) {
+        state.env = JSON.parse(JSON.stringify(nextSeg.env));
+        missionState.acceptedEnv = JSON.parse(JSON.stringify(nextSeg.env));
+        state.droneConfigs = JSON.parse(JSON.stringify(nextSeg.env.drone_configs || state.droneConfigs || {}));
+        state.env.drone_configs = state.droneConfigs;
+        missionState.draftSolution = null;
+
+        initDroneConfigsFromEnv();
+        updateSamWrappingClientSide();
+
+        appendDebugLine(`➡️ Loaded segment ${nextIdx + 1} env with ${state.env.targets?.length || 0} targets. Ready to Solve.`);
+      } else {
+        appendDebugLine(`➡️ Ready to Solve segment ${nextIdx + 1}`);
+      }
       setMissionMode(MissionMode.IDLE, `segment ${nextIdx + 1} ready to solve`);
       drawEnvironment();
       return;
@@ -2090,8 +2104,7 @@ function drawEnvironment() {
     if (seg.cutPositions && typeof seg.cutPositions === "object") {
       Object.entries(seg.cutPositions).forEach(([did, pos]) => {
         if (!pos || pos.length !== 2) return;
-        // Skip if position is at an airport
-        if (isAtAirport(pos[0], pos[1])) return;
+        // Draw cut marker regardless of position (removed isAtAirport check)
         const [mx, my] = w2c(pos[0], pos[1]);
         console.log(`[drawEnvironment] Drawing cut marker for seg ${i}, drone ${did} at (${pos[0].toFixed(1)}, ${pos[1].toFixed(1)})`);
         drawCutMarker(ctx, mx, my, `C${i} D${did}`);
