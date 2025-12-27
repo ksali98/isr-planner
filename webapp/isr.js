@@ -876,37 +876,95 @@ function acceptSolution() {
   let segment;
   const currentIdx = missionReplay.getCurrentSegmentIndex();
   const existingSegment = missionReplay.getSegment(currentIdx);
+  const nextSegment = missionReplay.getSegment(currentIdx + 1);
 
-  // If current segment already exists (from segmentInfo import), UPDATE it with the solution
-  // Otherwise, ADD a new segment
-  if (existingSegment && existingSegment.solution && Object.keys(existingSegment.solution.routes || {}).length === 0) {
-    // Existing segment has no routes - this is from segmentInfo import, update with solution
-    appendDebugLine(`[ACCEPT] Updating existing segment ${currentIdx} with solution`);
+  // Check if we're in segmentInfo workflow (pre-imported segments with cutDistances)
+  const isSegmentInfoWorkflow = existingSegment &&
+    existingSegment.solution &&
+    Object.keys(existingSegment.solution.routes || {}).length === 0 &&
+    missionReplay.getSegmentCount() > 1;
+
+  if (isSegmentInfoWorkflow) {
+    // SegmentInfo workflow: update current segment with solution
+    appendDebugLine(`[ACCEPT] SegmentInfo workflow: updating segment ${currentIdx} with solution`);
+
+    // Calculate cutPositions from the solution trajectory at the NEXT segment's cutDistance
+    // This is where the white dot should appear
+    let calculatedCutPositions = null;
+    if (nextSegment && nextSegment.cutDistance > 0) {
+      const nextCutDistance = nextSegment.cutDistance;
+      calculatedCutPositions = {};
+
+      // Helper: check if position is at an airport
+      const isAtAirport = (x, y) => {
+        const airports = state.env?.airports || [];
+        const threshold = 5.0;
+        return airports.some(a => {
+          const dx = a.x - x;
+          const dy = a.y - y;
+          return Math.sqrt(dx * dx + dy * dy) < threshold;
+        });
+      };
+
+      // For each drone, find position at nextCutDistance
+      Object.entries(missionState.draftSolution.routes || {}).forEach(([droneId, routeData]) => {
+        const trajectory = routeData.trajectory;
+        if (trajectory && trajectory.length >= 2) {
+          const result = split_polyline_at_distance(trajectory, nextCutDistance);
+          if (result.splitPoint && !isAtAirport(result.splitPoint[0], result.splitPoint[1])) {
+            calculatedCutPositions[droneId] = [...result.splitPoint];
+          }
+        }
+      });
+
+      if (Object.keys(calculatedCutPositions).length === 0) {
+        calculatedCutPositions = null;
+      }
+
+      appendDebugLine(`[ACCEPT] Calculated cutPositions at distance ${nextCutDistance.toFixed(1)} for ${Object.keys(calculatedCutPositions || {}).length} drones`);
+    }
+
+    // Update current segment with the solution
     missionReplay.replaceSegment(currentIdx, {
       solution: missionState.draftSolution,
       env: envSnapshot,
-      cutDistance: existingSegment.cutDistance,  // Keep original cutDistance from import
-      cutPositions: existingSegment.cutPositions,  // Keep original cutPositions from import
+      cutDistance: existingSegment.cutDistance,
+      cutPositions: existingSegment.cutPositions,
       isCheckpointReplan: existingSegment.isCheckpointReplan,
     });
+
+    // Update NEXT segment with calculated cutPositions (for white dot display)
+    if (nextSegment && calculatedCutPositions) {
+      missionReplay.replaceSegment(currentIdx + 1, {
+        solution: nextSegment.solution,
+        env: nextSegment.env,
+        cutDistance: nextSegment.cutDistance,
+        cutPositions: calculatedCutPositions,
+        isCheckpointReplan: nextSegment.isCheckpointReplan,
+      });
+    }
+
     segment = missionReplay.getSegment(currentIdx);
+
+    // Advance to next segment for building
+    if (nextSegment) {
+      missionReplay.setCurrentSegmentIndex(currentIdx + 1);
+      missionState.currentBuildSegmentIndex = currentIdx + 1;
+      appendDebugLine(`[ACCEPT] Advanced to segment ${currentIdx + 1} for next solve`);
+    }
+
   } else {
-    // No existing segment, or existing segment already has routes - ADD new segment
+    // Normal workflow: ADD new segment (not from segmentInfo import)
     segment = missionReplay.addSegment({
       solution: missionState.draftSolution,
       env: envSnapshot,
-      // Single cut distance (where this segment starts)
       cutDistance: state.pendingCutDistance || null,
       isCheckpointReplan: missionState.draftSolution.isCheckpointReplan || false,
-      // Per-drone cut positions for marker display
       cutPositions: state.pendingCutPositions
         ? JSON.parse(JSON.stringify(state.pendingCutPositions))
         : null,
     });
 
-    // IMPORTANT: Advance MissionReplay to the new segment so that:
-    // - getStartingDistance() returns this segment's cutDistance
-    // - Animation continues from the cut point, not from origin
     missionReplay.setCurrentSegmentIndex(segment.index);
   }
 
@@ -914,7 +972,7 @@ function acceptSolution() {
   state.pendingCutPositions = null;
   state.pendingCutDistance = null;
 
-  // Also keep in missionState.committedSegments for backward compatibility during transition
+  // Also keep in missionState.committedSegments for backward compatibility
   missionState.committedSegments.push({
     index: segment.index,
     solution: JSON.parse(JSON.stringify(missionState.draftSolution)),
@@ -924,7 +982,7 @@ function acceptSolution() {
     isCheckpointReplan: missionState.draftSolution.isCheckpointReplan || false,
   });
 
-  // Propagate env edits forward into all future segments (so added targets persist)
+  // Propagate env edits forward into all future segments
   const finalIdx = missionReplay.getCurrentSegmentIndex();
   mergeEnvForwardFromCurrent(finalIdx + 1);
   missionState.currentSegmentIndex = segment.index;
@@ -933,41 +991,43 @@ function acceptSolution() {
   missionState.draftSolution = null;
 
   appendDebugLine(`✅ Solution accepted as segment ${segment.index + 1}`);
-  appendDebugLine(`   Visited targets retained: [${state.visitedTargets.join(", ")}]`);
-  appendDebugLine(`   MissionReplay: ${missionReplay.getSegmentCount()} segments`);
-  appendDebugLine(`ACCEPT: now currentSegmentIndex=${missionState.currentSegmentIndex}, replayCount=${missionReplay.getSegmentCount()}`);
-  appendDebugLine(`ACCEPT: env targets now=${(state.env.targets||[]).map(t=>t.id).join(",")}`);
+  appendDebugLine(`   Visited targets: [${state.visitedTargets.join(", ")}]`);
+  appendDebugLine(`   MissionReplay: ${missionReplay.getSegmentCount()} segments, current=${missionReplay.getCurrentSegmentIndex()}`);
 
-  // --- Segmented mission workflow: advance to next segment or finish ---
+  // --- SegmentInfo workflow: advance to next segment or finish ---
+  if (isSegmentInfoWorkflow) {
+    const nextIdx = missionReplay.getCurrentSegmentIndex();
+    const nextSeg = missionReplay.getSegment(nextIdx);
+
+    if (nextSeg && Object.keys(nextSeg.solution.routes || {}).length === 0) {
+      // Next segment exists but needs solving
+      appendDebugLine(`➡️ Ready to Solve segment ${nextIdx + 1}`);
+      setMissionMode(MissionMode.IDLE, `segment ${nextIdx + 1} ready to solve`);
+      drawEnvironment();
+      return;
+    } else {
+      // All segments have solutions - ready to animate
+      setMissionMode(MissionMode.READY_TO_ANIMATE, "all segments accepted; ready to replay");
+      appendDebugLine("✅ All segments accepted. Ready to Animate full mission.");
+      drawEnvironment();
+      return;
+    }
+  }
+
+  // --- Original segmentedMission workflow (for old format) ---
   if (missionState.segmentedMission) {
     const nextIdx = (missionState.currentBuildSegmentIndex || 0) + 1;
     missionState.currentBuildSegmentIndex = nextIdx;
 
     const nextSeg = missionState.segmentedMission.segments[nextIdx];
-    appendDebugLine(`[LOAD] nextIdx=${nextIdx}, nextSeg exists=${!!nextSeg}, nextSeg.env exists=${!!(nextSeg && nextSeg.env)}`);
-    // Debug: show all segment target counts
-    if (missionState.segmentedMission.segments) {
-      const segInfo = missionState.segmentedMission.segments.map((s, i) =>
-        `seg${i}:${(s.env?.targets||[]).length}`
-      ).join(", ");
-      appendDebugLine(`[LOAD] All segments target counts: ${segInfo}`);
-    }
-    if (nextSeg && nextSeg.env) {
-      appendDebugLine(`[LOAD] nextSeg.env.targets: ${(nextSeg.env.targets||[]).map(t=>t.id).join(",")}`);
-    }
     if (nextSeg) {
-      // Load next segment env for solving (already merged with edits via mergeEnvForwardFromCurrent)
       state.env = JSON.parse(JSON.stringify(nextSeg.env));
       missionState.acceptedEnv = JSON.parse(JSON.stringify(nextSeg.env));
       state.droneConfigs = JSON.parse(JSON.stringify(nextSeg.drone_configs || state.env.drone_configs || {}));
       state.env.drone_configs = state.droneConfigs;
-
-      // Clear per-segment draft-only visuals
       missionState.draftSolution = null;
 
-      // Back to IDLE so user can Solve next segment
       setMissionMode(MissionMode.IDLE, `segment ${nextIdx + 1} ready to solve`);
-      appendDebugLine(`ADVANCE: moved to seg ${nextIdx + 1}, targets=${(state.env.targets||[]).length}, ids=${(state.env.targets||[]).map(t=>t.id).join(",")}`);
       appendDebugLine(`➡️ Loaded segment ${nextIdx + 1} env. Ready to Solve.`);
 
       initDroneConfigsFromEnv();
@@ -975,7 +1035,6 @@ function acceptSolution() {
       drawEnvironment();
       return;
     } else {
-      // No more segments: now user may replay/animate full mission
       setMissionMode(MissionMode.READY_TO_ANIMATE, "all segments accepted; ready to replay");
       appendDebugLine("✅ All segments accepted. Ready to Animate full mission.");
       drawEnvironment();
@@ -2918,78 +2977,64 @@ function loadSegmentInfoFromJson(data, filename = "") {
   missionReplay.clear();
   missionState.committedSegments = [];
   missionState.draftSolution = null;
-  missionState.segmentedMission = null;
 
-  // Load visited targets from segmentInfo
+  // DON'T load visited targets - user will solve fresh, targets get marked as visited during solve
   const segmentInfo = data.segmentInfo;
-  state.visitedTargets = [...(segmentInfo.visitedTargets || [])];
+  state.visitedTargets = [];
 
   // Create MissionReplay segments from segmentCuts
   // Segment 0: the initial segment (no cutDistance)
   // Segment N: starts at the cut point from segment N-1
 
   const segmentCuts = segmentInfo.segmentCuts || [];
-  appendDebugLine(`📊 Found ${segmentCuts.length} segment cuts`);
+  appendDebugLine(`📊 Found ${segmentCuts.length} segment cuts (will create ${segmentCuts.length + 1} segments)`);
+
+  // Store the segment cut data for later use when accepting solutions
+  // We'll calculate cutPositions from the actual solution trajectory
+  state.importedSegmentCuts = segmentCuts.map((cut, i) => {
+    const dronePositions = cut.dronePositions || {};
+    const firstDronePos = Object.values(dronePositions)[0];
+    const cutDistance = firstDronePos?.distanceTraveled || firstDronePos?.totalDistance || 0;
+    return {
+      cutDistance,
+      visitedTargets: cut.visitedTargets || [],
+    };
+  });
 
   // First, create segment 0 (the base segment, starts at distance 0)
-  // We need a placeholder solution since we don't have the actual routes
+  // Placeholder solution - will be filled when user Solves
   missionReplay.addSegment({
     solution: { routes: {}, sequences: {} },
     env: JSON.parse(JSON.stringify(baseEnv)),
     cutDistance: null,  // Segment 0 starts at 0
+    cutPositions: null, // Will be calculated when accepting
     isCheckpointReplan: false,
   });
 
-  // Helper: check if position is at an airport
-  const isAtAirport = (x, y) => {
-    const airports = baseEnv.airports || [];
-    const threshold = 5.0; // Distance threshold to consider "at" airport
-    return airports.some(a => {
-      const dx = a.x - x;
-      const dy = a.y - y;
-      return Math.sqrt(dx * dx + dy * dy) < threshold;
-    });
-  };
-
-  // Now create segments from each cut point
+  // Create placeholder segments for each cut
+  // cutPositions will be calculated from the actual solution when accepting
   for (let i = 0; i < segmentCuts.length; i++) {
-    const cut = segmentCuts[i];
-
-    // Get the cutDistance from the first drone's distanceTraveled
-    const dronePositions = cut.dronePositions || {};
-    const firstDronePos = Object.values(dronePositions)[0];
-    const cutDistance = firstDronePos?.distanceTraveled || firstDronePos?.totalDistance || 0;
-
-    // Build cutPositions map for marker display
-    // Skip positions that are at airports (no white dot at airports)
-    const cutPositions = {};
-    Object.entries(dronePositions).forEach(([droneId, pos]) => {
-      if (pos.position && Array.isArray(pos.position)) {
-        // Don't include positions at airports
-        if (!isAtAirport(pos.position[0], pos.position[1])) {
-          cutPositions[droneId] = [...pos.position];
-        }
-      }
-    });
-
-    appendDebugLine(`   Cut ${i + 1}: distance=${cutDistance.toFixed(1)}, visited=${(cut.visitedTargets || []).join(",")}`);
+    const cutData = state.importedSegmentCuts[i];
+    appendDebugLine(`   Segment ${i + 1}: cutDistance=${cutData.cutDistance.toFixed(1)}`);
 
     missionReplay.addSegment({
       solution: { routes: {}, sequences: {} },
       env: JSON.parse(JSON.stringify(baseEnv)),
-      cutDistance: cutDistance,
-      cutPositions: Object.keys(cutPositions).length > 0 ? cutPositions : null,
+      cutDistance: cutData.cutDistance,
+      cutPositions: null,  // Will be calculated from solution trajectory
       isCheckpointReplan: true,
     });
   }
 
-  // Reset to start for replay
+  // Reset to start - user will solve segment 0 first
   missionReplay.resetToStart();
+  missionState.currentBuildSegmentIndex = 0;
 
   appendDebugLine(`✅ Created ${missionReplay.getSegmentCount()} segments in MissionReplay`);
+  appendDebugLine(`   User must Solve each segment. White dots appear after Accept.`);
 
   // Set mode to ready for solve (user needs to solve before animate)
-  setMissionMode(MissionMode.IDLE, "segmentInfo loaded - solve to animate");
+  setMissionMode(MissionMode.IDLE, "segmentInfo loaded - solve segment 1");
 }
 
 /**
