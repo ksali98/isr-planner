@@ -2969,16 +2969,40 @@ function updateAllocationDisplay(allocations, strategy) {
  * Check if JSON data is a segmented mission file (vs plain environment)
  * Detection: data.segments is array and data.segments[0].env exists
  */
-function isSegmentedMissionJson(data) {
-  return data && Array.isArray(data.segments) && data.segments.length > 0 && data.segments[0].env;
+function isSegmentedMissionJson(data, filename = "") {
+  const hasSegmentsArray = data && Array.isArray(data.segments) && data.segments.length > 0 && data.segments[0].env;
+  return hasSegmentsArray && isSegmentedByFilename(filename);
+}
+
+/**
+ * Extract segment count from filename pattern _Nx_ where x is the number
+ * Returns the segment count (x) or 1 if not found (non-segmented)
+ */
+function getSegmentCountFromFilename(filename) {
+  if (!filename) return 1;
+  // Match pattern _Nx_ where x is one or more digits
+  const match = filename.match(/_N(\d+)_/);
+  if (match) {
+    return parseInt(match[1], 10);
+  }
+  return 1; // Default to non-segmented
+}
+
+/**
+ * Check if file should be treated as segmented based on filename pattern _Nx_ where x > 1
+ */
+function isSegmentedByFilename(filename) {
+  return getSegmentCountFromFilename(filename) > 1;
 }
 
 /**
  * Check if JSON data has segmentInfo with cut points (replay format)
  * This format contains the base env + segmentInfo.segmentCuts for replay
+ * NOW ALSO requires filename to have _Nx_ pattern with x > 1
  */
-function isSegmentInfoJson(data) {
-  return data && data.type === "segmented" && data.segmentInfo && Array.isArray(data.segmentInfo.segmentCuts);
+function isSegmentInfoJson(data, filename = "") {
+  const hasSegmentInfoStructure = data && data.type === "segmented" && data.segmentInfo && Array.isArray(data.segmentInfo.segmentCuts);
+  return hasSegmentInfoStructure && isSegmentedByFilename(filename);
 }
 
 /**
@@ -3207,9 +3231,13 @@ function loadFromJson(data, filename = "") {
 
   // --- Case 1: SegmentInfo format (type: "segmented" with segmentInfo.segmentCuts) ---
   // Check this FIRST because some files may have both segments array AND segmentInfo
-  console.log(`[loadFromJson] Checking formats: isSegmentInfoJson=${isSegmentInfoJson(data)}, isSegmentedMissionJson=${isSegmentedMissionJson(data)}`);
-  if (isSegmentInfoJson(data)) {
-    console.log(`[loadFromJson] MATCHED: SegmentInfo format`);
+  // IMPORTANT: Now requires filename pattern _Nx_ where x > 1 to be treated as segmented
+  const segCountFromFilename = getSegmentCountFromFilename(filename);
+  console.log(`[loadFromJson] Checking formats: filename=${filename}, segCountFromFilename=${segCountFromFilename}`);
+  console.log(`[loadFromJson] isSegmentInfoJson=${isSegmentInfoJson(data, filename)}, isSegmentedMissionJson=${isSegmentedMissionJson(data, filename)}`);
+
+  if (isSegmentInfoJson(data, filename)) {
+    console.log(`[loadFromJson] MATCHED: SegmentInfo format (filename has _N${segCountFromFilename}_)`);
     loadSegmentInfoFromJson(data, filename);
     initDroneConfigsFromEnv();
     updateSamWrappingClientSide();
@@ -3219,8 +3247,8 @@ function loadFromJson(data, filename = "") {
     return;
   }
 
-  // --- Case 1b: Segmented mission JSON (segments array format, legacy) ---
-  if (isSegmentedMissionJson(data)) {
+  // --- Case 1b: Segmented mission JSON (segments array format) ---
+  if (isSegmentedMissionJson(data, filename)) {
     loadSegmentedMissionFromJson(data, filename);
     initDroneConfigsFromEnv();
     updateSamWrappingClientSide();
