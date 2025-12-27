@@ -920,17 +920,23 @@ function acceptSolution() {
         const routeDistance = routeData.distance || 0;
         console.log(`[ACCEPT] Drone ${droneId}: trajectory length=${trajectory?.length || 0}, routeDistance=${routeDistance}`);
         if (trajectory && trajectory.length >= 2) {
-          // Only show cut position if the drone is still "in flight" at the cut distance
-          // i.e., the cut distance is LESS than the drone's total route distance
-          if (nextCutDistance < routeDistance) {
-            const result = split_polyline_at_distance(trajectory, nextCutDistance);
-            console.log(`[ACCEPT] Drone ${droneId}: splitPoint=${JSON.stringify(result.splitPoint)}`);
-            if (result.splitPoint) {
-              calculatedCutPositions[droneId] = [...result.splitPoint];
-              console.log(`[ACCEPT] Drone ${droneId}: STORED cutPosition (drone in flight at cut)`);
-            }
+          // Find where drone is at the cut distance
+          // If cut distance >= route distance, drone completed its route - use end position
+          // If cut distance < route distance, drone is in flight - calculate position
+          let cutPosition;
+          if (nextCutDistance >= routeDistance) {
+            // Drone has completed route - use trajectory end point
+            cutPosition = trajectory[trajectory.length - 1];
+            console.log(`[ACCEPT] Drone ${droneId}: route completed, using end position=${JSON.stringify(cutPosition)}`);
           } else {
-            console.log(`[ACCEPT] Drone ${droneId}: route completed before cut distance (${routeDistance.toFixed(1)} < ${nextCutDistance.toFixed(1)})`);
+            // Drone is still in flight - calculate position at cut distance
+            const result = split_polyline_at_distance(trajectory, nextCutDistance);
+            cutPosition = result.splitPoint;
+            console.log(`[ACCEPT] Drone ${droneId}: in flight, splitPoint=${JSON.stringify(cutPosition)}`);
+          }
+          if (cutPosition) {
+            calculatedCutPositions[droneId] = [...cutPosition];
+            console.log(`[ACCEPT] Drone ${droneId}: STORED cutPosition`);
           }
         }
       });
