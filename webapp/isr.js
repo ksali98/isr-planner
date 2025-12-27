@@ -489,6 +489,7 @@ function mergeEnvForwardFromCurrent(startSegmentIndex) {
       isCheckpointReplan: seg.isCheckpointReplan,
       cutPosition: seg.cutPosition,
       cutPositions: seg.cutPositions,
+      cutDistance: seg.cutDistance,  // Preserve cutDistance for segmentInfo workflow
     });
   }
 
@@ -3069,21 +3070,23 @@ function loadSegmentInfoFromJson(data, filename = "") {
 }
 
 /**
- * Load a segmented mission from JSON - loads only segment 1 initially
+ * Load a segmented mission from JSON - strips solutions, keeps only env + cut distances
  * User must solve each segment sequentially before animating
  */
 function loadSegmentedMissionFromJson(data, filename = "") {
-  // Store whole definition for segment-by-segment workflow
-  missionState.segmentedMission = JSON.parse(JSON.stringify(data));
-  missionState.currentBuildSegmentIndex = 0;
+  console.log(`[loadSegmentedMissionFromJson] CALLED - stripping solutions, keeping cut distances`);
+  appendDebugLine(`📥 Loading segmented mission from ${filename}`);
 
-  // Load only segment 0 (first segment) env
+  // Load segment 0 env as the base
   const seg0 = data.segments[0];
-  state.env = JSON.parse(JSON.stringify(seg0.env));
+  const baseEnv = JSON.parse(JSON.stringify(seg0.env));
 
-  // Drone configs: segment overrides env overrides current
-  state.droneConfigs = JSON.parse(JSON.stringify(seg0.drone_configs || state.env.drone_configs || {}));
+  state.env = baseEnv;
+  state.droneConfigs = JSON.parse(JSON.stringify(seg0.drone_configs || baseEnv.drone_configs || {}));
   state.env.drone_configs = state.droneConfigs;
+
+  // Store the initial env snapshot for reset
+  state.initialEnvSnapshot = JSON.parse(JSON.stringify(state.env));
 
   // Reset mission/solution state
   missionReplay.clear();
@@ -3092,16 +3095,79 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   state.visitedTargets = [];
   state.missionId = null;
 
-  // IMPORTANT: disable animation until all segments are solved and accepted
-  setMissionMode(MissionMode.IDLE, "segmented mission loaded (segment 1 only)");
-  appendDebugLine(`📥 Loaded SEGMENTED mission: ${data.segments.length} segments. Showing segment 1 env.`);
-  appendDebugLine(`   Solve each segment sequentially. Animate enabled after all accepted.`);
+  // Clear the old segmentedMission workflow - we use MissionReplay now
+  missionState.segmentedMission = null;
+
+  // Calculate cut distances from segment solutions (if they have trajectories)
+  // The cut distance is the total trajectory length of the PREVIOUS segment
+  const segments = data.segments;
+  state.importedSegmentCuts = [];
+
+  for (let i = 0; i < segments.length - 1; i++) {
+    const seg = segments[i];
+    const solution = seg.solution || {};
+    const routes = solution.routes || {};
+
+    // Find the max distance traveled in this segment (for the cut point)
+    let maxDistance = 0;
+    Object.values(routes).forEach(routeData => {
+      if (routeData.distance && routeData.distance > maxDistance) {
+        maxDistance = routeData.distance;
+      }
+    });
+
+    // Accumulate distances - cut N is the total distance up to segment N
+    const prevCutDistance = i > 0 ? state.importedSegmentCuts[i - 1].cutDistance : 0;
+    const cutDistance = prevCutDistance + maxDistance;
+
+    state.importedSegmentCuts.push({
+      cutDistance,
+      segmentIndex: i + 1,
+    });
+
+    appendDebugLine(`   Cut ${i + 1}: distance=${cutDistance.toFixed(1)} (segment ${i} distance=${maxDistance.toFixed(1)})`);
+  }
+
+  console.log(`[loadSegmentedMissionFromJson] Set state.importedSegmentCuts:`, state.importedSegmentCuts);
+
+  // Create MissionReplay segments - segment 0 first (no cutDistance)
+  missionReplay.addSegment({
+    solution: { routes: {}, sequences: {} },  // Empty - user must solve
+    env: JSON.parse(JSON.stringify(baseEnv)),
+    cutDistance: null,
+    cutPositions: null,
+    isCheckpointReplan: false,
+  });
+
+  // Create placeholder segments for each cut
+  for (let i = 0; i < state.importedSegmentCuts.length; i++) {
+    const cutData = state.importedSegmentCuts[i];
+    const nextSegEnv = segments[i + 1]?.env || baseEnv;
+
+    missionReplay.addSegment({
+      solution: { routes: {}, sequences: {} },  // Empty - user must solve
+      env: JSON.parse(JSON.stringify(nextSegEnv)),
+      cutDistance: cutData.cutDistance,
+      cutPositions: null,  // Will be calculated from solution trajectory when accepting
+      isCheckpointReplan: true,
+    });
+  }
+
+  // Reset to start - user will solve segment 0 first
+  missionReplay.resetToStart();
+  missionState.currentBuildSegmentIndex = 0;
+
+  appendDebugLine(`✅ Created ${missionReplay.getSegmentCount()} segments in MissionReplay (solutions stripped)`);
+  appendDebugLine(`   User must Solve each segment. White dots appear after Accept.`);
 
   // Debug: show original target counts for each segment
-  const segInfo = data.segments.map((s, i) =>
-    `seg${i}:${(s.env?.targets||[]).length}`
+  const segInfo = segments.map((s, i) =>
+    `seg${i}:${(s.env?.targets||[]).length}t`
   ).join(", ");
   appendDebugLine(`📊 Original segment target counts: ${segInfo}`);
+
+  // Set mode to ready for solve
+  setMissionMode(MissionMode.IDLE, "segmented mission loaded - solve segment 1");
 }
 
 /**
