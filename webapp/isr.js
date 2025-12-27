@@ -305,6 +305,16 @@ class MissionReplay {
   // --- Playback Control ---
 
   /**
+   * Set current segment index (for advancing after accept)
+   */
+  setCurrentSegmentIndex(index) {
+    if (index >= 0 && index < this._segments.length) {
+      this._currentSegmentIndex = index;
+      console.log(`[MissionReplay] Set current segment to ${index}`);
+    }
+  }
+
+  /**
    * Reset to beginning for replay
    */
   resetToStart() {
@@ -859,21 +869,46 @@ function acceptSolution() {
   // Debug: show pendingCutDistance before adding segment
   appendDebugLine(
     `ACCEPT DEBUG: pendingCutDistance=${state.pendingCutDistance?.toFixed(1) || "null"}, ` +
-    `pendingCutPositions keys=${Object.keys(state.pendingCutPositions || {}).join(",") || "NONE"}`
+    `pendingCutPositions keys=${Object.keys(state.pendingCutPositions || {}).join(",") || "NONE"}, ` +
+    `existingSegments=${missionReplay.getSegmentCount()}, currentIdx=${missionReplay.getCurrentSegmentIndex()}`
   );
 
-  // Add segment to MissionReplay (the clean way)
-  const segment = missionReplay.addSegment({
-    solution: missionState.draftSolution,
-    env: envSnapshot,
-    // NEW: Single cut distance (where this segment starts)
-    cutDistance: state.pendingCutDistance || null,
-    isCheckpointReplan: missionState.draftSolution.isCheckpointReplan || false,
-    // Per-drone cut positions for marker display
-    cutPositions: state.pendingCutPositions
-      ? JSON.parse(JSON.stringify(state.pendingCutPositions))
-      : null,
-  });
+  let segment;
+  const currentIdx = missionReplay.getCurrentSegmentIndex();
+  const existingSegment = missionReplay.getSegment(currentIdx);
+
+  // If current segment already exists (from segmentInfo import), UPDATE it with the solution
+  // Otherwise, ADD a new segment
+  if (existingSegment && existingSegment.solution && Object.keys(existingSegment.solution.routes || {}).length === 0) {
+    // Existing segment has no routes - this is from segmentInfo import, update with solution
+    appendDebugLine(`[ACCEPT] Updating existing segment ${currentIdx} with solution`);
+    missionReplay.replaceSegment(currentIdx, {
+      solution: missionState.draftSolution,
+      env: envSnapshot,
+      cutDistance: existingSegment.cutDistance,  // Keep original cutDistance from import
+      cutPositions: existingSegment.cutPositions,  // Keep original cutPositions from import
+      isCheckpointReplan: existingSegment.isCheckpointReplan,
+    });
+    segment = missionReplay.getSegment(currentIdx);
+  } else {
+    // No existing segment, or existing segment already has routes - ADD new segment
+    segment = missionReplay.addSegment({
+      solution: missionState.draftSolution,
+      env: envSnapshot,
+      // Single cut distance (where this segment starts)
+      cutDistance: state.pendingCutDistance || null,
+      isCheckpointReplan: missionState.draftSolution.isCheckpointReplan || false,
+      // Per-drone cut positions for marker display
+      cutPositions: state.pendingCutPositions
+        ? JSON.parse(JSON.stringify(state.pendingCutPositions))
+        : null,
+    });
+
+    // IMPORTANT: Advance MissionReplay to the new segment so that:
+    // - getStartingDistance() returns this segment's cutDistance
+    // - Animation continues from the cut point, not from origin
+    missionReplay.setCurrentSegmentIndex(segment.index);
+  }
 
   // Clear the pending cut data after use
   state.pendingCutPositions = null;
@@ -890,8 +925,8 @@ function acceptSolution() {
   });
 
   // Propagate env edits forward into all future segments (so added targets persist)
-  const currentIdx = missionReplay.getCurrentSegmentIndex();
-  mergeEnvForwardFromCurrent(currentIdx + 1);
+  const finalIdx = missionReplay.getCurrentSegmentIndex();
+  mergeEnvForwardFromCurrent(finalIdx + 1);
   missionState.currentSegmentIndex = segment.index;
 
   // Clear the draft
@@ -2835,6 +2870,99 @@ function isSegmentedMissionJson(data) {
 }
 
 /**
+ * Check if JSON data has segmentInfo with cut points (replay format)
+ * This format contains the base env + segmentInfo.segmentCuts for replay
+ */
+function isSegmentInfoJson(data) {
+  return data && data.type === "segmented" && data.segmentInfo && Array.isArray(data.segmentInfo.segmentCuts);
+}
+
+/**
+ * Load a segmented mission from segmentInfo format (replay format)
+ * This creates MissionReplay segments from the segmentCuts data
+ */
+function loadSegmentInfoFromJson(data, filename = "") {
+  appendDebugLine(`📥 Loading segmentInfo format from ${filename}`);
+
+  // Build base environment from the JSON
+  const baseEnv = {
+    airports: data.airports || [],
+    targets: data.targets || [],
+    sams: data.sams || [],
+    drone_configs: data.drone_configs || {},
+  };
+
+  state.env = JSON.parse(JSON.stringify(baseEnv));
+  state.droneConfigs = JSON.parse(JSON.stringify(data.drone_configs || {}));
+  state.env.drone_configs = state.droneConfigs;
+
+  // Store the initial env snapshot for reset
+  state.initialEnvSnapshot = JSON.parse(JSON.stringify(state.env));
+
+  // Reset mission/solution state
+  missionReplay.clear();
+  missionState.committedSegments = [];
+  missionState.draftSolution = null;
+  missionState.segmentedMission = null;
+
+  // Load visited targets from segmentInfo
+  const segmentInfo = data.segmentInfo;
+  state.visitedTargets = [...(segmentInfo.visitedTargets || [])];
+
+  // Create MissionReplay segments from segmentCuts
+  // Segment 0: the initial segment (no cutDistance)
+  // Segment N: starts at the cut point from segment N-1
+
+  const segmentCuts = segmentInfo.segmentCuts || [];
+  appendDebugLine(`📊 Found ${segmentCuts.length} segment cuts`);
+
+  // First, create segment 0 (the base segment, starts at distance 0)
+  // We need a placeholder solution since we don't have the actual routes
+  missionReplay.addSegment({
+    solution: { routes: {}, sequences: {} },
+    env: JSON.parse(JSON.stringify(baseEnv)),
+    cutDistance: null,  // Segment 0 starts at 0
+    isCheckpointReplan: false,
+  });
+
+  // Now create segments from each cut point
+  for (let i = 0; i < segmentCuts.length; i++) {
+    const cut = segmentCuts[i];
+
+    // Get the cutDistance from the first drone's distanceTraveled
+    const dronePositions = cut.dronePositions || {};
+    const firstDronePos = Object.values(dronePositions)[0];
+    const cutDistance = firstDronePos?.distanceTraveled || firstDronePos?.totalDistance || 0;
+
+    // Build cutPositions map for marker display
+    const cutPositions = {};
+    Object.entries(dronePositions).forEach(([droneId, pos]) => {
+      if (pos.position && Array.isArray(pos.position)) {
+        cutPositions[droneId] = [...pos.position];
+      }
+    });
+
+    appendDebugLine(`   Cut ${i + 1}: distance=${cutDistance.toFixed(1)}, visited=${(cut.visitedTargets || []).join(",")}`);
+
+    missionReplay.addSegment({
+      solution: { routes: {}, sequences: {} },
+      env: JSON.parse(JSON.stringify(baseEnv)),
+      cutDistance: cutDistance,
+      cutPositions: cutPositions,
+      isCheckpointReplan: true,
+    });
+  }
+
+  // Reset to start for replay
+  missionReplay.resetToStart();
+
+  appendDebugLine(`✅ Created ${missionReplay.getSegmentCount()} segments in MissionReplay`);
+
+  // Set mode to ready for solve (user needs to solve before animate)
+  setMissionMode(MissionMode.IDLE, "segmentInfo loaded - solve to animate");
+}
+
+/**
  * Load a segmented mission from JSON - loads only segment 1 initially
  * User must solve each segment sequentially before animating
  */
@@ -2905,9 +3033,20 @@ function loadFromJson(data, filename = "") {
   missionState.segmentedMission = null;
   missionState.currentBuildSegmentIndex = 0;
 
-  // --- Case 1: Segmented mission JSON ---
+  // --- Case 1: Segmented mission JSON (segments array format) ---
   if (isSegmentedMissionJson(data)) {
     loadSegmentedMissionFromJson(data, filename);
+    initDroneConfigsFromEnv();
+    updateSamWrappingClientSide();
+    drawEnvironment();
+    const envNameEl = $("env-filename");
+    if (envNameEl) envNameEl.textContent = filename || "(imported)";
+    return;
+  }
+
+  // --- Case 1b: SegmentInfo format (type: "segmented" with segmentInfo.segmentCuts) ---
+  if (isSegmentInfoJson(data)) {
+    loadSegmentInfoFromJson(data, filename);
     initDroneConfigsFromEnv();
     updateSamWrappingClientSide();
     drawEnvironment();
