@@ -879,10 +879,23 @@ function acceptSolution() {
   const nextSegment = missionReplay.getSegment(currentIdx + 1);
 
   // Check if we're in segmentInfo workflow (pre-imported segments with cutDistances)
-  const isSegmentInfoWorkflow = existingSegment &&
-    existingSegment.solution &&
-    Object.keys(existingSegment.solution.routes || {}).length === 0 &&
-    missionReplay.getSegmentCount() > 1;
+  // This is detected by: state.importedSegmentCuts exists OR existingSegment has empty routes
+  console.log(`[acceptSolution] state.importedSegmentCuts=`, state.importedSegmentCuts);
+  console.log(`[acceptSolution] existingSegment=`, existingSegment);
+  console.log(`[acceptSolution] missionReplay.getSegmentCount()=${missionReplay.getSegmentCount()}`);
+
+  const isSegmentInfoWorkflow = (
+    // New detection: importedSegmentCuts array exists
+    (state.importedSegmentCuts && state.importedSegmentCuts.length > 0) ||
+    // Old detection: existing segment with empty routes
+    (existingSegment &&
+      existingSegment.solution &&
+      Object.keys(existingSegment.solution.routes || {}).length === 0 &&
+      missionReplay.getSegmentCount() > 1)
+  );
+
+  console.log(`[acceptSolution] isSegmentInfoWorkflow=${isSegmentInfoWorkflow}`);
+  appendDebugLine(`[ACCEPT] isSegmentInfoWorkflow=${isSegmentInfoWorkflow}, importedSegmentCuts=${state.importedSegmentCuts?.length || 0}, existingSegment=${!!existingSegment}`);
 
   if (isSegmentInfoWorkflow) {
     // SegmentInfo workflow: update current segment with solution
@@ -2972,6 +2985,7 @@ function isSegmentInfoJson(data) {
  * This creates MissionReplay segments from the segmentCuts data
  */
 function loadSegmentInfoFromJson(data, filename = "") {
+  console.log(`[loadSegmentInfoFromJson] CALLED - this is the correct loader for segmentInfo format`);
   appendDebugLine(`📥 Loading segmentInfo format from ${filename}`);
 
   // Build base environment from the JSON
@@ -3016,6 +3030,7 @@ function loadSegmentInfoFromJson(data, filename = "") {
       visitedTargets: cut.visitedTargets || [],
     };
   });
+  console.log(`[loadSegmentInfoFromJson] Set state.importedSegmentCuts with ${state.importedSegmentCuts.length} cuts:`, state.importedSegmentCuts);
 
   // First, create segment 0 (the base segment, starts at distance 0)
   // Placeholder solution - will be filled when user Solves
@@ -3124,9 +3139,12 @@ function loadFromJson(data, filename = "") {
   missionState.segmentedMission = null;
   missionState.currentBuildSegmentIndex = 0;
 
-  // --- Case 1: Segmented mission JSON (segments array format) ---
-  if (isSegmentedMissionJson(data)) {
-    loadSegmentedMissionFromJson(data, filename);
+  // --- Case 1: SegmentInfo format (type: "segmented" with segmentInfo.segmentCuts) ---
+  // Check this FIRST because some files may have both segments array AND segmentInfo
+  console.log(`[loadFromJson] Checking formats: isSegmentInfoJson=${isSegmentInfoJson(data)}, isSegmentedMissionJson=${isSegmentedMissionJson(data)}`);
+  if (isSegmentInfoJson(data)) {
+    console.log(`[loadFromJson] MATCHED: SegmentInfo format`);
+    loadSegmentInfoFromJson(data, filename);
     initDroneConfigsFromEnv();
     updateSamWrappingClientSide();
     drawEnvironment();
@@ -3135,9 +3153,9 @@ function loadFromJson(data, filename = "") {
     return;
   }
 
-  // --- Case 1b: SegmentInfo format (type: "segmented" with segmentInfo.segmentCuts) ---
-  if (isSegmentInfoJson(data)) {
-    loadSegmentInfoFromJson(data, filename);
+  // --- Case 1b: Segmented mission JSON (segments array format, legacy) ---
+  if (isSegmentedMissionJson(data)) {
+    loadSegmentedMissionFromJson(data, filename);
     initDroneConfigsFromEnv();
     updateSamWrappingClientSide();
     drawEnvironment();
