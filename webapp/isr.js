@@ -80,8 +80,8 @@ const state = {
   initialEnvSnapshot: null,    // Immutable copy of original env for reset
   visitedTargets: [],          // Target IDs completed across all segments
 
-  // Checkpoint replan prefix distances (used for animation start position after replan)
-  checkpointReplanPrefixDistances: null,
+  // Single cut distance captured during freezeAtCheckpoint (same for all drones)
+  pendingCutDistance: null,
 
   // Target-to-segment mapping for visualization
   // { "T1": 1, "T2": 1, "T3": 2, ... } - which segment each target belongs to
@@ -168,20 +168,32 @@ class Segment {
     index,
     solution,
     env,
-    prefixDistances = null,
+    cutDistance = null,      // Single distance value where this segment starts (fuel/distance at cut)
+    prefixDistances = null,  // DEPRECATED: kept for backward compatibility during transition
     isCheckpointReplan = false,
     timestamp = new Date().toISOString(),
-    cutPosition = null,  // [x, y] position where segment was cut (legacy, drone 1)
-    cutPositions = null  // { [droneId]: [x, y] } per-drone cut positions
+    cutPosition = null,      // [x, y] position where segment was cut (legacy, drone 1)
+    cutPositions = null      // { [droneId]: [x, y] } per-drone cut positions for marker display
   }) {
     this.index = index;
     this.solution = Object.freeze(JSON.parse(JSON.stringify(solution)));
     this.env = Object.freeze(JSON.parse(JSON.stringify(env)));
-    this.prefixDistances = prefixDistances ? Object.freeze({...prefixDistances}) : null;
+
+    // New simple model: single cut distance for the segment
+    // If cutDistance not provided, try to extract from prefixDistances (backward compat)
+    if (cutDistance !== null) {
+      this.cutDistance = cutDistance;
+    } else if (prefixDistances && Object.keys(prefixDistances).length > 0) {
+      // Use the first drone's prefix distance as the cut distance (they should all be the same)
+      this.cutDistance = Object.values(prefixDistances)[0];
+    } else {
+      this.cutDistance = null;
+    }
+
     this.isCheckpointReplan = isCheckpointReplan;
     this.timestamp = timestamp;
     this.cutPosition = cutPosition ? Object.freeze([...cutPosition]) : null;
-    // Per-drone cut positions (new model)
+    // Per-drone cut positions for drawing markers
     this.cutPositions = cutPositions ? Object.freeze(
       Object.fromEntries(
         Object.entries(cutPositions).map(([did, pos]) => [did, Object.freeze([...pos])])
@@ -191,18 +203,18 @@ class Segment {
   }
 
   /**
-   * Get the checkpoint distance for a specific drone
-   * Returns null if this segment doesn't have checkpoint data
+   * Get the cut distance for this segment (where it starts)
+   * Returns null for segment 0 (starts at 0)
    */
-  getCheckpointDistance(droneId) {
-    return this.prefixDistances?.[droneId] ?? null;
+  getCutDistance() {
+    return this.cutDistance;
   }
 
   /**
-   * Check if this segment has checkpoint boundaries
+   * Check if this segment has a cut boundary (i.e., starts after distance 0)
    */
   hasCheckpointBoundary() {
-    return this.prefixDistances !== null && Object.keys(this.prefixDistances).length > 0;
+    return this.cutDistance !== null && this.cutDistance > 0;
   }
 }
 
@@ -369,59 +381,45 @@ class MissionReplay {
   }
 
   /**
-   * Check if a drone has crossed into the next segment
-   * Call this from animation loop with current drone distances
+   * Check if mission has crossed into the next segment
+   * Call this from animation loop with current mission distance (fuel consumed)
    *
-   * @param droneDistances - Object mapping droneId to current distance traveled
-   * @param animatingDrones - Set or array of droneIds that are still animating (optional)
+   * @param missionDistance - Current distance/fuel traveled (same for all drones)
    * @returns {switched: boolean, newSegment: Segment|null}
    */
-  checkSegmentBoundary(droneDistances, animatingDrones = null) {
+  checkSegmentBoundary(missionDistance) {
     const nextSegment = this.getNextSegment();
     if (!nextSegment || !nextSegment.hasCheckpointBoundary()) {
       return { switched: false, newSegment: null };
     }
 
-    // Convert to Set for O(1) lookup if provided
-    const stillAnimating = animatingDrones ? new Set(animatingDrones) : null;
+    const cutDistance = nextSegment.getCutDistance();
+    if (cutDistance !== null && missionDistance >= cutDistance) {
+      // Crossed! Switch to next segment
+      const fromIndex = this._currentSegmentIndex;
+      this._currentSegmentIndex++;
+      console.log(`[MissionReplay] Segment switch: ${fromIndex} -> ${this._currentSegmentIndex} (distance ${missionDistance.toFixed(1)} >= cut ${cutDistance.toFixed(1)})`);
 
-    // Check if ANY drone has crossed the checkpoint boundary
-    // IMPORTANT: Only consider drones that are still animating (not finished their trajectory)
-    // A drone finishing early should NOT trigger a segment switch
-    for (const [droneId, currentDist] of Object.entries(droneDistances)) {
-      // Skip drones that have finished their trajectory (not animating)
-      if (stillAnimating && !stillAnimating.has(droneId)) {
-        continue;
+      if (this._onSegmentSwitch) {
+        this._onSegmentSwitch(fromIndex, this._currentSegmentIndex, nextSegment);
       }
 
-      const checkpointDist = nextSegment.getCheckpointDistance(droneId);
-      if (checkpointDist !== null && currentDist >= checkpointDist) {
-        // Crossed! Switch to next segment
-        const fromIndex = this._currentSegmentIndex;
-        this._currentSegmentIndex++;
-        console.log(`[MissionReplay] Segment switch: ${fromIndex} -> ${this._currentSegmentIndex} (D${droneId} crossed at ${currentDist.toFixed(1)} >= ${checkpointDist.toFixed(1)})`);
-
-        if (this._onSegmentSwitch) {
-          this._onSegmentSwitch(fromIndex, this._currentSegmentIndex, nextSegment);
-        }
-
-        return { switched: true, newSegment: nextSegment };
-      }
+      return { switched: true, newSegment: nextSegment };
     }
 
     return { switched: false, newSegment: null };
   }
 
   /**
-   * Get the starting distance for a drone in the current segment
-   * (0 for segment 0, prefixDistance for checkpoint replans)
+   * Get the starting distance for the current segment
+   * (0 for segment 0, cutDistance for checkpoint replans)
    */
-  getStartingDistance(droneId) {
+  getStartingDistance() {
     const segment = this.getCurrentSegment();
     if (!segment || segment.index === 0) {
       return 0;
     }
-    return segment.getCheckpointDistance(droneId) ?? 0;
+    return segment.getCutDistance() ?? 0;
   }
 
   /**
@@ -858,31 +856,28 @@ function acceptSolution() {
   // Snapshot the authoritative current env (not stale acceptedEnv)
   const envSnapshot = JSON.parse(JSON.stringify(state.env));
 
-  // Debug: show pendingCutPositions before adding segment
+  // Debug: show pendingCutDistance before adding segment
   appendDebugLine(
-    `ACCEPT DEBUG: pendingCutPositions keys=${Object.keys(state.pendingCutPositions || {}).join(",") || "NONE"}, ` +
-    `pendingCutPosition=${state.pendingCutPosition ? `[${state.pendingCutPosition.map(v=>v.toFixed(1)).join(",")}]` : "null"}`
+    `ACCEPT DEBUG: pendingCutDistance=${state.pendingCutDistance?.toFixed(1) || "null"}, ` +
+    `pendingCutPositions keys=${Object.keys(state.pendingCutPositions || {}).join(",") || "NONE"}`
   );
 
   // Add segment to MissionReplay (the clean way)
   const segment = missionReplay.addSegment({
     solution: missionState.draftSolution,
     env: envSnapshot,
-    prefixDistances: state.checkpointReplanPrefixDistances,
+    // NEW: Single cut distance (where this segment starts)
+    cutDistance: state.pendingCutDistance || null,
     isCheckpointReplan: missionState.draftSolution.isCheckpointReplan || false,
-    // Per-drone cut positions (new model)
+    // Per-drone cut positions for marker display
     cutPositions: state.pendingCutPositions
       ? JSON.parse(JSON.stringify(state.pendingCutPositions))
       : null,
-    // Backward compatibility: single cutPosition from drone "1"
-    cutPosition: (state.pendingCutPositions && state.pendingCutPositions["1"])
-      ? [...state.pendingCutPositions["1"]]
-      : null,
   });
 
-  // Clear the pending cut positions after use
+  // Clear the pending cut data after use
   state.pendingCutPositions = null;
-  state.pendingCutPosition = null; // safe cleanup if old code still sets it
+  state.pendingCutDistance = null;
 
   // Also keep in missionState.committedSegments for backward compatibility during transition
   missionState.committedSegments.push({
@@ -890,9 +885,7 @@ function acceptSolution() {
     solution: JSON.parse(JSON.stringify(missionState.draftSolution)),
     env: envSnapshot,
     timestamp: segment.timestamp,
-    prefixDistances: state.checkpointReplanPrefixDistances
-      ? JSON.parse(JSON.stringify(state.checkpointReplanPrefixDistances))
-      : null,
+    cutDistance: segment.cutDistance,
     isCheckpointReplan: missionState.draftSolution.isCheckpointReplan || false,
   });
 
@@ -1118,7 +1111,8 @@ function resetMission() {
 
   // Clear checkpoint state
   state.checkpoint = { active: false, pct: 0.5, segments: {} };
-  state.checkpointReplanPrefixDistances = null;
+  state.pendingCutDistance = null;
+  state.pendingCutPositions = null;
   state.missionHistory = [];
   state.visitedTargets = [];
   state.currentCutSegment = 1;  // Reset segment counter
@@ -3650,23 +3644,8 @@ async function runPlanner() {
 
       data.routes = newRoutes;
       appendDebugLine("📎 Spliced new trajectories with frozen prefixes");
-
-      // Store prefix distances so animation can start from the right position
-      // We calculate the distance of each prefix so startAnimation knows where to begin
-      state.checkpointReplanPrefixDistances = {};
-      Object.entries(state.checkpoint.segments).forEach(([did, seg]) => {
-        if (seg?.prefix && seg.prefix.length >= 2) {
-          let prefixDist = 0;
-          for (let i = 1; i < seg.prefix.length; i++) {
-            const dx = seg.prefix[i][0] - seg.prefix[i - 1][0];
-            const dy = seg.prefix[i][1] - seg.prefix[i - 1][1];
-            prefixDist += Math.sqrt(dx * dx + dy * dy);
-          }
-          state.checkpointReplanPrefixDistances[did] = prefixDist;
-          appendDebugLine(`📏 Drone ${did} prefix distance: ${prefixDist.toFixed(1)}`);
-        }
-      });
-      console.log("checkpointReplanPrefixDistances:", state.checkpointReplanPrefixDistances);
+      // NOTE: state.pendingCutDistance was already set in freezeAtCheckpoint()
+      appendDebugLine(`📏 Cut distance for this segment: ${state.pendingCutDistance?.toFixed(1) || "null"}`);
     }
 
     // Store as draft solution (two-phase commit)
@@ -3757,9 +3736,10 @@ function applyDraftSolutionToUI(draft) {
   });
 
   // After checkpoint replan, update animation drones to show at their new starting positions
-  if (draft.isCheckpointReplan && state.animation.drones) {
+  if (draft.isCheckpointReplan && state.animation.drones && state.pendingCutDistance !== null) {
+    const cutDist = state.pendingCutDistance;
     Object.keys(state.animation.drones).forEach((did) => {
-      if (state.routes[did] && state.checkpointReplanPrefixDistances && state.checkpointReplanPrefixDistances[did]) {
+      if (state.routes[did]) {
         const routeInfo = state.routes[did];
         const trajectory = routeInfo.trajectory || [];
 
@@ -3775,10 +3755,9 @@ function applyDraftSolutionToUI(draft) {
           }
         }
 
-        const prefixDist = state.checkpointReplanPrefixDistances[did];
         state.animation.drones[did] = {
-          progress: totalDistance > 0 ? prefixDist / totalDistance : 0,
-          distanceTraveled: prefixDist,
+          progress: totalDistance > 0 ? cutDist / totalDistance : 0,
+          distanceTraveled: cutDist,
           animating: false,  // Not animating yet, just showing position
           cumulativeDistances,
           totalDistance,
@@ -3965,6 +3944,12 @@ function freezeAtCheckpoint() {
   // Initialize per-drone cut positions map
   state.pendingCutPositions = {};
 
+  // NEW: Capture single cut distance (same for all drones since they fly at same speed)
+  // Use missionDistance from animation state, or calculate from first animating drone
+  const firstDroneState = Object.values(state.animation.drones)[0];
+  state.pendingCutDistance = firstDroneState?.distanceTraveled || 0;
+  appendDebugLine(`✂️ Cut at distance: ${state.pendingCutDistance.toFixed(1)}`);
+
   // Track which targets are visited in the current (frozen) routes
   const targetsVisitedThisSegment = [];
 
@@ -4103,11 +4088,10 @@ function startAnimation(droneIds) {
   stopAnimation();
 
   // Check if we're in a frozen checkpoint state WITHOUT a replan
-  // If checkpoint is active (frozen) but no prefix distances exist, block animation
+  // If checkpoint is active (frozen) but no cut distance exists, block animation
   const hasFrozenCheckpoint = state.checkpoint?.active ||
     Object.keys(state.checkpoint?.segments || {}).length > 0;
-  const hasReplanData = state.checkpointReplanPrefixDistances &&
-    Object.keys(state.checkpointReplanPrefixDistances).length > 0;
+  const hasReplanData = state.pendingCutDistance !== null && state.pendingCutDistance > 0;
 
   if (hasFrozenCheckpoint && !hasReplanData) {
     appendDebugLine("⚠️ Cannot animate: checkpoint is frozen. Run Planner to replan from checkpoint, or press R to reset.");
@@ -4145,9 +4129,13 @@ function startAnimation(droneIds) {
   state.animation.active = true;
   state.animation.drones = {};
 
+  // NEW: Single mission distance tracker (same for all drones since they fly at same speed)
+  // Get starting distance from MissionReplay (0 for segment 0, cutDistance for checkpoint replans)
+  state.animation.missionDistance = missionReplay.getStartingDistance();
+  appendDebugLine(`🎬 Mission starting at distance: ${state.animation.missionDistance.toFixed(1)}`);
+
   // Enable debug stop at splice point if this is a checkpoint replan
-  const isCheckpointReplan = state.checkpointReplanPrefixDistances &&
-    Object.keys(state.checkpointReplanPrefixDistances).length > 0;
+  const isCheckpointReplan = state.animation.missionDistance > 0;
   state.debugStopAtSplice = isCheckpointReplan;  // Set true to stop at splice point
 
   // Debug: Log visited targets and MissionReplay state at animation start
@@ -4201,17 +4189,13 @@ function startAnimation(droneIds) {
       return;
     }
 
-    // Check if this is a checkpoint replan - start from prefix distance if so
-    let initialDistance = 0;
-    if (state.checkpointReplanPrefixDistances && state.checkpointReplanPrefixDistances[did]) {
-      initialDistance = state.checkpointReplanPrefixDistances[did];
-      appendDebugLine(`🎬 Drone ${did} starting animation from distance ${initialDistance.toFixed(1)} (checkpoint replan)`);
-    }
+    // Use single missionDistance for all drones (already set from missionReplay.getStartingDistance())
+    const initialDistance = state.animation.missionDistance;
 
     state.animation.drones[did] = {
       progress: totalDistance > 0 ? initialDistance / totalDistance : 0,
       distanceTraveled: initialDistance,
-      animating: true,
+      animating: initialDistance < totalDistance,  // Only animate if there's more to travel
       cumulativeDistances,
       totalDistance,
     };
@@ -4238,9 +4222,8 @@ function startAnimation(droneIds) {
     state.trajectoryVisible[did] = true;
   });
 
-  // Clear checkpoint replan prefix distances after using them
-  // (so next animation without replan starts from 0)
-  state.checkpointReplanPrefixDistances = null;
+  // Note: missionDistance is already set from missionReplay.getStartingDistance()
+  // and will persist across the animation lifecycle
 
   updateTrajectoryButtonStates();
   updateAnimationButtonStates();
@@ -4271,11 +4254,14 @@ function startAnimation(droneIds) {
     const dt = deltaTime / 1000; // seconds
     let anyAnimating = false;
 
+    // NEW: Advance single mission distance (same for all drones)
+    state.animation.missionDistance += speedUnitsPerSec * dt;
+
     Object.entries(state.animation.drones).forEach(([did, droneState]) => {
       if (!droneState.animating) return;
 
-      // 1) advance by distance (single source of truth)
-      droneState.distanceTraveled += speedUnitsPerSec * dt;
+      // 1) Sync drone's distanceTraveled with mission distance
+      droneState.distanceTraveled = state.animation.missionDistance;
 
       // DEBUG: Log distance periodically (every 50 units)
       const lastDistLog = droneState._lastDistLog || 0;
@@ -4284,29 +4270,13 @@ function startAnimation(droneIds) {
         console.log(`📍 D${did}: distanceTraveled=${droneState.distanceTraveled.toFixed(1)}, totalDistance=${droneState.totalDistance.toFixed(1)}`);
       }
 
-      // 2) clamp and stop if finished
+      // 2) clamp and stop if THIS drone's trajectory is finished
+      // (other drones may continue if their trajectories are longer)
       if (droneState.distanceTraveled >= droneState.totalDistance) {
         droneState.distanceTraveled = droneState.totalDistance;
         droneState.animating = false;
       } else {
         anyAnimating = true;
-      }
-
-      // MISSION REPLAY: Check if we've reached the C point (segment boundary)
-      // Using MissionReplay for clean segment management
-      // (The actual check happens after the drone loop to avoid switching mid-iteration)
-
-      // DEBUG: For checkpoint replan, stop at the splice point (prefix distance)
-      // This allows verification that the splice is correct
-      if (state.debugStopAtSplice && state.checkpointReplanPrefixDistances) {
-        const prefixDist = state.checkpointReplanPrefixDistances[did];
-        if (prefixDist !== undefined && droneState.distanceTraveled >= prefixDist && !droneState._passedSplicePoint) {
-          droneState._passedSplicePoint = true;
-          droneState.distanceTraveled = prefixDist;
-          droneState.animating = false;
-          console.log(`🛑 D${did} stopped at splice point (prefixDist=${prefixDist.toFixed(1)})`);
-          appendDebugLine(`🛑 D${did} stopped at splice point`);
-        }
       }
 
       // 3) derive progress (for existing drawing/UI code)
@@ -4412,21 +4382,9 @@ function startAnimation(droneIds) {
       }
     });
 
-    // MISSION REPLAY: Check segment boundary and switch if needed
-    // Collect current drone distances for boundary check
-    // Also collect which drones are still animating (to avoid false triggers from finished drones)
-    const droneDistances = {};
-    const animatingDroneIds = [];
-    Object.entries(state.animation.drones).forEach(([did, ds]) => {
-      droneDistances[did] = ds.distanceTraveled;
-      if (ds.animating) {
-        animatingDroneIds.push(did);
-      }
-    });
-
-    // Use MissionReplay to check if we crossed a segment boundary
-    // Only consider drones that are still animating - a drone finishing early should NOT trigger switch
-    const { switched, newSegment } = missionReplay.checkSegmentBoundary(droneDistances, animatingDroneIds);
+    // MISSION REPLAY: Check segment boundary using single mission distance
+    // This is simple: when missionDistance >= nextSegment.cutDistance, switch segments
+    const { switched, newSegment } = missionReplay.checkSegmentBoundary(state.animation.missionDistance);
 
     if (switched && newSegment) {
       appendDebugLine(`🔄 === SEGMENT SWITCH to ${newSegment.index} (via MissionReplay) ===`);
