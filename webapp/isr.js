@@ -935,6 +935,7 @@ function acceptSolution() {
 
     // Update NEXT segment with calculated cutPositions (for white dot display)
     if (nextSegment && calculatedCutPositions) {
+      appendDebugLine(`[ACCEPT] Storing cutPositions in segment ${currentIdx + 1}: ${JSON.stringify(calculatedCutPositions)}`);
       missionReplay.replaceSegment(currentIdx + 1, {
         solution: nextSegment.solution,
         env: nextSegment.env,
@@ -942,6 +943,11 @@ function acceptSolution() {
         cutPositions: calculatedCutPositions,
         isCheckpointReplan: nextSegment.isCheckpointReplan,
       });
+      // Verify it was stored
+      const verifySegment = missionReplay.getSegment(currentIdx + 1);
+      appendDebugLine(`[ACCEPT] Verified segment ${currentIdx + 1} cutPositions: ${JSON.stringify(verifySegment?.cutPositions)}`);
+    } else {
+      appendDebugLine(`[ACCEPT] NOT storing cutPositions: nextSegment=${!!nextSegment}, calculatedCutPositions=${JSON.stringify(calculatedCutPositions)}`);
     }
 
     segment = missionReplay.getSegment(currentIdx);
@@ -2036,9 +2042,18 @@ function drawEnvironment() {
   };
 
   const segmentCount = missionReplay.getSegmentCount();
+  // Debug: log all segments' cutPositions
+  if (segmentCount > 1) {
+    console.log(`[drawEnvironment] ${segmentCount} segments, checking for cut markers...`);
+  }
   for (let i = 0; i < segmentCount; i++) {
     const seg = missionReplay.getSegment(i);
     if (!seg) continue;
+
+    // Debug log for each segment
+    if (segmentCount > 1) {
+      console.log(`[drawEnvironment] Segment ${i}: cutPositions=${JSON.stringify(seg.cutPositions)}, cutDistance=${seg.cutDistance}`);
+    }
 
     // NEW path: per-drone cut positions
     if (seg.cutPositions && typeof seg.cutPositions === "object") {
@@ -2047,7 +2062,8 @@ function drawEnvironment() {
         // Skip if position is at an airport
         if (isAtAirport(pos[0], pos[1])) return;
         const [mx, my] = w2c(pos[0], pos[1]);
-        drawCutMarker(ctx, mx, my, `C${i + 1} D${did}`);
+        console.log(`[drawEnvironment] Drawing cut marker for seg ${i}, drone ${did} at (${pos[0].toFixed(1)}, ${pos[1].toFixed(1)})`);
+        drawCutMarker(ctx, mx, my, `C${i} D${did}`);
       });
       continue;
     }
@@ -2057,7 +2073,7 @@ function drawEnvironment() {
       // Skip if position is at an airport
       if (isAtAirport(seg.cutPosition[0], seg.cutPosition[1])) continue;
       const [mx, my] = w2c(seg.cutPosition[0], seg.cutPosition[1]);
-      drawCutMarker(ctx, mx, my, `C${i + 1}`);
+      drawCutMarker(ctx, mx, my, `C${i}`);
     }
   }
 
