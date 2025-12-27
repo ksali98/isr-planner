@@ -2217,8 +2217,10 @@ function deleteSelected() {
 }
 
 /**
- * Export environment to JSON file with naming convention: isr_envYYMMDDHH_n.json
- * Includes drone configs for persistence
+ * Export environment to JSON file
+ * Two modes based on radio button selection:
+ * - Mission: exports segments with env + cut distances (no solutions), filename _Nx_
+ * - Environment: exports flat env with all targets combined, filename _N1_
  */
 // Export counter for unique filenames
 let _exportCounter = 1;
@@ -2230,7 +2232,11 @@ async function exportEnvironment() {
       return;
     }
 
-    appendDebugLine("📤 Exporting environment...");
+    // Check which export type is selected
+    const exportTypeMission = document.getElementById("export-type-mission");
+    const isMissionExport = exportTypeMission && exportTypeMission.checked;
+
+    appendDebugLine(`📤 Exporting as ${isMissionExport ? "Mission" : "Environment"}...`);
 
     // Always capture current drone configs into env snapshot
     const envSnapshot = JSON.parse(JSON.stringify(state.env));
@@ -2243,44 +2249,68 @@ async function exportEnvironment() {
 
     // Build export object
     let exportObj;
+    let segmentCount;
 
-    if (segments && segments.length > 0) {
-      // SEGMENTED export - export MissionReplay segments
+    if (isMissionExport && segments && segments.length > 1) {
+      // MISSION export - export segments with env + cut distances (NO solutions)
+      segmentCount = segments.length;
       exportObj = {
         schema: "isr_env_v1",
         is_segmented: true,
-        segment_count: segments.length,
+        segment_count: segmentCount,
         segments: segments.map(s => ({
           index: s.index,
           env: s.env,
-          solution: s.solution,
-          prefixDistances: s.prefixDistances || null,
-          isCheckpointReplan: !!s.isCheckpointReplan,
-          timestamp: s.timestamp || null,
-          cutPosition: s.cutPosition || null,
-          cutPositions: s.cutPositions || null,
+          // NO solution exported - user must re-solve after import
+          cutDistance: s.cutDistance || null,
+          drone_configs: s.env?.drone_configs || null,
         })),
       };
+      appendDebugLine(`   ${segmentCount} segments with cut distances (no solutions)`);
     } else {
-      // NON-segmented export (backward compatible)
+      // ENVIRONMENT export - combine all targets into flat env, no segments
+      segmentCount = 1;
+
+      // If we have segments, merge all targets from all segments
+      let combinedEnv = JSON.parse(JSON.stringify(envSnapshot));
+      if (segments && segments.length > 1) {
+        const allTargets = new Map();
+        const allSams = new Map();
+        const allAirports = new Map();
+
+        segments.forEach(seg => {
+          if (!seg.env) return;
+          (seg.env.targets || []).forEach(t => allTargets.set(t.id, t));
+          (seg.env.sams || []).forEach((s) => {
+            const key = s.id || `sam_${s.pos?.[0]}_${s.pos?.[1]}`;
+            allSams.set(key, s);
+          });
+          (seg.env.airports || []).forEach(a => allAirports.set(a.id, a));
+        });
+
+        combinedEnv.targets = Array.from(allTargets.values());
+        combinedEnv.sams = Array.from(allSams.values());
+        combinedEnv.airports = Array.from(allAirports.values());
+        appendDebugLine(`   Combined ${combinedEnv.targets.length} targets from ${segments.length} segments`);
+      }
+
       exportObj = {
         schema: "isr_env_v1",
         is_segmented: false,
         segment_count: 1,
-        env: envSnapshot,
+        env: combinedEnv,
       };
     }
 
-    // Filename with segment count
+    // Filename with segment count: _Nx_ where x is segment count
     const now = new Date();
     const yy = String(now.getFullYear()).slice(-2);
     const mo = String(now.getMonth() + 1).padStart(2, "0");
     const dd = String(now.getDate()).padStart(2, "0");
     const hh = String(now.getHours()).padStart(2, "0");
     const mm = String(now.getMinutes()).padStart(2, "0");
-    const N = exportObj.segment_count || 1;
 
-    const filename = `isr_env${yy}${mo}${dd}${hh}${mm}_N${N}_${_exportCounter}.json`;
+    const filename = `isr_env${yy}${mo}${dd}${hh}${mm}_N${segmentCount}_${_exportCounter}.json`;
     _exportCounter++;
 
     // Download

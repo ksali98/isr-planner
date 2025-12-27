@@ -422,13 +422,24 @@
           <!-- Import/Export buttons -->
           <div class="io-row" style="margin-top: 0.5rem;">
             <button id="btn-import" class="primary-btn" style="padding: 8px 16px; font-size: 14px; font-weight: bold;">Import JSON</button>
-            <button id="btn-export" class="primary-btn" style="padding: 8px 16px; font-size: 14px; font-weight: bold; background: #28a745;">Export JSON</button>
+            <button id="btn-export" class="primary-btn" style="padding: 8px 16px; font-size: 14px; font-weight: bold; background: #28a745;">Export</button>
             <input
               id="file-input"
               type="file"
               accept=".json,application/json"
               style="display:none"
             />
+          </div>
+          <!-- Export type radio buttons -->
+          <div class="io-row" style="margin-top: 0.3rem; display: flex; gap: 1rem; align-items: center;">
+            <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer;">
+              <input type="radio" name="export-type" id="export-type-mission" value="mission" checked />
+              <span style="font-size: 13px;">Mission</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer;">
+              <input type="radio" name="export-type" id="export-type-env" value="env" />
+              <span style="font-size: 13px;">Environment</span>
+            </label>
           </div>
           </section>
 
@@ -493,6 +504,6 @@
     </main>
   </div>
 
-  <script src="/static/isr.js?v=20251227-205200"></script>
+  <script src="/static/isr.js?v=20251227-210000"></script>
 </body>
 </html>
