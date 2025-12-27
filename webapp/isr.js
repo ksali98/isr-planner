@@ -913,30 +913,24 @@ function acceptSolution() {
       const nextCutDistance = nextSegment.cutDistance;
       calculatedCutPositions = {};
 
-      // Helper: check if position is at an airport
-      const isAtAirport = (x, y) => {
-        const airports = state.env?.airports || [];
-        const threshold = 5.0;
-        return airports.some(a => {
-          const dx = a.x - x;
-          const dy = a.y - y;
-          return Math.sqrt(dx * dx + dy * dy) < threshold;
-        });
-      };
-
       // For each drone, find position at nextCutDistance
       console.log(`[ACCEPT] Calculating cutPositions at distance=${nextCutDistance}, draftSolution.routes keys:`, Object.keys(missionState.draftSolution.routes || {}));
       Object.entries(missionState.draftSolution.routes || {}).forEach(([droneId, routeData]) => {
         const trajectory = routeData.trajectory;
-        console.log(`[ACCEPT] Drone ${droneId}: trajectory length=${trajectory?.length || 0}`);
+        const routeDistance = routeData.distance || 0;
+        console.log(`[ACCEPT] Drone ${droneId}: trajectory length=${trajectory?.length || 0}, routeDistance=${routeDistance}`);
         if (trajectory && trajectory.length >= 2) {
-          const result = split_polyline_at_distance(trajectory, nextCutDistance);
-          console.log(`[ACCEPT] Drone ${droneId}: splitPoint=${JSON.stringify(result.splitPoint)}`);
-          if (result.splitPoint && !isAtAirport(result.splitPoint[0], result.splitPoint[1])) {
-            calculatedCutPositions[droneId] = [...result.splitPoint];
-            console.log(`[ACCEPT] Drone ${droneId}: STORED cutPosition`);
-          } else if (result.splitPoint) {
-            console.log(`[ACCEPT] Drone ${droneId}: splitPoint is AT airport, not storing`);
+          // Only show cut position if the drone is still "in flight" at the cut distance
+          // i.e., the cut distance is LESS than the drone's total route distance
+          if (nextCutDistance < routeDistance) {
+            const result = split_polyline_at_distance(trajectory, nextCutDistance);
+            console.log(`[ACCEPT] Drone ${droneId}: splitPoint=${JSON.stringify(result.splitPoint)}`);
+            if (result.splitPoint) {
+              calculatedCutPositions[droneId] = [...result.splitPoint];
+              console.log(`[ACCEPT] Drone ${droneId}: STORED cutPosition (drone in flight at cut)`);
+            }
+          } else {
+            console.log(`[ACCEPT] Drone ${droneId}: route completed before cut distance (${routeDistance.toFixed(1)} < ${nextCutDistance.toFixed(1)})`);
           }
         }
       });
