@@ -373,16 +373,27 @@ class MissionReplay {
    * Call this from animation loop with current drone distances
    *
    * @param droneDistances - Object mapping droneId to current distance traveled
+   * @param animatingDrones - Set or array of droneIds that are still animating (optional)
    * @returns {switched: boolean, newSegment: Segment|null}
    */
-  checkSegmentBoundary(droneDistances) {
+  checkSegmentBoundary(droneDistances, animatingDrones = null) {
     const nextSegment = this.getNextSegment();
     if (!nextSegment || !nextSegment.hasCheckpointBoundary()) {
       return { switched: false, newSegment: null };
     }
 
+    // Convert to Set for O(1) lookup if provided
+    const stillAnimating = animatingDrones ? new Set(animatingDrones) : null;
+
     // Check if ANY drone has crossed the checkpoint boundary
+    // IMPORTANT: Only consider drones that are still animating (not finished their trajectory)
+    // A drone finishing early should NOT trigger a segment switch
     for (const [droneId, currentDist] of Object.entries(droneDistances)) {
+      // Skip drones that have finished their trajectory (not animating)
+      if (stillAnimating && !stillAnimating.has(droneId)) {
+        continue;
+      }
+
       const checkpointDist = nextSegment.getCheckpointDistance(droneId);
       if (checkpointDist !== null && currentDist >= checkpointDist) {
         // Crossed! Switch to next segment
@@ -4403,13 +4414,19 @@ function startAnimation(droneIds) {
 
     // MISSION REPLAY: Check segment boundary and switch if needed
     // Collect current drone distances for boundary check
+    // Also collect which drones are still animating (to avoid false triggers from finished drones)
     const droneDistances = {};
+    const animatingDroneIds = [];
     Object.entries(state.animation.drones).forEach(([did, ds]) => {
       droneDistances[did] = ds.distanceTraveled;
+      if (ds.animating) {
+        animatingDroneIds.push(did);
+      }
     });
 
     // Use MissionReplay to check if we crossed a segment boundary
-    const { switched, newSegment } = missionReplay.checkSegmentBoundary(droneDistances);
+    // Only consider drones that are still animating - a drone finishing early should NOT trigger switch
+    const { switched, newSegment } = missionReplay.checkSegmentBoundary(droneDistances, animatingDroneIds);
 
     if (switched && newSegment) {
       appendDebugLine(`🔄 === SEGMENT SWITCH to ${newSegment.index} (via MissionReplay) ===`);
@@ -4532,11 +4549,20 @@ function startAnimation(droneIds) {
     // Update stats with real-time distance traveled
     updateStatsFromAnimation();
 
+    // Check if there are more segments to switch to (pending checkpoints)
+    const hasMoreSegments = missionReplay.getNextSegment() !== null;
+
     if (anyAnimating && state.animation.active) {
       state.animation.animationId = requestAnimationFrame(animate);
     } else if (!state.animation.active) {
       // Stopped externally (pause/cut) - don't change mode
       return;
+    } else if (hasMoreSegments) {
+      // No drones animating, but there are more segments pending
+      // This can happen if a drone finishes early but other drones need segment switches
+      // Keep the animation loop running to process segment switches
+      console.log(`[animate] No drones animating but ${missionReplay.getSegmentCount() - missionReplay.getCurrentSegmentIndex() - 1} segments remaining`);
+      state.animation.animationId = requestAnimationFrame(animate);
     } else {
       state.animation.active = false;
       // Animation completed naturally - go to READY_TO_ANIMATE
