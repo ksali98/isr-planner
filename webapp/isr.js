@@ -908,8 +908,16 @@ function acceptSolution() {
 
     // Calculate cutPositions from the solution trajectory at the NEXT segment's cutDistance
     // This is where the white dot should appear
+    // IMPORTANT: If next segment already has frozen cutPositions (from import), preserve them
     let calculatedCutPositions = null;
-    if (nextSegment && nextSegment.cutDistance > 0) {
+    const nextSegmentHasFrozenCutPositions = nextSegment?.cutPositions && Object.keys(nextSegment.cutPositions).length > 0;
+
+    if (nextSegmentHasFrozenCutPositions) {
+      // Preserve frozen cutPositions from import - don't recalculate
+      console.log(`[ACCEPT] nextSegment already has frozen cutPositions, preserving:`, nextSegment.cutPositions);
+      appendDebugLine(`[ACCEPT] Preserving frozen cutPositions for segment ${currentIdx + 1}`);
+      calculatedCutPositions = null;  // Don't overwrite
+    } else if (nextSegment && nextSegment.cutDistance > 0) {
       const nextCutDistance = nextSegment.cutDistance;
       calculatedCutPositions = {};
 
@@ -1054,6 +1062,13 @@ function acceptSolution() {
       return;
     } else {
       // All segments have solutions - ready to animate
+      // Build combined routes from all segments for display and animation
+      const combinedRoutes = buildCombinedRoutesFromSegments();
+      state.routes = combinedRoutes;
+      // Make all drones visible
+      Object.keys(combinedRoutes).forEach(did => {
+        state.trajectoryVisible[did] = true;
+      });
       setMissionMode(MissionMode.READY_TO_ANIMATE, "all segments accepted; ready to replay");
       appendDebugLine("✅ All segments accepted. Ready to Animate full mission.");
       drawEnvironment();
@@ -1082,6 +1097,12 @@ function acceptSolution() {
       drawEnvironment();
       return;
     } else {
+      // Build combined routes from all segments for display and animation
+      const combinedRoutes = buildCombinedRoutesFromSegments();
+      state.routes = combinedRoutes;
+      Object.keys(combinedRoutes).forEach(did => {
+        state.trajectoryVisible[did] = true;
+      });
       setMissionMode(MissionMode.READY_TO_ANIMATE, "all segments accepted; ready to replay");
       appendDebugLine("✅ All segments accepted. Ready to Animate full mission.");
       drawEnvironment();
@@ -2278,7 +2299,7 @@ async function exportEnvironment() {
     let segmentCount;
 
     if (isMissionExport && segments && segments.length > 1) {
-      // MISSION export - export segments with env + cut distances (NO solutions)
+      // MISSION export - export segments with env, cut distances, cut positions, and frozen solutions
       segmentCount = segments.length;
       exportObj = {
         schema: "isr_env_v1",
@@ -2287,12 +2308,16 @@ async function exportEnvironment() {
         segments: segments.map(s => ({
           index: s.index,
           env: s.env,
-          // NO solution exported - user must re-solve after import
           cutDistance: s.cutDistance || null,
+          cutPositions: s.cutPositions || null,  // Save exact cut positions
           drone_configs: s.env?.drone_configs || null,
+          // Save frozen solution for replay (trajectories only, not full solve state)
+          frozenSolution: s.solution && Object.keys(s.solution.routes || {}).length > 0
+            ? { routes: s.solution.routes }
+            : null,
         })),
       };
-      appendDebugLine(`   ${segmentCount} segments with cut distances (no solutions)`);
+      appendDebugLine(`   ${segmentCount} segments with cut distances, positions, and frozen solutions`);
     } else {
       // ENVIRONMENT export - combine all targets into flat env, no segments
       segmentCount = 1;
@@ -3231,34 +3256,87 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   console.log(`[loadSegmentedMissionFromJson] Set state.importedSegmentCuts:`, state.importedSegmentCuts);
 
   // Create MissionReplay segments - segment 0 first (no cutDistance)
+  // Check if segment 0 has a frozen solution from export
+  const seg0FrozenSolution = seg0.frozenSolution || null;
+  const seg0Solution = seg0FrozenSolution
+    ? { routes: seg0FrozenSolution.routes || {}, sequences: {} }
+    : { routes: {}, sequences: {} };
+
   missionReplay.addSegment({
-    solution: { routes: {}, sequences: {} },  // Empty - user must solve
+    solution: seg0Solution,
     env: JSON.parse(JSON.stringify(baseEnv)),
     cutDistance: null,
-    cutPositions: null,
+    cutPositions: seg0.cutPositions || null,  // Load from export if available
     isCheckpointReplan: false,
   });
 
-  // Create placeholder segments for each cut
+  // Track which segments have frozen solutions
+  let frozenSegmentCount = seg0FrozenSolution ? 1 : 0;
+
+  // Create segments for each cut - load frozen solutions and cutPositions if available
   for (let i = 0; i < state.importedSegmentCuts.length; i++) {
     const cutData = state.importedSegmentCuts[i];
-    const nextSegEnv = segments[i + 1]?.env || baseEnv;
+    const segData = segments[i + 1];
+    const nextSegEnv = segData?.env || baseEnv;
+
+    // Check for frozen solution from export
+    const frozenSolution = segData?.frozenSolution || null;
+    const segSolution = frozenSolution
+      ? { routes: frozenSolution.routes || {}, sequences: {} }
+      : { routes: {}, sequences: {} };
+
+    // Load cutPositions directly from export if available
+    const segCutPositions = segData?.cutPositions || null;
+
+    if (frozenSolution) {
+      frozenSegmentCount++;
+      appendDebugLine(`   Segment ${i + 1}: loaded frozen solution with ${Object.keys(frozenSolution.routes || {}).length} routes`);
+    }
+    if (segCutPositions) {
+      appendDebugLine(`   Segment ${i + 1}: loaded cutPositions for ${Object.keys(segCutPositions).length} drones`);
+    }
 
     missionReplay.addSegment({
-      solution: { routes: {}, sequences: {} },  // Empty - user must solve
+      solution: segSolution,
       env: JSON.parse(JSON.stringify(nextSegEnv)),
       cutDistance: cutData.cutDistance,
-      cutPositions: null,  // Will be calculated from solution trajectory when accepting
+      cutPositions: segCutPositions,
       isCheckpointReplan: true,
     });
   }
 
-  // Reset to start - user will solve segment 0 first
-  missionReplay.resetToStart();
-  missionState.currentBuildSegmentIndex = 0;
+  // Find the first segment that needs solving (no frozen solution)
+  let firstUnsolved = 0;
+  for (let i = 0; i < missionReplay.getSegmentCount(); i++) {
+    const seg = missionReplay.getSegment(i);
+    if (Object.keys(seg.solution.routes || {}).length === 0) {
+      firstUnsolved = i;
+      break;
+    }
+    firstUnsolved = i + 1;  // All segments solved
+  }
 
-  appendDebugLine(`✅ Created ${missionReplay.getSegmentCount()} segments in MissionReplay (solutions stripped)`);
-  appendDebugLine(`   User must Solve each segment. White dots appear after Accept.`);
+  // Reset to first unsolved segment
+  missionReplay.resetToStart();
+  if (firstUnsolved > 0) {
+    // Jump to first unsolved segment
+    missionReplay.setCurrentSegmentIndex(firstUnsolved);
+  }
+  missionState.currentBuildSegmentIndex = firstUnsolved;
+
+  const totalSegments = missionReplay.getSegmentCount();
+  if (frozenSegmentCount > 0) {
+    appendDebugLine(`✅ Created ${totalSegments} segments in MissionReplay`);
+    appendDebugLine(`   ${frozenSegmentCount} segments have frozen solutions (preserved)`);
+    if (firstUnsolved < totalSegments) {
+      appendDebugLine(`   Starting at segment ${firstUnsolved + 1} (first unsolved)`);
+    } else {
+      appendDebugLine(`   All segments have frozen solutions - ready to animate`);
+    }
+  } else {
+    appendDebugLine(`✅ Created ${totalSegments} segments in MissionReplay (solutions stripped)`);
+    appendDebugLine(`   User must Solve each segment. White dots appear after Accept.`);
+  }
 
   // Debug: show original target counts for each segment
   const segInfo = segments.map((s, i) =>
@@ -3266,8 +3344,20 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   ).join(", ");
   appendDebugLine(`📊 Original segment target counts: ${segInfo}`);
 
-  // Set mode to ready for solve
-  setMissionMode(MissionMode.IDLE, "segmented mission loaded - solve segment 1");
+  // If all segments have frozen solutions, build combined routes and go to READY_TO_ANIMATE
+  if (firstUnsolved >= totalSegments && frozenSegmentCount === totalSegments) {
+    // All segments have frozen solutions - build combined routes for display
+    const combinedRoutes = buildCombinedRoutesFromSegments();
+    state.routes = combinedRoutes;
+    Object.keys(combinedRoutes).forEach(did => {
+      state.trajectoryVisible[did] = true;
+    });
+    setMissionMode(MissionMode.READY_TO_ANIMATE, "all frozen segments loaded - ready to animate");
+    appendDebugLine(`✅ All ${totalSegments} frozen segments loaded. Ready to Animate.`);
+  } else {
+    // Need to solve at least one segment
+    setMissionMode(MissionMode.IDLE, `segmented mission loaded - solve segment ${firstUnsolved + 1}`);
+  }
 }
 
 /**
@@ -3921,6 +4011,72 @@ function getJoinedTrajectories() {
   });
 
   return joined;
+}
+
+/**
+ * Build combined routes from all MissionReplay segments
+ * For multi-segment missions, concatenates trajectories from frozen solutions
+ * Returns combined routes object ready for display/animation
+ */
+function buildCombinedRoutesFromSegments() {
+  const segmentCount = missionReplay.getSegmentCount();
+  if (segmentCount <= 1) {
+    // Single segment or no segments - return state.routes as-is
+    return state.routes;
+  }
+
+  console.log(`[buildCombinedRoutesFromSegments] Combining ${segmentCount} segments`);
+  appendDebugLine(`Building combined routes from ${segmentCount} segments...`);
+
+  const combinedRoutes = {};
+
+  for (let i = 0; i < segmentCount; i++) {
+    const seg = missionReplay.getSegment(i);
+    if (!seg || !seg.solution || !seg.solution.routes) {
+      console.log(`[buildCombinedRoutesFromSegments] Segment ${i}: no solution/routes`);
+      continue;
+    }
+
+    Object.entries(seg.solution.routes).forEach(([droneId, routeData]) => {
+      const trajectory = routeData.trajectory || [];
+      if (trajectory.length === 0) return;
+
+      if (!combinedRoutes[droneId]) {
+        // First segment for this drone - copy route data
+        combinedRoutes[droneId] = {
+          ...routeData,
+          trajectory: [...trajectory],
+          distance: routeData.distance || 0,
+        };
+        console.log(`[buildCombinedRoutesFromSegments] Drone ${droneId}: segment ${i} init with ${trajectory.length} pts`);
+      } else {
+        // Subsequent segment - concatenate trajectory
+        const existing = combinedRoutes[droneId].trajectory;
+        if (existing.length > 0 && trajectory.length > 0) {
+          const lastPoint = existing[existing.length - 1];
+          const firstPoint = trajectory[0];
+          // Check for duplicate point at junction
+          const isDuplicate = Math.abs(lastPoint[0] - firstPoint[0]) < 0.001 &&
+                             Math.abs(lastPoint[1] - firstPoint[1]) < 0.001;
+          if (isDuplicate) {
+            // Skip duplicate
+            combinedRoutes[droneId].trajectory = existing.concat(trajectory.slice(1));
+          } else {
+            combinedRoutes[droneId].trajectory = existing.concat(trajectory);
+          }
+        } else {
+          combinedRoutes[droneId].trajectory = existing.concat(trajectory);
+        }
+        // Accumulate distance
+        combinedRoutes[droneId].distance += (routeData.distance || 0);
+        console.log(`[buildCombinedRoutesFromSegments] Drone ${droneId}: segment ${i} added, total pts=${combinedRoutes[droneId].trajectory.length}`);
+      }
+    });
+  }
+
+  const droneCount = Object.keys(combinedRoutes).length;
+  appendDebugLine(`Combined routes: ${droneCount} drones from ${segmentCount} segments`);
+  return combinedRoutes;
 }
 
 // resetMission() is now defined in the Mission Mode Action Handlers section
