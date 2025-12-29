@@ -885,10 +885,13 @@ function acceptSolution() {
 
   // FIRST: Extract targets visited in this solution and add to state.visitedTargets
   // This must happen BEFORE creating envSnapshot so frozen targets are filtered out
-  const draftRoutes = missionState.draftSolution?.routes || {};
+  // Check both missionState.draftSolution.routes AND state.routes
   const targetsInThisSolution = [];
+
+  // Try draftSolution.routes first
+  const draftRoutes = missionState.draftSolution?.routes || {};
   Object.values(draftRoutes).forEach(routeData => {
-    // Check both 'sequence' and 'route' fields
+    // Check sequence, route, and route array
     const seq = routeData.sequence || routeData.route || [];
     seq.forEach(wp => {
       if (typeof wp === 'string' && wp.toUpperCase().startsWith('T')) {
@@ -898,7 +901,23 @@ function acceptSolution() {
       }
     });
   });
-  console.log(`[ACCEPT] draftRoutes keys: ${Object.keys(draftRoutes).join(",")}, targetsInThisSolution: ${targetsInThisSolution.join(",")}`);
+
+  // Also check state.routes (where the UI stores the route)
+  Object.values(state.routes || {}).forEach(routeData => {
+    const seq = routeData.route || [];
+    seq.forEach(wp => {
+      if (typeof wp === 'string' && wp.toUpperCase().startsWith('T')) {
+        if (!targetsInThisSolution.includes(wp.toUpperCase())) {
+          targetsInThisSolution.push(wp.toUpperCase());
+        }
+      }
+    });
+  });
+
+  console.log(`[ACCEPT] draftRoutes keys: ${Object.keys(draftRoutes).join(",")}, state.routes keys: ${Object.keys(state.routes || {}).join(",")}`);
+  console.log(`[ACCEPT] targetsInThisSolution: ${targetsInThisSolution.join(",") || "NONE"}`);
+  console.log(`[ACCEPT] draftRoutes[1]:`, draftRoutes["1"]);
+  console.log(`[ACCEPT] state.routes[1]:`, state.routes?.["1"]);
   // Add to cumulative visited targets
   targetsInThisSolution.forEach(t => {
     if (!state.visitedTargets.includes(t)) {
@@ -3289,8 +3308,21 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   state.droneConfigs = JSON.parse(JSON.stringify(seg0.drone_configs || baseEnv.drone_configs || {}));
   state.env.drone_configs = state.droneConfigs;
 
-  // Store the initial env snapshot for reset
-  state.initialEnvSnapshot = JSON.parse(JSON.stringify(state.env));
+  // Build initialEnvSnapshot with ALL targets from ALL segments
+  // This is needed so Accept can show all targets (with greenX on frozen ones)
+  const allTargets = [];
+  const seenTargetIds = new Set();
+  data.segments.forEach(seg => {
+    (seg.env?.targets || []).forEach(t => {
+      if (!seenTargetIds.has(t.id)) {
+        seenTargetIds.add(t.id);
+        allTargets.push(JSON.parse(JSON.stringify(t)));
+      }
+    });
+  });
+  state.initialEnvSnapshot = JSON.parse(JSON.stringify(baseEnv));
+  state.initialEnvSnapshot.targets = allTargets;
+  console.log(`[loadSegmentedMissionFromJson] initialEnvSnapshot has ALL ${allTargets.length} targets: ${allTargets.map(t=>t.id).join(",")}`);
 
   // Reset mission/solution state
   missionReplay.clear();
