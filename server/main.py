@@ -155,6 +155,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Middleware to add no-cache headers for JavaScript files
+@app.middleware("http")
+async def add_no_cache_for_js(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.endswith(".js"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 @app.post("/api/debug/supabase-test")
 def supabase_test():
     run_id = create_mission_run(
@@ -214,6 +224,7 @@ def executive_tick(req: ExecutiveTickRequest):
 
 
 # serve static files (index.html, isr.js, etc.)
+# NOTE: Middleware above adds no-cache headers for all .js files
 app.mount("/static", StaticFiles(directory=str(WEBAPP)), name="static")
 
 _current_env: Optional[Dict[str, Any]] = None

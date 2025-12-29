@@ -1196,7 +1196,9 @@ function resetMission() {
     return;
   }
 
-  // Stop any animation first (without triggering state change)
+  // =====================================================
+  // 1. Stop animation
+  // =====================================================
   if (state.animation.animationId) {
     cancelAnimationFrame(state.animation.animationId);
     state.animation.animationId = null;
@@ -1204,89 +1206,79 @@ function resetMission() {
   state.animation.active = false;
   state.animation.drones = {};
 
-  // Restore initial environment if we have it
-  if (state.initialEnvSnapshot) {
-    state.env = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
-    missionState.acceptedEnv = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
-  }
+  // =====================================================
+  // 2. Clear ALL state first (before restoring solution)
+  // =====================================================
+  state.checkpoint = { active: false, pct: 0.5, segments: {} };
+  state.pendingCutDistance = null;
+  state.pendingCutPositions = null;
+  state.missionHistory = [];
+  state.visitedTargets = [];
+  state.currentCutSegment = 1;
+  state.previouslyAssignedTargets = [];
+  state.targetSegmentMap = {};
+  state.trajectoryVisible = {};  // No trajectories shown until Display is clicked
 
-  // Reset MissionReplay to start (keeps all segments)
-  missionReplay.resetToStart();
-
-  // Log replay debug info
-  const debugInfo = missionReplay.getDebugInfo();
-  appendDebugLine(`🔄 MissionReplay: ${debugInfo.segmentCount} segments, reset to index ${debugInfo.currentIndex}`);
-  debugInfo.segments.forEach(s => {
-    appendDebugLine(`   Segment ${s.index}: checkpoint=${s.hasCheckpoint}, targets=${s.envTargets}, routes=${s.routeCount}`);
-  });
-
-  // Also sync missionState for backward compatibility
   missionState.currentSegmentIndex = 0;
-
-  // Clear draft state
   missionState.draftEnv = null;
   missionState.draftSolution = null;
   missionState.pauseContext = null;
   missionState.checkpointSource = null;
 
-  // Restore the first segment's solution to the UI using MissionReplay
+  // =====================================================
+  // 3. Restore initial environment
+  // =====================================================
+  if (state.initialEnvSnapshot) {
+    state.env = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
+    missionState.acceptedEnv = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
+  }
+
+  // =====================================================
+  // 4. Reset MissionReplay to start
+  // =====================================================
+  missionReplay.resetToStart();
+
+  // =====================================================
+  // 5. Restore first segment's routes (without drawing)
+  // =====================================================
   const firstSegment = missionReplay.getSegment(0);
   if (firstSegment && firstSegment.solution) {
-    appendDebugLine("Restoring segment 0 from MissionReplay");
-    // Unfreeze the solution for applyDraftSolutionToUI (it needs mutable data)
-    const solutionCopy = JSON.parse(JSON.stringify(firstSegment.solution));
-    applyDraftSolutionToUI(solutionCopy);
-
-    // Restore segmented solve info if present
-    if (solutionCopy.segmentedSolve && solutionCopy.segmentedSolve.segments) {
-      const segments = solutionCopy.segmentedSolve.segments;
-
-      // Restore target-to-segment mapping for visualization
-      if (solutionCopy.segmentedSolve.targetSegmentMap) {
-        state.targetSegmentMap = solutionCopy.segmentedSolve.targetSegmentMap;
-      }
-
-      appendDebugLine(`📊 Restored ${segments.length} segment definitions`);
-      segments.forEach((seg, i) => {
-        const targetsInSeg = seg.targets_in_segment || [];
-        appendDebugLine(`   S${i + 1}: cut@${Math.round(seg.cut_pct * 100)}%, targets=[${targetsInSeg.join(", ")}]`);
-      });
-    } else {
-      // No segmented solve - clear segment map
-      state.targetSegmentMap = {};
-    }
+    const solution = firstSegment.solution;
+    // Manually restore routes without calling applyDraftSolutionToUI (which draws)
+    state.sequences = JSON.parse(JSON.stringify(solution.sequences || {}));
+    state.routes = JSON.parse(JSON.stringify(solution.routes || {}));
+    state.wrappedPolygons = JSON.parse(JSON.stringify(solution.wrappedPolygons || []));
+    state.allocations = JSON.parse(JSON.stringify(solution.allocations || {}));
+    state.allocationStrategy = solution.allocationStrategy || null;
+    state.distanceMatrix = solution.distanceMatrix ? JSON.parse(JSON.stringify(solution.distanceMatrix)) : null;
   } else {
     // Fallback to old system
     const oldFirstSegment = missionState.committedSegments[0];
     if (oldFirstSegment && oldFirstSegment.solution) {
-      appendDebugLine("Restoring segment 0 from missionState (fallback)");
-      applyDraftSolutionToUI(oldFirstSegment.solution);
+      const solution = oldFirstSegment.solution;
+      state.sequences = JSON.parse(JSON.stringify(solution.sequences || {}));
+      state.routes = JSON.parse(JSON.stringify(solution.routes || {}));
+      state.wrappedPolygons = JSON.parse(JSON.stringify(solution.wrappedPolygons || []));
+      state.allocations = JSON.parse(JSON.stringify(solution.allocations || {}));
+      state.allocationStrategy = solution.allocationStrategy || null;
     }
   }
 
-  // Clear any _fullTrajectory overrides that may have been set during checkpoint
+  // Clear any _fullTrajectory overrides
   Object.values(state.routes).forEach(routeData => {
     if (routeData._fullTrajectory) {
       delete routeData._fullTrajectory;
     }
   });
 
-  // Clear checkpoint state
-  state.checkpoint = { active: false, pct: 0.5, segments: {} };
-  state.pendingCutDistance = null;
-  state.pendingCutPositions = null;
-  state.missionHistory = [];
-  state.visitedTargets = [];
-  state.currentCutSegment = 1;  // Reset segment counter
-  state.previouslyAssignedTargets = [];  // Clear previously assigned targets
-  state.targetSegmentMap = {};  // Clear segment assignments on reset
-
-  // Reset to READY_TO_ANIMATE so user can replay from beginning
+  // =====================================================
+  // 6. Set mode and redraw
+  // =====================================================
   setMissionMode(MissionMode.READY_TO_ANIMATE, "mission reset to start");
-
   appendDebugLine("🔄 Mission reset - ready to replay from beginning");
   updateAirportDropdowns();
   updateAnimationButtonStates();
+  updateStatsFromRoutes();
   drawEnvironment();
 }
 
@@ -1637,6 +1629,7 @@ function drawCutMarker(ctx, mx, my, label) {
 
 let _drawEnvFrameCount = 0;
 function drawEnvironment() {
+  console.log("[drawEnv] VERSION: 2024-12-28-cutfix-v2");
   const canvas = $("env-canvas");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
@@ -2103,39 +2096,19 @@ function drawEnvironment() {
     });
   };
 
-  const segmentCount = missionReplay.getSegmentCount();
-  // Debug: log all segments' cutPositions
-  if (segmentCount > 1) {
-    console.log(`[drawEnvironment] ${segmentCount} segments, checking for cut markers...`);
-  }
-  for (let i = 0; i < segmentCount; i++) {
-    const seg = missionReplay.getSegment(i);
-    if (!seg) continue;
+  // Draw cut marker for the NEXT segment boundary only (white dot)
+  // When viewing segment N, show where segment N+1 starts (the cut point)
+  const currentSegIdx = missionReplay.getCurrentSegmentIndex();
+  const nextSegIdx = currentSegIdx + 1;
+  const nextSeg = missionReplay.getSegment(nextSegIdx);
 
-    // Debug log for each segment
-    if (segmentCount > 1) {
-      console.log(`[drawEnvironment] Segment ${i}: cutPositions=${JSON.stringify(seg.cutPositions)}, cutDistance=${seg.cutDistance}`);
-    }
-
-    // NEW path: per-drone cut positions
-    if (seg.cutPositions && typeof seg.cutPositions === "object") {
-      Object.entries(seg.cutPositions).forEach(([did, pos]) => {
-        if (!pos || pos.length !== 2) return;
-        // Draw cut marker regardless of position (removed isAtAirport check)
-        const [mx, my] = w2c(pos[0], pos[1]);
-        console.log(`[drawEnvironment] Drawing cut marker for seg ${i}, drone ${did} at (${pos[0].toFixed(1)}, ${pos[1].toFixed(1)})`);
-        drawCutMarker(ctx, mx, my, `C${i} D${did}`);
-      });
-      continue;
-    }
-
-    // Legacy path: single cut position
-    if (seg.cutPosition && seg.cutPosition.length === 2) {
-      // Skip if position is at an airport
-      if (isAtAirport(seg.cutPosition[0], seg.cutPosition[1])) continue;
-      const [mx, my] = w2c(seg.cutPosition[0], seg.cutPosition[1]);
-      drawCutMarker(ctx, mx, my, `C${i}`);
-    }
+  if (nextSeg && nextSeg.cutPositions) {
+    Object.entries(nextSeg.cutPositions).forEach(([_, pos]) => {
+      if (!pos || pos.length !== 2) return;
+      if (isAtAirport(pos[0], pos[1])) return;
+      const [mx, my] = w2c(pos[0], pos[1]);
+      drawCutMarker(ctx, mx, my, `C${nextSegIdx}`);
+    });
   }
 
   // Target Type Legend (top-right corner)
@@ -3377,6 +3350,7 @@ function loadFromJson(data, filename = "") {
   state.targetSegmentMap = {};
   state.currentCutSegment = 1;
   state.previouslyAssignedTargets = [];
+  state.importedSegmentCuts = [];  // Clear segmented import state
 
   // Stop animation if running
   if (state.animation) {
