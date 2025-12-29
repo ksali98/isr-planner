@@ -2096,38 +2096,22 @@ function drawEnvironment() {
     });
   };
 
-  // Draw cut marker for the NEXT segment boundary only (white dot)
-  // When viewing segment N, show where segment N+1 starts (the cut point)
-  const currentSegIdx = missionReplay.getCurrentSegmentIndex();
-  const nextSegIdx = currentSegIdx + 1;
-  const nextSeg = missionReplay.getSegment(nextSegIdx);
+  // Draw ALL cut markers (white dots) - these persist and accumulate
+  // Each segment (except 0) has a cutPositions marking where it starts
+  console.log(`[drawEnv] VERSION: 2024-12-28-cutfix-v4`);
+  const totalSegs = missionReplay.getSegmentCount();
+  console.log(`[drawEnv] Drawing cut markers for ${totalSegs} segments`);
 
-  console.log(`[drawEnv] VERSION: 2024-12-28-cutfix-v3`);
-  console.log(`[drawEnv] currentSegIdx=${currentSegIdx}, checking for cut marker...`);
-
-  // Check next segment first (for segmentInfo workflow)
-  if (nextSeg && nextSeg.cutPositions) {
-    console.log(`[drawEnv] Drawing cut marker from nextSeg (${nextSegIdx}):`, nextSeg.cutPositions);
-    Object.entries(nextSeg.cutPositions).forEach(([droneId, pos]) => {
-      if (!pos || pos.length !== 2) return;
-      if (isAtAirport(pos[0], pos[1])) return;
-      const [mx, my] = w2c(pos[0], pos[1]);
-      drawCutMarker(ctx, mx, my, `C${nextSegIdx}`);
-    });
-  } else {
-    // For normal N1 workflow: cutPositions is on the CURRENT segment when checkpoint replanning
-    // Show the marker that indicates where THIS segment was cut from
-    const currentSeg = missionReplay.getSegment(currentSegIdx);
-    if (currentSeg && currentSeg.cutPositions && currentSegIdx > 0) {
-      console.log(`[drawEnv] Drawing cut marker from currentSeg (${currentSegIdx}):`, currentSeg.cutPositions);
-      Object.entries(currentSeg.cutPositions).forEach(([droneId, pos]) => {
+  for (let segIdx = 1; segIdx < totalSegs; segIdx++) {
+    const seg = missionReplay.getSegment(segIdx);
+    if (seg && seg.cutPositions) {
+      console.log(`[drawEnv] Drawing cut marker for segment ${segIdx}:`, seg.cutPositions);
+      Object.entries(seg.cutPositions).forEach(([_, pos]) => {
         if (!pos || pos.length !== 2) return;
         if (isAtAirport(pos[0], pos[1])) return;
         const [mx, my] = w2c(pos[0], pos[1]);
-        drawCutMarker(ctx, mx, my, `C${currentSegIdx}`);
+        drawCutMarker(ctx, mx, my, `C${segIdx}`);
       });
-    } else {
-      console.log(`[drawEnv] No cut marker to draw. nextSeg=${!!nextSeg}, currentSeg=${!!currentSeg}, currentSegIdx=${currentSegIdx}`);
     }
   }
 
