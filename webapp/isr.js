@@ -323,6 +323,17 @@ class MissionReplay {
   }
 
   /**
+   * Clear all solutions from all segments (for Reset in segmentInfo workflow)
+   * Keeps env, cutDistance, cutPositions intact
+   */
+  clearAllSolutions() {
+    for (const seg of this._segments) {
+      seg.solution = { routes: {}, sequences: {} };
+    }
+    console.log(`[MissionReplay] Cleared solutions from ${this._segments.length} segments`);
+  }
+
+  /**
    * Clear all segments (full reset)
    */
   clear() {
@@ -1238,6 +1249,14 @@ function resetMission() {
   // =====================================================
   missionReplay.resetToStart();
 
+  // For segmentInfo workflow (imported segmented missions), clear ALL solutions
+  // This ensures Reset returns to import state - no solutions, no markers
+  const isSegmentInfoWorkflow = state.importedSegmentCuts && state.importedSegmentCuts.length > 0;
+  if (isSegmentInfoWorkflow) {
+    missionReplay.clearAllSolutions();
+    console.log(`[resetMission] segmentInfo workflow - cleared all solutions`);
+  }
+
   // =====================================================
   // 4. Restore environment from segment 0 (most reliable source)
   // =====================================================
@@ -1257,7 +1276,16 @@ function resetMission() {
   // =====================================================
   // 5. Restore first segment's routes (without drawing)
   // =====================================================
-  if (firstSegment && firstSegment.solution) {
+  // For segmentInfo workflow, we've cleared all solutions - start fresh with no routes
+  if (isSegmentInfoWorkflow) {
+    state.sequences = {};
+    state.routes = {};
+    state.wrappedPolygons = [];
+    state.allocations = {};
+    state.allocationStrategy = null;
+    state.distanceMatrix = null;
+    console.log(`[resetMission] segmentInfo workflow - cleared state.routes`);
+  } else if (firstSegment && firstSegment.solution) {
     const solution = firstSegment.solution;
     // Manually restore routes without calling applyDraftSolutionToUI (which draws)
     state.sequences = JSON.parse(JSON.stringify(solution.sequences || {}));
@@ -1289,8 +1317,14 @@ function resetMission() {
   // =====================================================
   // 6. Set mode and redraw
   // =====================================================
-  setMissionMode(MissionMode.READY_TO_ANIMATE, "mission reset to start");
-  appendDebugLine("🔄 Mission reset - ready to replay from beginning");
+  if (isSegmentInfoWorkflow) {
+    // For segmentInfo workflow, reset to EDITABLE (no solution yet)
+    setMissionMode(MissionMode.EDITABLE, "segmentInfo workflow reset - solve segment 0");
+    appendDebugLine("🔄 Mission reset - ready to solve segment 0");
+  } else {
+    setMissionMode(MissionMode.READY_TO_ANIMATE, "mission reset to start");
+    appendDebugLine("🔄 Mission reset - ready to replay from beginning");
+  }
   updateAirportDropdowns();
   updateAnimationButtonStates();
   updateStatsFromRoutes();
@@ -2111,17 +2145,23 @@ function drawEnvironment() {
     });
   };
 
-  // Draw cut markers for segments 1 through current+1 (accumulate as you progress)
-  // When viewing segment N, show cut markers for segments 1, 2, ..., N+1
-  console.log(`[drawEnv] VERSION: 2024-12-28-segfix-v9`);
+  // Draw cut markers ONLY for segments where the PREVIOUS segment has been solved (Accepted)
+  // This ensures markers don't appear on import - they appear only after Accept
+  console.log(`[drawEnv] VERSION: 2024-12-28-segfix-v10`);
   const currentSegIdx = missionReplay.getCurrentSegmentIndex();
   const maxSegToShow = currentSegIdx + 2; // Show up to next segment's marker
 
-  console.log(`[drawEnv] currentSegIdx=${currentSegIdx}, showing cut markers for segments 1 to ${maxSegToShow - 1}`);
+  console.log(`[drawEnv] currentSegIdx=${currentSegIdx}, checking cut markers for segments 1 to ${maxSegToShow - 1}`);
 
   for (let segIdx = 1; segIdx < maxSegToShow; segIdx++) {
     const seg = missionReplay.getSegment(segIdx);
-    if (seg && seg.cutPositions) {
+    const prevSeg = missionReplay.getSegment(segIdx - 1);
+    // Only show marker if previous segment has been solved (has routes)
+    const prevHasSolution = prevSeg && Object.keys(prevSeg.solution?.routes || {}).length > 0;
+
+    console.log(`[drawEnv] segIdx=${segIdx}, prevHasSolution=${prevHasSolution}`);
+
+    if (seg && seg.cutPositions && prevHasSolution) {
       Object.entries(seg.cutPositions).forEach(([_, pos]) => {
         if (!pos || pos.length !== 2) return;
         if (isAtAirport(pos[0], pos[1])) return;
