@@ -3342,11 +3342,19 @@ function isSegmentedByFilename(filename) {
 /**
  * Check if JSON data has segmentInfo with cut points (replay format)
  * This format contains the base env + segmentInfo.segmentCuts for replay
- * NOW ALSO requires filename to have _Nx_ pattern with x > 1
+ * Detects by: type="segmented" AND segmentCuts array with entries
+ * OR filename has _Nx_ pattern with x > 1
  */
 function isSegmentInfoJson(data, filename = "") {
   const hasSegmentInfoStructure = data && data.type === "segmented" && data.segmentInfo && Array.isArray(data.segmentInfo.segmentCuts);
-  return hasSegmentInfoStructure && isSegmentedByFilename(filename);
+  if (!hasSegmentInfoStructure) return false;
+
+  // If segmentCuts has entries, it's definitely a segmented file
+  const hasSegmentCuts = data.segmentInfo.segmentCuts.length > 0;
+  const hasFilenamePattern = isSegmentedByFilename(filename);
+
+  console.log(`[isSegmentInfoJson] hasSegmentCuts=${hasSegmentCuts}, hasFilenamePattern=${hasFilenamePattern}, filename=${filename}`);
+  return hasSegmentCuts || hasFilenamePattern;
 }
 
 /**
