@@ -883,6 +883,28 @@ function acceptSolution() {
   appendDebugLine(`[ACCEPT START] state.env.targets=${(state.env.targets||[]).map(t=>t.id).join(",")}`);
   appendDebugLine(`[ACCEPT START] currentBuildSegmentIndex=${missionState.currentBuildSegmentIndex}`);
 
+  // FIRST: Extract targets visited in this solution and add to state.visitedTargets
+  // This must happen BEFORE creating envSnapshot so frozen targets are filtered out
+  const draftRoutes = missionState.draftSolution?.routes || {};
+  const targetsInThisSolution = [];
+  Object.values(draftRoutes).forEach(routeData => {
+    const seq = routeData.sequence || [];
+    seq.forEach(wp => {
+      if (typeof wp === 'string' && wp.toUpperCase().startsWith('T')) {
+        if (!targetsInThisSolution.includes(wp.toUpperCase())) {
+          targetsInThisSolution.push(wp.toUpperCase());
+        }
+      }
+    });
+  });
+  // Add to cumulative visited targets
+  targetsInThisSolution.forEach(t => {
+    if (!state.visitedTargets.includes(t)) {
+      state.visitedTargets.push(t);
+    }
+  });
+  appendDebugLine(`[ACCEPT] Targets in this solution: ${targetsInThisSolution.join(",")}, cumulative visited: ${state.visitedTargets.join(",")}`);
+
   // Snapshot the authoritative current env (not stale acceptedEnv)
   // Filter out visited (frozen) targets - they should NOT be in this segment's env
   const envSnapshot = JSON.parse(JSON.stringify(state.env));
@@ -1062,58 +1084,32 @@ function acceptSolution() {
     const nextIdx = missionReplay.getCurrentSegmentIndex();
     const nextSeg = missionReplay.getSegment(nextIdx);
 
-    // Collect visited targets from the solution we just accepted
-    // These are targets that should NOT appear in future segments
-    const justAcceptedSeg = missionReplay.getSegment(nextIdx - 1);
-    const acceptedRoutes = justAcceptedSeg?.solution?.routes || {};
-    const targetsVisitedThisSolve = [];
-    Object.values(acceptedRoutes).forEach(routeData => {
-      const seq = routeData.sequence || [];
-      seq.forEach(wp => {
-        if (typeof wp === 'string' && wp.toUpperCase().startsWith('T')) {
-          if (!targetsVisitedThisSolve.includes(wp)) {
-            targetsVisitedThisSolve.push(wp);
-          }
-        }
-      });
-    });
-
-    // Add to cumulative visited targets
-    targetsVisitedThisSolve.forEach(t => {
-      if (!state.visitedTargets.includes(t)) {
-        state.visitedTargets.push(t);
-      }
-    });
+    // Visited targets already extracted at start of Accept
     console.log(`[ACCEPT] Visited targets after accept: ${state.visitedTargets.join(",")}`);
     appendDebugLine(`   Visited targets now: ${state.visitedTargets.join(",")}`);
 
     if (nextSeg && Object.keys(nextSeg.solution.routes || {}).length === 0) {
       // Next segment exists but needs solving
-      // Load the next segment's environment, FILTERING OUT visited targets
-      if (nextSeg.env) {
-        const filteredEnv = JSON.parse(JSON.stringify(nextSeg.env));
-        // Filter out all visited targets (frozen from previous segments)
-        filteredEnv.targets = (filteredEnv.targets || []).filter(t => !state.visitedTargets.includes(t.id));
+      // Use initialEnvSnapshot (all targets) for drawing - greenX will mark visited
+      // Filtering happens in buildCheckpointEnv() when sending to solver
+      const allTargetsEnv = state.initialEnvSnapshot || nextSeg.env;
+      state.env = JSON.parse(JSON.stringify(allTargetsEnv));
+      missionState.acceptedEnv = JSON.parse(JSON.stringify(allTargetsEnv));
+      state.droneConfigs = JSON.parse(JSON.stringify(allTargetsEnv.drone_configs || state.droneConfigs || {}));
+      state.env.drone_configs = state.droneConfigs;
+      missionState.draftSolution = null;
 
-        state.env = filteredEnv;
-        missionState.acceptedEnv = JSON.parse(JSON.stringify(filteredEnv));
-        state.droneConfigs = JSON.parse(JSON.stringify(filteredEnv.drone_configs || state.droneConfigs || {}));
-        state.env.drone_configs = state.droneConfigs;
-        missionState.draftSolution = null;
-
-        // Also update the segment's env in MissionReplay so export has correct targets
-        missionReplay.replaceSegment(nextIdx, {
-          ...nextSeg,
-          env: JSON.parse(JSON.stringify(filteredEnv)),
-        });
-
-        initDroneConfigsFromEnv();
-        updateSamWrappingClientSide();
-
-        appendDebugLine(`➡️ Loaded segment ${nextIdx + 1} env with ${state.env.targets?.length || 0} targets (filtered). Ready to Solve.`);
-      } else {
-        appendDebugLine(`➡️ Ready to Solve segment ${nextIdx + 1}`);
+      // Show the cut marker for this segment (where the drone starts)
+      if (nextSeg.cutPositions) {
+        state.pendingCutPositions = JSON.parse(JSON.stringify(nextSeg.cutPositions));
+        appendDebugLine(`📍 Showing cut marker at positions: ${JSON.stringify(nextSeg.cutPositions)}`);
       }
+
+      initDroneConfigsFromEnv();
+      updateSamWrappingClientSide();
+
+      const unfrozenCount = (state.env.targets || []).filter(t => !state.visitedTargets.includes(t.id)).length;
+      appendDebugLine(`➡️ Segment ${nextIdx + 1}: ${unfrozenCount} targets to visit, ${state.visitedTargets.length} frozen (${state.visitedTargets.join(",") || "none"}).`);
       setMissionMode(MissionMode.IDLE, `segment ${nextIdx + 1} ready to solve`);
       drawEnvironment();
       return;
@@ -3980,18 +3976,21 @@ function buildCheckpointEnv() {
   if (isSegmentInfoWorkflow && currentSegIdx > 0 && currentSeg?.cutPositions) {
     appendDebugLine(`buildCheckpointEnv: segmentInfo workflow, segment ${currentSegIdx}, using cutPositions as start`);
 
-    // Use the SEGMENT's env (has correct targets for this segment), not state.env
-    // The segment's env was set during import with only the targets for this segment
-    const segEnv = currentSeg.env || state.env;
-    const segTargets = (segEnv.targets || []).map(t => t.id);
-    appendDebugLine(`   Using segment ${currentSegIdx} env with ${segTargets.length} targets: ${segTargets.join(",")}`);
+    // Use state.env which should already be filtered (set in acceptSolution)
+    // But double-check by filtering out visited targets again
+    const baseEnv = state.env;
+    const env2 = JSON.parse(JSON.stringify(baseEnv));
 
-    // Deep copy the segment's env
-    const env2 = JSON.parse(JSON.stringify(segEnv));
+    // Filter out visited targets (frozen from previous segments)
+    env2.targets = (env2.targets || []).filter(t => !state.visitedTargets.includes(t.id));
+    const segTargets = env2.targets.map(t => t.id);
+    appendDebugLine(`   Using env with ${segTargets.length} targets after filtering: ${segTargets.join(",")}`);
+    appendDebugLine(`   Frozen targets excluded: ${state.visitedTargets.join(",")}`);
+
     env2.synthetic_starts = env2.synthetic_starts || {};
 
-    // Deep copy drone configs from segment env
-    const newDroneConfigs = JSON.parse(JSON.stringify(segEnv.drone_configs || state.droneConfigs));
+    // Deep copy drone configs from env
+    const newDroneConfigs = JSON.parse(JSON.stringify(env2.drone_configs || state.droneConfigs));
 
     // Use cutPositions as start points for each drone
     Object.entries(currentSeg.cutPositions).forEach(([did, pos]) => {
