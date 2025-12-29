@@ -3907,6 +3907,47 @@ function buildCheckpointEnv() {
   appendDebugLine(`buildCheckpointEnv: checkpoint.active=${state.checkpoint?.active}, segments=${Object.keys(state.checkpoint?.segments || {}).join(",") || "NONE"}`);
   appendDebugLine(`buildCheckpointEnv: visitedTargets=[${state.visitedTargets.join(", ")}]`);
 
+  // Check for segmentInfo workflow (imported segmented missions)
+  // For segment N > 0, use the current segment's cutPositions as start points
+  const isSegmentInfoWorkflow = state.importedSegmentCuts && state.importedSegmentCuts.length > 0;
+  const currentSegIdx = missionReplay.getCurrentSegmentIndex();
+  const currentSeg = missionReplay.getSegment(currentSegIdx);
+
+  if (isSegmentInfoWorkflow && currentSegIdx > 0 && currentSeg?.cutPositions) {
+    appendDebugLine(`buildCheckpointEnv: segmentInfo workflow, segment ${currentSegIdx}, using cutPositions as start`);
+
+    // Deep copy current env
+    const env2 = JSON.parse(JSON.stringify(state.env));
+    env2.synthetic_starts = env2.synthetic_starts || {};
+
+    // Deep copy drone configs
+    const newDroneConfigs = JSON.parse(JSON.stringify(state.droneConfigs));
+
+    // Use cutPositions as start points for each drone
+    Object.entries(currentSeg.cutPositions).forEach(([did, pos]) => {
+      if (!pos || pos.length !== 2) return;
+
+      const nodeId = `D${did}_START`;
+      env2.synthetic_starts[nodeId] = {
+        id: nodeId,
+        x: pos[0],
+        y: pos[1],
+      };
+
+      // Update drone config to start from synthetic node
+      if (newDroneConfigs[did]) {
+        newDroneConfigs[did].start_airport = nodeId;
+        appendDebugLine(`   Drone ${did}: start from cutPosition [${pos[0].toFixed(2)}, ${pos[1].toFixed(2)}]`);
+      }
+    });
+
+    return {
+      env: env2,
+      droneConfigs: newDroneConfigs,
+      isCheckpointReplan: true,  // Treat as checkpoint replan for backend
+    };
+  }
+
   if (!state.checkpoint?.active || !state.checkpoint.segments) {
     appendDebugLine("buildCheckpointEnv: NOT a checkpoint replan (checkpoint.active is false or no segments)");
     return { env: state.env, droneConfigs: state.droneConfigs, isCheckpointReplan: false };
