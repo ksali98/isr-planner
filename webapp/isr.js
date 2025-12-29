@@ -2113,7 +2113,7 @@ function drawEnvironment() {
 
   // Draw cut markers for segments 1 through current+1 (accumulate as you progress)
   // When viewing segment N, show cut markers for segments 1, 2, ..., N+1
-  console.log(`[drawEnv] VERSION: 2024-12-28-segfix-v8`);
+  console.log(`[drawEnv] VERSION: 2024-12-28-segfix-v9`);
   const currentSegIdx = missionReplay.getCurrentSegmentIndex();
   const maxSegToShow = currentSegIdx + 2; // Show up to next segment's marker
 
@@ -2292,7 +2292,7 @@ async function exportEnvironment() {
     let segmentCount;
 
     if (isMissionExport && segments && segments.length > 1) {
-      // MISSION export - export segments with env, cut distances, cut positions, and frozen solutions
+      // MISSION export - export segments with env, cut distances, cut positions (NO solutions)
       segmentCount = segments.length;
       exportObj = {
         schema: "isr_env_v1",
@@ -2302,15 +2302,12 @@ async function exportEnvironment() {
           index: s.index,
           env: s.env,
           cutDistance: s.cutDistance || null,
-          cutPositions: s.cutPositions || null,  // Save exact cut positions
+          cutPositions: s.cutPositions || null,  // Save exact cut positions for marker display
           drone_configs: s.env?.drone_configs || null,
-          // Save frozen solution for replay (trajectories only, not full solve state)
-          frozenSolution: s.solution && Object.keys(s.solution.routes || {}).length > 0
-            ? { routes: s.solution.routes }
-            : null,
+          // NO frozenSolution - solutions come from solver, not JSON
         })),
       };
-      appendDebugLine(`   ${segmentCount} segments with cut distances, positions, and frozen solutions`);
+      appendDebugLine(`   ${segmentCount} segments with cut distances and positions (no solutions)`);
     } else {
       // ENVIRONMENT export - combine all targets into flat env, no segments
       segmentCount = 1;
