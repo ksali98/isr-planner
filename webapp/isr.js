@@ -3916,12 +3916,18 @@ function buildCheckpointEnv() {
   if (isSegmentInfoWorkflow && currentSegIdx > 0 && currentSeg?.cutPositions) {
     appendDebugLine(`buildCheckpointEnv: segmentInfo workflow, segment ${currentSegIdx}, using cutPositions as start`);
 
-    // Deep copy current env
-    const env2 = JSON.parse(JSON.stringify(state.env));
+    // Use the SEGMENT's env (has correct targets for this segment), not state.env
+    // The segment's env was set during import with only the targets for this segment
+    const segEnv = currentSeg.env || state.env;
+    const segTargets = (segEnv.targets || []).map(t => t.id);
+    appendDebugLine(`   Using segment ${currentSegIdx} env with ${segTargets.length} targets: ${segTargets.join(",")}`);
+
+    // Deep copy the segment's env
+    const env2 = JSON.parse(JSON.stringify(segEnv));
     env2.synthetic_starts = env2.synthetic_starts || {};
 
-    // Deep copy drone configs
-    const newDroneConfigs = JSON.parse(JSON.stringify(state.droneConfigs));
+    // Deep copy drone configs from segment env
+    const newDroneConfigs = JSON.parse(JSON.stringify(segEnv.drone_configs || state.droneConfigs));
 
     // Use cutPositions as start points for each drone
     Object.entries(currentSeg.cutPositions).forEach(([did, pos]) => {
