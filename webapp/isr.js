@@ -884,7 +884,10 @@ function acceptSolution() {
   appendDebugLine(`[ACCEPT START] currentBuildSegmentIndex=${missionState.currentBuildSegmentIndex}`);
 
   // Snapshot the authoritative current env (not stale acceptedEnv)
+  // Filter out visited (frozen) targets - they should NOT be in this segment's env
   const envSnapshot = JSON.parse(JSON.stringify(state.env));
+  envSnapshot.targets = (envSnapshot.targets || []).filter(t => !state.visitedTargets.includes(t.id));
+  appendDebugLine(`[ACCEPT] envSnapshot has ${envSnapshot.targets.length} targets (frozen: ${state.visitedTargets.join(",") || "none"})`);
 
   // Debug: show pendingCutDistance before adding segment
   appendDebugLine(
@@ -1059,20 +1062,55 @@ function acceptSolution() {
     const nextIdx = missionReplay.getCurrentSegmentIndex();
     const nextSeg = missionReplay.getSegment(nextIdx);
 
+    // Collect visited targets from the solution we just accepted
+    // These are targets that should NOT appear in future segments
+    const justAcceptedSeg = missionReplay.getSegment(nextIdx - 1);
+    const acceptedRoutes = justAcceptedSeg?.solution?.routes || {};
+    const targetsVisitedThisSolve = [];
+    Object.values(acceptedRoutes).forEach(routeData => {
+      const seq = routeData.sequence || [];
+      seq.forEach(wp => {
+        if (typeof wp === 'string' && wp.toUpperCase().startsWith('T')) {
+          if (!targetsVisitedThisSolve.includes(wp)) {
+            targetsVisitedThisSolve.push(wp);
+          }
+        }
+      });
+    });
+
+    // Add to cumulative visited targets
+    targetsVisitedThisSolve.forEach(t => {
+      if (!state.visitedTargets.includes(t)) {
+        state.visitedTargets.push(t);
+      }
+    });
+    console.log(`[ACCEPT] Visited targets after accept: ${state.visitedTargets.join(",")}`);
+    appendDebugLine(`   Visited targets now: ${state.visitedTargets.join(",")}`);
+
     if (nextSeg && Object.keys(nextSeg.solution.routes || {}).length === 0) {
       // Next segment exists but needs solving
-      // Load the next segment's environment (with new targets)
+      // Load the next segment's environment, FILTERING OUT visited targets
       if (nextSeg.env) {
-        state.env = JSON.parse(JSON.stringify(nextSeg.env));
-        missionState.acceptedEnv = JSON.parse(JSON.stringify(nextSeg.env));
-        state.droneConfigs = JSON.parse(JSON.stringify(nextSeg.env.drone_configs || state.droneConfigs || {}));
+        const filteredEnv = JSON.parse(JSON.stringify(nextSeg.env));
+        // Filter out all visited targets (frozen from previous segments)
+        filteredEnv.targets = (filteredEnv.targets || []).filter(t => !state.visitedTargets.includes(t.id));
+
+        state.env = filteredEnv;
+        missionState.acceptedEnv = JSON.parse(JSON.stringify(filteredEnv));
+        state.droneConfigs = JSON.parse(JSON.stringify(filteredEnv.drone_configs || state.droneConfigs || {}));
         state.env.drone_configs = state.droneConfigs;
         missionState.draftSolution = null;
+
+        // Also update the segment's env in MissionReplay so export has correct targets
+        missionReplay.replaceSegment(nextIdx, {
+          ...nextSeg,
+          env: JSON.parse(JSON.stringify(filteredEnv)),
+        });
 
         initDroneConfigsFromEnv();
         updateSamWrappingClientSide();
 
-        appendDebugLine(`➡️ Loaded segment ${nextIdx + 1} env with ${state.env.targets?.length || 0} targets. Ready to Solve.`);
+        appendDebugLine(`➡️ Loaded segment ${nextIdx + 1} env with ${state.env.targets?.length || 0} targets (filtered). Ready to Solve.`);
       } else {
         appendDebugLine(`➡️ Ready to Solve segment ${nextIdx + 1}`);
       }
@@ -3179,16 +3217,42 @@ function loadSegmentInfoFromJson(data, filename = "") {
   });
 
   // Create placeholder segments for each cut
+  // Each segment's env has targets MINUS the visitedTargets from the previous segment
   // cutPositions will be calculated from the actual solution when accepting
   for (let i = 0; i < segmentCuts.length; i++) {
     const cutData = state.importedSegmentCuts[i];
-    appendDebugLine(`   Segment ${i + 1}: cutDistance=${cutData.cutDistance.toFixed(1)}`);
+
+    // Get frozen (visited) targets from the PREVIOUS cut (or none for segment 1)
+    // These are the targets that were visited BEFORE this segment starts
+    const frozenTargets = i > 0
+      ? state.importedSegmentCuts[i - 1].visitedTargets || []
+      : [];  // Segment 1 has no frozen targets (segment 0 hasn't visited anything yet)
+
+    // Build segment env with only the targets NOT yet visited
+    const segmentEnv = JSON.parse(JSON.stringify(baseEnv));
+    segmentEnv.targets = segmentEnv.targets.filter(t => !frozenTargets.includes(t.id));
+
+    const remainingTargetIds = segmentEnv.targets.map(t => t.id);
+    appendDebugLine(`   Segment ${i + 1}: cutDistance=${cutData.cutDistance.toFixed(1)}, frozen=${frozenTargets.length}, remaining=${remainingTargetIds.join(",")}`);
+
+    // Also extract cutPositions from dronePositions in the cut data
+    const rawCut = segmentCuts[i];
+    let cutPositions = null;
+    if (rawCut.dronePositions) {
+      cutPositions = {};
+      Object.entries(rawCut.dronePositions).forEach(([did, posData]) => {
+        if (posData.position && posData.position.length === 2) {
+          cutPositions[did] = [...posData.position];
+        }
+      });
+      if (Object.keys(cutPositions).length === 0) cutPositions = null;
+    }
 
     missionReplay.addSegment({
       solution: { routes: {}, sequences: {} },
-      env: JSON.parse(JSON.stringify(baseEnv)),
+      env: segmentEnv,
       cutDistance: cutData.cutDistance,
-      cutPositions: null,  // Will be calculated from solution trajectory
+      cutPositions: cutPositions,  // From dronePositions in segmentCuts
       isCheckpointReplan: true,
     });
   }
