@@ -1226,25 +1226,29 @@ function resetMission() {
   missionState.checkpointSource = null;
 
   // =====================================================
-  // 3. Restore initial environment
-  // =====================================================
-  if (state.initialEnvSnapshot) {
-    const snapshotTargets = (state.initialEnvSnapshot.targets || []).map(t => t.id);
-    console.log(`[resetMission] initialEnvSnapshot has ${snapshotTargets.length} targets: ${snapshotTargets.join(",")}`);
-    state.env = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
-    missionState.acceptedEnv = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
-    console.log(`[resetMission] After restore, state.env has ${(state.env.targets||[]).length} targets`);
-  }
-
-  // =====================================================
-  // 4. Reset MissionReplay to start
+  // 3. Reset MissionReplay to start
   // =====================================================
   missionReplay.resetToStart();
 
   // =====================================================
-  // 5. Restore first segment's routes (without drawing)
+  // 4. Restore environment from segment 0 (most reliable source)
   // =====================================================
   const firstSegment = missionReplay.getSegment(0);
+  if (firstSegment && firstSegment.env) {
+    const seg0Targets = (firstSegment.env.targets || []).map(t => t.id);
+    console.log(`[resetMission] Using segment 0 env with ${seg0Targets.length} targets: ${seg0Targets.join(",")}`);
+    state.env = JSON.parse(JSON.stringify(firstSegment.env));
+    missionState.acceptedEnv = JSON.parse(JSON.stringify(firstSegment.env));
+  } else if (state.initialEnvSnapshot) {
+    const snapshotTargets = (state.initialEnvSnapshot.targets || []).map(t => t.id);
+    console.log(`[resetMission] Fallback to initialEnvSnapshot with ${snapshotTargets.length} targets: ${snapshotTargets.join(",")}`);
+    state.env = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
+    missionState.acceptedEnv = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
+  }
+
+  // =====================================================
+  // 5. Restore first segment's routes (without drawing)
+  // =====================================================
   if (firstSegment && firstSegment.solution) {
     const solution = firstSegment.solution;
     // Manually restore routes without calling applyDraftSolutionToUI (which draws)
@@ -2099,25 +2103,24 @@ function drawEnvironment() {
     });
   };
 
-  // Draw cut marker for the NEXT segment only (white dot)
-  // When viewing segment N, show where segment N+1 starts
-  console.log(`[drawEnv] VERSION: 2024-12-28-cutfix-v5`);
+  // Draw cut markers for segments 1 through current+1 (accumulate as you progress)
+  // When viewing segment N, show cut markers for segments 1, 2, ..., N+1
+  console.log(`[drawEnv] VERSION: 2024-12-28-cutfix-v6`);
   const currentSegIdx = missionReplay.getCurrentSegmentIndex();
-  const nextSegIdx = currentSegIdx + 1;
-  const nextSeg = missionReplay.getSegment(nextSegIdx);
+  const maxSegToShow = currentSegIdx + 2; // Show up to next segment's marker
 
-  console.log(`[drawEnv] currentSegIdx=${currentSegIdx}, nextSegIdx=${nextSegIdx}, hasNextSeg=${!!nextSeg}`);
+  console.log(`[drawEnv] currentSegIdx=${currentSegIdx}, showing cut markers for segments 1 to ${maxSegToShow - 1}`);
 
-  if (nextSeg && nextSeg.cutPositions) {
-    console.log(`[drawEnv] Drawing ONE cut marker for next segment (${nextSegIdx}):`, nextSeg.cutPositions);
-    Object.entries(nextSeg.cutPositions).forEach(([_, pos]) => {
-      if (!pos || pos.length !== 2) return;
-      if (isAtAirport(pos[0], pos[1])) return;
-      const [mx, my] = w2c(pos[0], pos[1]);
-      drawCutMarker(ctx, mx, my, `C${nextSegIdx}`);
-    });
-  } else {
-    console.log(`[drawEnv] No next segment cut marker to draw`);
+  for (let segIdx = 1; segIdx < maxSegToShow; segIdx++) {
+    const seg = missionReplay.getSegment(segIdx);
+    if (seg && seg.cutPositions) {
+      Object.entries(seg.cutPositions).forEach(([_, pos]) => {
+        if (!pos || pos.length !== 2) return;
+        if (isAtAirport(pos[0], pos[1])) return;
+        const [mx, my] = w2c(pos[0], pos[1]);
+        drawCutMarker(ctx, mx, my, `C${segIdx}`);
+      });
+    }
   }
 
   // Target Type Legend (top-right corner)
