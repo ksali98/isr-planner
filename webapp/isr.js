@@ -469,6 +469,14 @@ function mergeById(baseArr, srcArr) {
  * Call this after accepting a solution to propagate env edits to later segments
  */
 function mergeEnvForwardFromCurrent(startSegmentIndex) {
+  // For segmentInfo workflow (imported segmented missions), DO NOT merge targets forward
+  // Each segment should keep its own distinct targets
+  const isSegmentInfoWorkflow = state.importedSegmentCuts && state.importedSegmentCuts.length > 0;
+  if (isSegmentInfoWorkflow) {
+    console.log(`[mergeEnvForward] SKIPPING - segmentInfo workflow should not merge targets forward`);
+    return;
+  }
+
   const src = JSON.parse(JSON.stringify(state.env));
 
   // Update missionReplay segments
@@ -2105,7 +2113,7 @@ function drawEnvironment() {
 
   // Draw cut markers for segments 1 through current+1 (accumulate as you progress)
   // When viewing segment N, show cut markers for segments 1, 2, ..., N+1
-  console.log(`[drawEnv] VERSION: 2024-12-28-cutfix-v6`);
+  console.log(`[drawEnv] VERSION: 2024-12-28-segfix-v7`);
   const currentSegIdx = missionReplay.getCurrentSegmentIndex();
   const maxSegToShow = currentSegIdx + 2; // Show up to next segment's marker
 
