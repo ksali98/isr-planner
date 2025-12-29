@@ -2096,23 +2096,25 @@ function drawEnvironment() {
     });
   };
 
-  // Draw ALL cut markers (white dots) - these persist and accumulate
-  // Each segment (except 0) has a cutPositions marking where it starts
-  console.log(`[drawEnv] VERSION: 2024-12-28-cutfix-v4`);
-  const totalSegs = missionReplay.getSegmentCount();
-  console.log(`[drawEnv] Drawing cut markers for ${totalSegs} segments`);
+  // Draw cut marker for the NEXT segment only (white dot)
+  // When viewing segment N, show where segment N+1 starts
+  console.log(`[drawEnv] VERSION: 2024-12-28-cutfix-v5`);
+  const currentSegIdx = missionReplay.getCurrentSegmentIndex();
+  const nextSegIdx = currentSegIdx + 1;
+  const nextSeg = missionReplay.getSegment(nextSegIdx);
 
-  for (let segIdx = 1; segIdx < totalSegs; segIdx++) {
-    const seg = missionReplay.getSegment(segIdx);
-    if (seg && seg.cutPositions) {
-      console.log(`[drawEnv] Drawing cut marker for segment ${segIdx}:`, seg.cutPositions);
-      Object.entries(seg.cutPositions).forEach(([_, pos]) => {
-        if (!pos || pos.length !== 2) return;
-        if (isAtAirport(pos[0], pos[1])) return;
-        const [mx, my] = w2c(pos[0], pos[1]);
-        drawCutMarker(ctx, mx, my, `C${segIdx}`);
-      });
-    }
+  console.log(`[drawEnv] currentSegIdx=${currentSegIdx}, nextSegIdx=${nextSegIdx}, hasNextSeg=${!!nextSeg}`);
+
+  if (nextSeg && nextSeg.cutPositions) {
+    console.log(`[drawEnv] Drawing ONE cut marker for next segment (${nextSegIdx}):`, nextSeg.cutPositions);
+    Object.entries(nextSeg.cutPositions).forEach(([_, pos]) => {
+      if (!pos || pos.length !== 2) return;
+      if (isAtAirport(pos[0], pos[1])) return;
+      const [mx, my] = w2c(pos[0], pos[1]);
+      drawCutMarker(ctx, mx, my, `C${nextSegIdx}`);
+    });
+  } else {
+    console.log(`[drawEnv] No next segment cut marker to draw`);
   }
 
   // Target Type Legend (top-right corner)
