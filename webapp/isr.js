@@ -2113,7 +2113,7 @@ function drawEnvironment() {
 
   // Draw cut markers for segments 1 through current+1 (accumulate as you progress)
   // When viewing segment N, show cut markers for segments 1, 2, ..., N+1
-  console.log(`[drawEnv] VERSION: 2024-12-28-segfix-v7`);
+  console.log(`[drawEnv] VERSION: 2024-12-28-segfix-v8`);
   const currentSegIdx = missionReplay.getCurrentSegmentIndex();
   const maxSegToShow = currentSegIdx + 2; // Show up to next segment's marker
 
@@ -3249,87 +3249,45 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   console.log(`[loadSegmentedMissionFromJson] Set state.importedSegmentCuts:`, state.importedSegmentCuts);
 
   // Create MissionReplay segments - segment 0 first (no cutDistance)
-  // Check if segment 0 has a frozen solution from export
-  const seg0FrozenSolution = seg0.frozenSolution || null;
-  const seg0Solution = seg0FrozenSolution
-    ? { routes: seg0FrozenSolution.routes || {}, sequences: {} }
-    : { routes: {}, sequences: {} };
-
+  // IMPORTANT: Strip frozen solutions - user must re-solve each segment
+  // Only keep cutDistances and cutPositions for cut point calculation
   missionReplay.addSegment({
-    solution: seg0Solution,
+    solution: { routes: {}, sequences: {} },  // Empty - user must solve
     env: JSON.parse(JSON.stringify(baseEnv)),
     cutDistance: null,
-    cutPositions: seg0.cutPositions || null,  // Load from export if available
+    cutPositions: null,  // Don't show marker until Accept
     isCheckpointReplan: false,
   });
 
-  // Track which segments have frozen solutions
-  let frozenSegmentCount = seg0FrozenSolution ? 1 : 0;
+  appendDebugLine(`   Segment 0: env loaded (${baseEnv.targets?.length || 0} targets), no frozen solution`);
 
-  // Create segments for each cut - load frozen solutions and cutPositions if available
+  // Create segments for each cut - strip solutions, keep env + cutDistance + cutPositions
   for (let i = 0; i < state.importedSegmentCuts.length; i++) {
     const cutData = state.importedSegmentCuts[i];
     const segData = segments[i + 1];
     const nextSegEnv = segData?.env || baseEnv;
 
-    // Check for frozen solution from export
-    const frozenSolution = segData?.frozenSolution || null;
-    const segSolution = frozenSolution
-      ? { routes: frozenSolution.routes || {}, sequences: {} }
-      : { routes: {}, sequences: {} };
-
-    // Load cutPositions directly from export if available
+    // Load cutPositions from export (for calculating cut marker position after Accept)
     const segCutPositions = segData?.cutPositions || null;
 
-    if (frozenSolution) {
-      frozenSegmentCount++;
-      appendDebugLine(`   Segment ${i + 1}: loaded frozen solution with ${Object.keys(frozenSolution.routes || {}).length} routes`);
-    }
-    if (segCutPositions) {
-      appendDebugLine(`   Segment ${i + 1}: loaded cutPositions for ${Object.keys(segCutPositions).length} drones`);
-    }
-
     missionReplay.addSegment({
-      solution: segSolution,
+      solution: { routes: {}, sequences: {} },  // Empty - user must solve
       env: JSON.parse(JSON.stringify(nextSegEnv)),
       cutDistance: cutData.cutDistance,
-      cutPositions: segCutPositions,
+      cutPositions: segCutPositions,  // Keep for cut marker calculation
       isCheckpointReplan: true,
     });
+
+    appendDebugLine(`   Segment ${i + 1}: env loaded (${nextSegEnv.targets?.length || 0} targets), cutDistance=${cutData.cutDistance.toFixed(1)}`);
   }
 
-  // Find the first segment that needs solving (no frozen solution)
-  let firstUnsolved = 0;
-  for (let i = 0; i < missionReplay.getSegmentCount(); i++) {
-    const seg = missionReplay.getSegment(i);
-    if (Object.keys(seg.solution.routes || {}).length === 0) {
-      firstUnsolved = i;
-      break;
-    }
-    firstUnsolved = i + 1;  // All segments solved
-  }
-
-  // Reset to first unsolved segment
+  // Always start at segment 0 - all solutions are stripped
   missionReplay.resetToStart();
-  if (firstUnsolved > 0) {
-    // Jump to first unsolved segment
-    missionReplay.setCurrentSegmentIndex(firstUnsolved);
-  }
-  missionState.currentBuildSegmentIndex = firstUnsolved;
+  missionState.currentBuildSegmentIndex = 0;
 
   const totalSegments = missionReplay.getSegmentCount();
-  if (frozenSegmentCount > 0) {
-    appendDebugLine(`✅ Created ${totalSegments} segments in MissionReplay`);
-    appendDebugLine(`   ${frozenSegmentCount} segments have frozen solutions (preserved)`);
-    if (firstUnsolved < totalSegments) {
-      appendDebugLine(`   Starting at segment ${firstUnsolved + 1} (first unsolved)`);
-    } else {
-      appendDebugLine(`   All segments have frozen solutions - ready to animate`);
-    }
-  } else {
-    appendDebugLine(`✅ Created ${totalSegments} segments in MissionReplay (solutions stripped)`);
-    appendDebugLine(`   User must Solve each segment. White dots appear after Accept.`);
-  }
+  appendDebugLine(`✅ Created ${totalSegments} segments in MissionReplay (solutions stripped)`);
+  appendDebugLine(`   User must Solve each segment. Cut markers appear after Accept.`);
 
   // Debug: show original target counts for each segment
   const segInfo = segments.map((s, i) =>
@@ -3337,20 +3295,8 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   ).join(", ");
   appendDebugLine(`📊 Original segment target counts: ${segInfo}`);
 
-  // If all segments have frozen solutions, build combined routes and go to READY_TO_ANIMATE
-  if (firstUnsolved >= totalSegments && frozenSegmentCount === totalSegments) {
-    // All segments have frozen solutions - build combined routes for display
-    const combinedRoutes = buildCombinedRoutesFromSegments();
-    state.routes = combinedRoutes;
-    Object.keys(combinedRoutes).forEach(did => {
-      state.trajectoryVisible[did] = true;
-    });
-    setMissionMode(MissionMode.READY_TO_ANIMATE, "all frozen segments loaded - ready to animate");
-    appendDebugLine(`✅ All ${totalSegments} frozen segments loaded. Ready to Animate.`);
-  } else {
-    // Need to solve at least one segment
-    setMissionMode(MissionMode.IDLE, `segmented mission loaded - solve segment ${firstUnsolved + 1}`);
-  }
+  // Set mode to IDLE - user must solve segment 0 first
+  setMissionMode(MissionMode.IDLE, `segmented mission loaded - solve segment 1`);
 }
 
 /**
