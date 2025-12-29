@@ -3308,18 +3308,24 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   state.droneConfigs = JSON.parse(JSON.stringify(seg0.drone_configs || baseEnv.drone_configs || {}));
   state.env.drone_configs = state.droneConfigs;
 
-  // Build initialEnvSnapshot with ALL targets from ALL segments
-  // This is needed so Accept can show all targets (with greenX on frozen ones)
-  const allTargets = [];
-  const seenTargetIds = new Set();
-  data.segments.forEach(seg => {
-    (seg.env?.targets || []).forEach(t => {
-      if (!seenTargetIds.has(t.id)) {
-        seenTargetIds.add(t.id);
-        allTargets.push(JSON.parse(JSON.stringify(t)));
-      }
+  // Build initialEnvSnapshot with ALL targets
+  // First try top-level targets, then collect from all segments
+  let allTargets = [];
+  if (data.targets && data.targets.length > 0) {
+    // Top-level targets exist (segmentInfo format stored at top)
+    allTargets = JSON.parse(JSON.stringify(data.targets));
+  } else {
+    // Collect from all segments
+    const seenTargetIds = new Set();
+    data.segments.forEach(seg => {
+      (seg.env?.targets || []).forEach(t => {
+        if (!seenTargetIds.has(t.id)) {
+          seenTargetIds.add(t.id);
+          allTargets.push(JSON.parse(JSON.stringify(t)));
+        }
+      });
     });
-  });
+  }
   state.initialEnvSnapshot = JSON.parse(JSON.stringify(baseEnv));
   state.initialEnvSnapshot.targets = allTargets;
   console.log(`[loadSegmentedMissionFromJson] initialEnvSnapshot has ALL ${allTargets.length} targets: ${allTargets.map(t=>t.id).join(",")}`);
