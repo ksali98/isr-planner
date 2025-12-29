@@ -1095,6 +1095,9 @@ function acceptSolution() {
       // Use initialEnvSnapshot (all targets) for drawing - greenX will mark visited
       // Filtering happens in buildCheckpointEnv() when sending to solver
       const allTargetsEnv = state.initialEnvSnapshot || nextSeg.env;
+      console.log(`[ACCEPT] allTargetsEnv has ${(allTargetsEnv?.targets || []).length} targets: ${(allTargetsEnv?.targets || []).map(t=>t.id).join(",")}`);
+      console.log(`[ACCEPT] state.visitedTargets = ${state.visitedTargets.join(",")}`);
+
       state.env = JSON.parse(JSON.stringify(allTargetsEnv));
       missionState.acceptedEnv = JSON.parse(JSON.stringify(allTargetsEnv));
       state.droneConfigs = JSON.parse(JSON.stringify(allTargetsEnv.drone_configs || state.droneConfigs || {}));
@@ -1104,14 +1107,18 @@ function acceptSolution() {
       // Show the cut marker for this segment (where the drone starts)
       if (nextSeg.cutPositions) {
         state.pendingCutPositions = JSON.parse(JSON.stringify(nextSeg.cutPositions));
-        appendDebugLine(`📍 Showing cut marker at positions: ${JSON.stringify(nextSeg.cutPositions)}`);
+        console.log(`[ACCEPT] Set pendingCutPositions: ${JSON.stringify(nextSeg.cutPositions)}`);
+      } else {
+        console.log(`[ACCEPT] nextSeg.cutPositions is null/undefined`);
       }
 
       initDroneConfigsFromEnv();
       updateSamWrappingClientSide();
 
+      const allCount = (state.env.targets || []).length;
       const unfrozenCount = (state.env.targets || []).filter(t => !state.visitedTargets.includes(t.id)).length;
-      appendDebugLine(`➡️ Segment ${nextIdx + 1}: ${unfrozenCount} targets to visit, ${state.visitedTargets.length} frozen (${state.visitedTargets.join(",") || "none"}).`);
+      console.log(`[ACCEPT] state.env now has ${allCount} targets, ${unfrozenCount} unfrozen`);
+      appendDebugLine(`➡️ Segment ${nextIdx + 1}: ${allCount} targets total, ${unfrozenCount} to visit, frozen: ${state.visitedTargets.join(",") || "none"}`);
       setMissionMode(MissionMode.IDLE, `segment ${nextIdx + 1} ready to solve`);
       drawEnvironment();
       return;
