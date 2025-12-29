@@ -2102,13 +2102,33 @@ function drawEnvironment() {
   const nextSegIdx = currentSegIdx + 1;
   const nextSeg = missionReplay.getSegment(nextSegIdx);
 
+  console.log(`[drawEnv] VERSION: 2024-12-28-cutfix-v3`);
+  console.log(`[drawEnv] currentSegIdx=${currentSegIdx}, checking for cut marker...`);
+
+  // Check next segment first (for segmentInfo workflow)
   if (nextSeg && nextSeg.cutPositions) {
-    Object.entries(nextSeg.cutPositions).forEach(([_, pos]) => {
+    console.log(`[drawEnv] Drawing cut marker from nextSeg (${nextSegIdx}):`, nextSeg.cutPositions);
+    Object.entries(nextSeg.cutPositions).forEach(([droneId, pos]) => {
       if (!pos || pos.length !== 2) return;
       if (isAtAirport(pos[0], pos[1])) return;
       const [mx, my] = w2c(pos[0], pos[1]);
       drawCutMarker(ctx, mx, my, `C${nextSegIdx}`);
     });
+  } else {
+    // For normal N1 workflow: cutPositions is on the CURRENT segment when checkpoint replanning
+    // Show the marker that indicates where THIS segment was cut from
+    const currentSeg = missionReplay.getSegment(currentSegIdx);
+    if (currentSeg && currentSeg.cutPositions && currentSegIdx > 0) {
+      console.log(`[drawEnv] Drawing cut marker from currentSeg (${currentSegIdx}):`, currentSeg.cutPositions);
+      Object.entries(currentSeg.cutPositions).forEach(([droneId, pos]) => {
+        if (!pos || pos.length !== 2) return;
+        if (isAtAirport(pos[0], pos[1])) return;
+        const [mx, my] = w2c(pos[0], pos[1]);
+        drawCutMarker(ctx, mx, my, `C${currentSegIdx}`);
+      });
+    } else {
+      console.log(`[drawEnv] No cut marker to draw. nextSeg=${!!nextSeg}, currentSeg=${!!currentSeg}, currentSegIdx=${currentSegIdx}`);
+    }
   }
 
   // Target Type Legend (top-right corner)
