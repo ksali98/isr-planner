@@ -1327,10 +1327,15 @@ function acceptSolutionWithManager() {
     // More segments to solve
     // Set up env for drawing (all targets, visited ones get green X)
     const fullEnv = segmentedImport.getFullEnv();
+    console.log(`[ACCEPT-NEW] fullEnv.targets=`, fullEnv?.targets?.map(t => t.id));
+    console.log(`[ACCEPT-NEW] state.visitedTargets=`, state.visitedTargets);
+
     state.env = fullEnv;
     state.droneConfigs = JSON.parse(JSON.stringify(fullEnv.drone_configs || {}));
     state.env.drone_configs = state.droneConfigs;
     missionState.acceptedEnv = JSON.parse(JSON.stringify(fullEnv));
+
+    console.log(`[ACCEPT-NEW] state.env.targets after assignment=`, state.env?.targets?.map(t => t.id));
 
     // Show cut marker for this segment
     const cutPos = segmentedImport.getCutPositionForSegment(newSegIdx);
@@ -1344,6 +1349,7 @@ function acceptSolutionWithManager() {
 
     const unfrozen = segmentedImport.getUnfrozenTargets();
     appendDebugLine(`➡️ Segment ${newSegIdx}: ${segmentedImport.getAllTargets().length} total, ${unfrozen.length} to visit, frozen: ${state.visitedTargets.join(",") || "none"}`);
+    console.log(`[ACCEPT-NEW] FINAL state.env.targets=`, state.env?.targets?.map(t => t.id));
 
     setMissionMode(MissionMode.IDLE, `segment ${newSegIdx} ready to solve`);
     drawEnvironment();
