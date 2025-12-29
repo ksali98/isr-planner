@@ -1229,8 +1229,11 @@ function resetMission() {
   // 3. Restore initial environment
   // =====================================================
   if (state.initialEnvSnapshot) {
+    const snapshotTargets = (state.initialEnvSnapshot.targets || []).map(t => t.id);
+    console.log(`[resetMission] initialEnvSnapshot has ${snapshotTargets.length} targets: ${snapshotTargets.join(",")}`);
     state.env = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
     missionState.acceptedEnv = JSON.parse(JSON.stringify(state.initialEnvSnapshot));
+    console.log(`[resetMission] After restore, state.env has ${(state.env.targets||[]).length} targets`);
   }
 
   // =====================================================
@@ -3844,6 +3847,8 @@ async function fetchWrappedPolygons(recalculate = false) {
  */
 function saveInitialEnvSnapshot() {
   if (state.env) {
+    const targetIds = (state.env.targets || []).map(t => t.id);
+    console.log(`[saveInitialEnvSnapshot] Saving with ${targetIds.length} targets: ${targetIds.join(",")}`);
     state.initialEnvSnapshot = JSON.parse(JSON.stringify(state.env));
     state.missionHistory = [];
     state.visitedTargets = [];
