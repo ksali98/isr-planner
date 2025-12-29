@@ -888,7 +888,8 @@ function acceptSolution() {
   const draftRoutes = missionState.draftSolution?.routes || {};
   const targetsInThisSolution = [];
   Object.values(draftRoutes).forEach(routeData => {
-    const seq = routeData.sequence || [];
+    // Check both 'sequence' and 'route' fields
+    const seq = routeData.sequence || routeData.route || [];
     seq.forEach(wp => {
       if (typeof wp === 'string' && wp.toUpperCase().startsWith('T')) {
         if (!targetsInThisSolution.includes(wp.toUpperCase())) {
@@ -897,6 +898,7 @@ function acceptSolution() {
       }
     });
   });
+  console.log(`[ACCEPT] draftRoutes keys: ${Object.keys(draftRoutes).join(",")}, targetsInThisSolution: ${targetsInThisSolution.join(",")}`);
   // Add to cumulative visited targets
   targetsInThisSolution.forEach(t => {
     if (!state.visitedTargets.includes(t)) {
