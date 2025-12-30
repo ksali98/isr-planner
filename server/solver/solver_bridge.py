@@ -374,11 +374,17 @@ def solve_mission(
         if not allowed_types:
             allowed_types = {"a", "b", "c", "d"}
 
-        # Filter targets by allowed types
+        # Filter targets by allowed types AND exclude those inside SAM polygons
         candidate_targets = [
             t for t in targets
             if str(t.get("type", "a")).lower() in allowed_types
+            and str(t.get("id", "")) not in excluded_targets
         ]
+
+        # DEBUG: Check if any excluded targets would have been included
+        excluded_here = [t["id"] for t in targets if str(t.get("id", "")) in excluded_targets]
+        if excluded_here:
+            print(f"   🚫 D{did}: Excluded targets (inside SAM polygons): {excluded_here}", flush=True)
 
         # Additionally filter by assigned_drone if any targets have assignments
         any_assigned = any(t.get("assigned_drone") is not None for t in targets)
