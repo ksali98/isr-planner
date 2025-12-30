@@ -2511,7 +2511,6 @@ function drawCutMarker(ctx, mx, my, label) {
 
 let _drawEnvFrameCount = 0;
 function drawEnvironment() {
-  console.log("[drawEnv] VERSION: 2024-12-28-cutfix-v2");
   const canvas = $("env-canvas");
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
