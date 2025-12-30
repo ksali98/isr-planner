@@ -594,7 +594,6 @@ def solve_mission_with_allocation(
     # ALWAYS use SAM-aware matrix calculator for consistency
     # This ensures targets inside SAM circles are always excluded
     # When no SAMs present, it still computes correct Euclidean distances
-    global _cached_env_hash
     current_hash = _compute_env_hash(env)
 
     # Always clear and recalculate to ensure fresh exclusion detection

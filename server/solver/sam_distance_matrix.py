@@ -130,40 +130,9 @@ class SAMDistanceMatrixCalculator:
             wrapped_polygons, _ = wrap_sams(sams_for_wrapping)
             polygon_boundaries = wrapped_polygons
 
-        # --- DEBUG: show SAMs and target inside/out status ---
-        try:
-            print("📐 [DEBUG] SAM circles in distance-matrix calculator:", flush=True)
-            for i, sam in enumerate(normalized_sams):
-                print(
-                    f"    SAM {i}: center=({sam['pos'][0]:.1f},{sam['pos'][1]:.1f}), "
-                    f"range={sam['range']:.1f}",
-                    flush=True,
-                )
-
-            print("🎯 [DEBUG] Targets vs SAM circles (CRITICAL FOR EXCLUSION):", flush=True)
-            for t in targets:
-                tx, ty = float(t["x"]), float(t["y"])
-                inside_any_circle = False
-                for sam in normalized_sams:
-                    sam_x, sam_y = sam["pos"]
-                    sam_range = sam["range"]
-                    distance = math.sqrt((tx - sam_x)**2 + (ty - sam_y)**2)
-                    if distance < sam_range:
-                        inside_any_circle = True
-                        print(
-                            f"    🚫 target {t['id']} at ({tx:.2f},{ty:.2f}) "
-                            f"INSIDE SAM circle (dist={distance:.2f} < range={sam_range:.2f})",
-                            flush=True,
-                        )
-                        break
-                if not inside_any_circle:
-                    print(
-                        f"    ✅ target {t['id']} at ({tx:.2f},{ty:.2f}) outside all SAM circles",
-                        flush=True,
-                    )
-
-        except Exception as e:
-            print("[DEBUG] Error in SAM/target debug block:", e, flush=True)
+        # --- DEBUG: show SAMs (brief) ---
+        if normalized_sams:
+            print(f"📐 [DEBUG] {len(normalized_sams)} SAM circles in distance-matrix calculator", flush=True)
         # --- END DEBUG ---
 
         for t in targets:
