@@ -265,14 +265,11 @@ def solve_mission(
         }
 
     # Build a global distance matrix; we'll reuse it per drone
-    # Use SAM-aware distances if SAMs are present
-    if sams:
-        print("🎯 SAMs present - calculating SAM-aware distance matrix...", flush=True)
-        # CRITICAL: Clear cache to ensure fresh exclusion detection
-        clear_matrix_cache()
-        dist_data = calculate_sam_aware_matrix(env)
-    else:
-        dist_data = _build_distance_matrix(airports, targets)
+    # ALWAYS use SAM-aware distances for consistency and exclusion detection
+    sam_count = len(sams) if sams else 0
+    print(f"🎯 Calculating fresh distance matrix ({sam_count} SAMs)...", flush=True)
+    clear_matrix_cache()
+    dist_data = calculate_sam_aware_matrix(env)
 
     # Get excluded targets (inside SAM polygons)
     excluded_targets = set(dist_data.get("excluded_targets", []))
@@ -594,22 +591,18 @@ def solve_mission_with_allocation(
         }
 
     # Step 1: Get distance matrix
-    # CRITICAL: ALWAYS use SAM-aware matrix when SAMs are present
-    # This ensures targets inside SAM circles are excluded even if use_sam_aware_distances=False
-    # The flag only controls whether path distances avoid SAMs, NOT target exclusion
-    if sams:
-        global _cached_env_hash
-        current_hash = _compute_env_hash(env)
+    # ALWAYS use SAM-aware matrix calculator for consistency
+    # This ensures targets inside SAM circles are always excluded
+    # When no SAMs present, it still computes correct Euclidean distances
+    global _cached_env_hash
+    current_hash = _compute_env_hash(env)
 
-        # Always clear and recalculate to ensure fresh exclusion detection
-        print("🎯 SAMs present - calculating fresh SAM-aware distance matrix...", flush=True)
-        print(f"   (use_sam_aware_distances={use_sam_aware_distances} - but ALWAYS checking target exclusion)", flush=True)
-        clear_matrix_cache()
-        dist_data = calculate_sam_aware_matrix(env)
-        _cached_env_hash = current_hash
-    else:
-        # No SAMs - use simple Euclidean distances
-        dist_data = _build_distance_matrix(airports, targets)
+    # Always clear and recalculate to ensure fresh exclusion detection
+    sam_count = len(sams) if sams else 0
+    print(f"🎯 Calculating fresh distance matrix ({sam_count} SAMs)...", flush=True)
+    clear_matrix_cache()
+    dist_data = calculate_sam_aware_matrix(env)
+    _cached_env_hash = current_hash
 
     # Always set distance matrices for allocator and optimizer
     # Even Euclidean distances are needed for fuel budget calculations
