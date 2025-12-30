@@ -268,6 +268,8 @@ def solve_mission(
     # Use SAM-aware distances if SAMs are present
     if sams:
         print("🎯 SAMs present - calculating SAM-aware distance matrix...", flush=True)
+        # CRITICAL: Clear cache to ensure fresh exclusion detection
+        clear_matrix_cache()
         dist_data = calculate_sam_aware_matrix(env)
     else:
         dist_data = _build_distance_matrix(airports, targets)
@@ -591,25 +593,18 @@ def solve_mission_with_allocation(
             "routes": {},
         }
 
-    # Step 1: Get distance matrix (use cached if available AND matches current env)
+    # Step 1: Get distance matrix
+    # CRITICAL: Always recalculate to ensure fresh SAM exclusion detection
+    # Cache was causing stale excluded_targets to be used
     if use_sam_aware_distances and sams:
         global _cached_env_hash
         current_hash = _compute_env_hash(env)
-        cached_matrix = get_cached_matrix()
 
-        # Only use cache if it matches the current environment
-        if cached_matrix is not None and _cached_env_hash == current_hash:
-            print("⚡ Using cached SAM-aware distance matrix (env hash match)", flush=True)
-            dist_data = cached_matrix
-        else:
-            # Cache miss or env changed - recalculate
-            if cached_matrix is not None:
-                print(f"🔄 Environment changed (hash mismatch), recalculating distance matrix...", flush=True)
-                clear_matrix_cache()
-            else:
-                print("⏳ Calculating SAM-aware distance matrix (no cache available)...", flush=True)
-            dist_data = calculate_sam_aware_matrix(env)
-            _cached_env_hash = current_hash  # Update hash after calculation
+        # Always clear and recalculate to ensure fresh exclusion detection
+        print("🎯 SAMs present - calculating fresh SAM-aware distance matrix...", flush=True)
+        clear_matrix_cache()
+        dist_data = calculate_sam_aware_matrix(env)
+        _cached_env_hash = current_hash
     else:
         # Use simple Euclidean distances
         dist_data = _build_distance_matrix(airports, targets)
