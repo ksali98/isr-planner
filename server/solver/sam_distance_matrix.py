@@ -109,12 +109,14 @@ class SAMDistanceMatrixCalculator:
         # Normalize SAM format
         normalized_sams = self._normalize_sams(sams)
 
-        # Check for targets inside POLYGON BOUNDARY and exclude them
-        # The polygon boundary is what matters, not individual SAM circles
+        # Check for targets inside SAM zones and exclude them
+        # We check BOTH:
+        # 1. Inside individual SAM circles (matches frontend red X display)
+        # 2. Inside wrapped polygon boundaries (convex hull of overlapping SAMs)
         excluded_inside_boundary = []
         valid_targets = []
 
-        # Get wrapped polygon boundaries (same as displayed on UI)
+        # Get wrapped polygon boundaries (for visualization)
         polygon_boundaries = []
         if wrap_sams and normalized_sams:
             # Convert to format expected by wrap_sams
@@ -128,51 +130,71 @@ class SAMDistanceMatrixCalculator:
             wrapped_polygons, _ = wrap_sams(sams_for_wrapping)
             polygon_boundaries = wrapped_polygons
 
-                # --- DEBUG: show polygon bounds and target inside/out status ---
+        # --- DEBUG: show SAMs and target inside/out status ---
         try:
-            if polygon_boundaries:
-                print("📐 [DEBUG] SAM polygons in distance-matrix calculator:", flush=True)
-                for i, poly in enumerate(polygon_boundaries):
-                    xs = [p[0] for p in poly]
-                    ys = [p[1] for p in poly]
-                    print(
-                        f"    polygon {i}: X=[{min(xs):.1f},{max(xs):.1f}], "
-                        f"Y=[{min(ys):.1f},{max(ys):.1f}], {len(poly)} vertices",
-                        flush=True,
-                    )
+            print("📐 [DEBUG] SAM circles in distance-matrix calculator:", flush=True)
+            for i, sam in enumerate(normalized_sams):
+                print(
+                    f"    SAM {i}: center=({sam['pos'][0]:.1f},{sam['pos'][1]:.1f}), "
+                    f"range={sam['range']:.1f}",
+                    flush=True,
+                )
 
-                print("🎯 [DEBUG] Targets vs SAM polygons:", flush=True)
-                for t in targets:
-                    tx, ty = float(t["x"]), float(t["y"])
-                    inside_any = False
-                    for poly in polygon_boundaries:
-                        if point_in_polygon((tx, ty), poly):
-                            inside_any = True
-                            break
+            print("🎯 [DEBUG] Targets vs SAM circles (CRITICAL FOR EXCLUSION):", flush=True)
+            for t in targets:
+                tx, ty = float(t["x"]), float(t["y"])
+                inside_any_circle = False
+                for sam in normalized_sams:
+                    sam_x, sam_y = sam["pos"]
+                    sam_range = sam["range"]
+                    distance = math.sqrt((tx - sam_x)**2 + (ty - sam_y)**2)
+                    if distance < sam_range:
+                        inside_any_circle = True
+                        print(
+                            f"    🚫 target {t['id']} at ({tx:.2f},{ty:.2f}) "
+                            f"INSIDE SAM circle (dist={distance:.2f} < range={sam_range:.2f})",
+                            flush=True,
+                        )
+                        break
+                if not inside_any_circle:
                     print(
-                        f"    target {t['id']} at ({tx:.2f},{ty:.2f}) "
-                        f"inside_boundary={inside_any}",
+                        f"    ✅ target {t['id']} at ({tx:.2f},{ty:.2f}) outside all SAM circles",
                         flush=True,
                     )
 
         except Exception as e:
-            print("[DEBUG] Error in polygon/target debug block:", e, flush=True)
+            print("[DEBUG] Error in SAM/target debug block:", e, flush=True)
         # --- END DEBUG ---
 
         for t in targets:
             tx, ty = float(t["x"]), float(t["y"])
-            inside_boundary = False
+            should_exclude = False
 
-            # Check if target is inside any wrapped polygon boundary
-            for polygon in polygon_boundaries:
-                if point_in_polygon((tx, ty), polygon):
+            # CRITICAL: Check if target is inside ANY individual SAM circle
+            # This matches the frontend algorithm that shows red X marks
+            for sam in normalized_sams:
+                sam_x, sam_y = sam["pos"]
+                sam_range = sam["range"]
+                distance = math.sqrt((tx - sam_x)**2 + (ty - sam_y)**2)
+                if distance < sam_range:
                     excluded_inside_boundary.append(t["id"])
-                    print(f"⚠️ Target {t['id']} at ({tx:.1f}, {ty:.1f}) is INSIDE polygon boundary "
+                    print(f"⚠️ Target {t['id']} at ({tx:.1f}, {ty:.1f}) is INSIDE SAM circle "
+                          f"(center=({sam_x:.1f},{sam_y:.1f}), range={sam_range:.1f}, dist={distance:.1f}) "
                           f"- excluding from mission", flush=True)
-                    inside_boundary = True
+                    should_exclude = True
                     break
 
-            if not inside_boundary:
+            # Also check polygon boundaries (for edge cases with overlapping SAMs)
+            if not should_exclude:
+                for polygon in polygon_boundaries:
+                    if point_in_polygon((tx, ty), polygon):
+                        excluded_inside_boundary.append(t["id"])
+                        print(f"⚠️ Target {t['id']} at ({tx:.1f}, {ty:.1f}) is INSIDE polygon boundary "
+                              f"- excluding from mission", flush=True)
+                        should_exclude = True
+                        break
+
+            if not should_exclude:
                 valid_targets.append(t)
 
         # Build list of all waypoints (using only valid targets)
