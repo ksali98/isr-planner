@@ -594,19 +594,21 @@ def solve_mission_with_allocation(
         }
 
     # Step 1: Get distance matrix
-    # CRITICAL: Always recalculate to ensure fresh SAM exclusion detection
-    # Cache was causing stale excluded_targets to be used
-    if use_sam_aware_distances and sams:
+    # CRITICAL: ALWAYS use SAM-aware matrix when SAMs are present
+    # This ensures targets inside SAM circles are excluded even if use_sam_aware_distances=False
+    # The flag only controls whether path distances avoid SAMs, NOT target exclusion
+    if sams:
         global _cached_env_hash
         current_hash = _compute_env_hash(env)
 
         # Always clear and recalculate to ensure fresh exclusion detection
         print("🎯 SAMs present - calculating fresh SAM-aware distance matrix...", flush=True)
+        print(f"   (use_sam_aware_distances={use_sam_aware_distances} - but ALWAYS checking target exclusion)", flush=True)
         clear_matrix_cache()
         dist_data = calculate_sam_aware_matrix(env)
         _cached_env_hash = current_hash
     else:
-        # Use simple Euclidean distances
+        # No SAMs - use simple Euclidean distances
         dist_data = _build_distance_matrix(airports, targets)
 
     # Always set distance matrices for allocator and optimizer
