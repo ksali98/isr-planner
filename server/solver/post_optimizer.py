@@ -172,11 +172,18 @@ class PostOptimizer:
 
         # Build waypoint position lookup
         waypoint_positions = {}
-        for a in env.get("airports", []):
+        airports = env.get("airports", [])
+        targets = env.get("targets", [])
+
+        print(f"   [set_environment] Building waypoint positions from {len(airports)} airports and {len(targets)} targets", flush=True)
+
+        for a in airports:
             waypoint_positions[str(a["id"])] = [float(a["x"]), float(a["y"])]
-        for t in env.get("targets", []):
+        for t in targets:
             waypoint_positions[str(t["id"])] = [float(t["x"]), float(t["y"])]
         self._waypoint_positions = waypoint_positions
+
+        print(f"   [set_environment] Waypoint positions: {list(waypoint_positions.keys())}", flush=True)
 
         # Store SAM data
         self._sams = env.get("sams", [])
@@ -369,10 +376,16 @@ class PostOptimizer:
         Returns:
             Optimized solution with updated routes
         """
+        print(f"\n📍 [OPTIMIZER.optimize] Starting optimization", flush=True)
+        print(f"   _waypoint_positions has {len(self._waypoint_positions or {})} entries", flush=True)
+        print(f"   _distance_matrix is {'SET' if self._distance_matrix else 'NOT SET'}", flush=True)
+
         # Parse priority constraints into per-drone filter functions
         priority_filters = parse_priority_constraint(priority_constraints) if priority_constraints else {}
         targets = env.get("targets", [])
         airports = env.get("airports", [])
+
+        print(f"   env has {len(targets)} targets, {len(airports)} airports", flush=True)
 
         # Get all target IDs
         all_target_ids = {str(t["id"]) for t in targets}
@@ -388,8 +401,13 @@ class PostOptimizer:
         # Identify unvisited targets
         unvisited = all_target_ids - visited_targets
 
+        print(f"   all_target_ids = {sorted(all_target_ids)}", flush=True)
+        print(f"   visited_targets = {sorted(visited_targets)}", flush=True)
+        print(f"   unvisited = {sorted(unvisited)}", flush=True)
+
         if not unvisited:
             # All targets visited, no optimization needed
+            print(f"   ⚡ EARLY RETURN: All targets already visited!", flush=True)
             return solution
 
         # Filter out targets inside SAM polygons (no-fly zones)
@@ -423,6 +441,17 @@ class PostOptimizer:
             distance_used = route_data.get("distance", 0)
             drone_remaining_fuel[did] = fuel_budget - distance_used
 
+        # DEBUG: Log state before insertion attempts
+        print(f"\n🔍 INSERT MISSED OPTIMIZER DEBUG:", flush=True)
+        print(f"   All targets: {sorted(all_target_ids)}", flush=True)
+        print(f"   Visited: {sorted(visited_targets)}", flush=True)
+        print(f"   Unvisited (sorted by priority): {unvisited_sorted}", flush=True)
+        print(f"   Drone configs received: {list(drone_configs.keys())}", flush=True)
+        for did in sorted(drone_configs.keys()):
+            cfg = drone_configs[did]
+            remaining = drone_remaining_fuel.get(did, 0)
+            print(f"   D{did}: enabled={cfg.get('enabled')}, remaining_fuel={remaining:.1f}, target_access={cfg.get('target_access', {})}", flush=True)
+
         # Try to assign each unvisited target
         # GOAL: Maximize total points by inserting ALL targets that fit within fuel budget
         # STRATEGY:
@@ -434,18 +463,22 @@ class PostOptimizer:
         for tid in unvisited_sorted:
             target = target_by_id[tid]
             priority = int(target.get("priority", 5))
+            target_type = target.get("type", "a")
 
             # Find ALL viable (drone, position, cost) options for this target
             viable_options = []  # List of (drone_id, insertion_index, insertion_cost)
+            skip_reasons = {}  # Track why each drone can't take this target
 
             for did, cfg in drone_configs.items():
                 # Check ALL constraints: enabled, target type, AND priority
                 if not target_allowed_for_drone(target, did, cfg, priority_filters):
+                    skip_reasons[did] = "not allowed (type/priority/disabled)"
                     continue
 
                 # Check if drone has enough fuel
                 remaining_fuel = drone_remaining_fuel.get(did, 0)
                 if remaining_fuel <= 0:
+                    skip_reasons[did] = f"no fuel remaining ({remaining_fuel:.1f})"
                     continue
 
                 # Find best insertion point in this drone's route
@@ -453,6 +486,7 @@ class PostOptimizer:
                 route = route_data.get("route", [])
 
                 if not route:
+                    skip_reasons[did] = "empty route"
                     continue
 
                 # Get frozen segments for this drone (indices where route[i]->route[i+1] is frozen)
@@ -464,7 +498,7 @@ class PostOptimizer:
                 target_pos = self._waypoint_positions.get(tid)
 
                 if not trajectory or not target_pos:
-                    # No trajectory available, skip this drone
+                    skip_reasons[did] = f"no trajectory ({len(trajectory) if trajectory else 0} pts) or target_pos ({target_pos})"
                     continue
 
                 # Convert trajectory to list of tuples if needed
@@ -483,10 +517,12 @@ class PostOptimizer:
 
                 # Check if this position is frozen
                 if route_idx > 0 and (route_idx - 1) in frozen_segments:
+                    skip_reasons[did] = f"frozen segment at position {route_idx}"
                     continue
 
                 # Check if we're trying to insert after the end airport
                 if route_idx >= len(route):
+                    skip_reasons[did] = f"route_idx {route_idx} >= route length {len(route)}"
                     continue
 
                 # Calculate insertion cost using proper SAM-avoiding distances
@@ -517,14 +553,20 @@ class PostOptimizer:
 
                 # Check if we have enough fuel
                 if insertion_cost > remaining_fuel:
+                    skip_reasons[did] = f"insertion_cost {insertion_cost:.1f} > remaining_fuel {remaining_fuel:.1f}"
                     continue
 
                 # Add this as a viable option
                 viable_options.append((did, route_idx, insertion_cost))
 
-            # If no drone can take this target, skip it
+            # If no drone can take this target, log why
             if not viable_options:
+                print(f"   ❌ {tid} (type={target_type}, priority={priority}): NO VIABLE DRONES", flush=True)
+                for did, reason in sorted(skip_reasons.items()):
+                    print(f"      D{did}: {reason}", flush=True)
                 continue
+            else:
+                print(f"   ✅ {tid} (type={target_type}, priority={priority}): {len(viable_options)} viable options", flush=True)
 
             # Among viable options, pick the drone with LOWEST insertion cost
             # This minimizes fuel usage when multiple drones can service the target
@@ -723,7 +765,29 @@ def post_optimize_solution(
 
     Returns:
         Optimized solution with updated routes
+
+    DEBUG: Entry point logging
     """
+    print(f"\n🔧 POST_OPTIMIZE_SOLUTION CALLED", flush=True)
+    print(f"   solution keys: {list(solution.keys())}", flush=True)
+    print(f"   env keys: {list(env.keys())}", flush=True)
+    print(f"   drone_configs: {list(drone_configs.keys())}", flush=True)
+    print(f"   distance_matrix provided: {distance_matrix is not None}", flush=True)
+    print(f"   priority_constraints: {priority_constraints}", flush=True)
+
+    # Debug: Check solution routes structure
+    routes = solution.get("routes", {})
+    print(f"   Solution has {len(routes)} routes:", flush=True)
+    for did, rdata in routes.items():
+        if isinstance(rdata, dict):
+            route = rdata.get("route", [])
+            traj = rdata.get("trajectory", [])
+            fuel = rdata.get("fuel_budget", "N/A")
+            dist = rdata.get("distance", "N/A")
+            print(f"      D{did}: route={route}, trajectory_pts={len(traj)}, fuel_budget={fuel}, distance={dist}", flush=True)
+        else:
+            print(f"      D{did}: (not a dict) {type(rdata)}", flush=True)
+
     # Set environment for SAM-aware distance fallback calculations
     _optimizer.set_environment(env)
 
@@ -731,7 +795,10 @@ def post_optimize_solution(
     if distance_matrix:
         _optimizer.set_distance_matrix(distance_matrix)
 
-    return _optimizer.optimize(solution, env, drone_configs, priority_constraints)
+    print(f"   Calling _optimizer.optimize()...", flush=True)
+    result = _optimizer.optimize(solution, env, drone_configs, priority_constraints)
+    print(f"   _optimizer.optimize() returned {len(result.get('routes', {}))} routes", flush=True)
+    return result
 
 
 def get_unvisited_targets(

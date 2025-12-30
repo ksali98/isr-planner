@@ -86,3 +86,129 @@ CREATE TRIGGER update_sessions_updated_at
 
 -- Example policies (adjust based on your auth setup):
 -- CREATE POLICY "Allow all for service role" ON agent_memories FOR ALL USING (true);
+
+-- =====================================================
+-- DECISION TRACE V1 + LEARNING V1 TABLES
+-- =====================================================
+
+-- Enable UUID generation (Supabase typically has this available)
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- 7. Agent Runs Table
+-- One row per v4 agentic solve (the canonical run record)
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    -- Context references (optional)
+    env_version_id UUID NULL,               -- link to env_versions.id if desired
+    mission_id UUID NULL,                   -- optional parent mission
+    user_id TEXT NULL,                      -- optional user who triggered
+
+    -- Run configuration
+    agent_version TEXT NOT NULL DEFAULT 'v4',
+    mode TEXT NOT NULL DEFAULT 'agentic',   -- 'agentic' | 'manual' | 'optimizer_only'
+    request_text TEXT NULL,                 -- Raw user request
+
+    -- Intent
+    objective TEXT NULL,                    -- Compiled objective
+    hard_constraints JSONB NOT NULL DEFAULT '{}'::jsonb,
+    soft_preferences JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    -- Solver info (promoted for fast filtering/dashboards)
+    solver_type TEXT NULL,                  -- 'orienteering_exact' | 'heuristic' | 'hybrid'
+    solver_runtime_ms INTEGER NULL,
+
+    -- Results
+    total_points NUMERIC NULL,
+    total_fuel_used NUMERIC NULL,
+    runtime_ms INTEGER NULL,
+    is_valid BOOLEAN NULL,
+    routes JSONB NOT NULL DEFAULT '{}'::jsonb,   -- {"D1":["A1","T3","A2"], ...}
+    summary JSONB NOT NULL DEFAULT '{}'::jsonb,  -- per-drone + totals
+
+    -- Segment support (for checkpoint replans)
+    parent_run_id UUID NULL REFERENCES agent_runs(id) ON DELETE SET NULL,
+    segment_index INTEGER NULL              -- 0, 1, 2, ... for segment replans
+);
+
+-- Indexes for agent_runs
+CREATE INDEX IF NOT EXISTS agent_runs_created_at_idx ON agent_runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS agent_runs_env_idx ON agent_runs(env_version_id);
+CREATE INDEX IF NOT EXISTS agent_runs_valid_idx ON agent_runs(is_valid);
+CREATE INDEX IF NOT EXISTS agent_runs_solver_type_idx ON agent_runs(solver_type);
+CREATE INDEX IF NOT EXISTS agent_runs_solver_runtime_idx ON agent_runs(solver_runtime_ms);
+CREATE INDEX IF NOT EXISTS agent_runs_parent_idx ON agent_runs(parent_run_id);
+
+-- 8. Agent Traces Table
+-- Full Decision Trace payload (JSONB blob for flexibility)
+-- One trace per run (enforced by unique index)
+CREATE TABLE IF NOT EXISTS agent_traces (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    agent_run_id UUID NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+
+    -- The full trace as JSONB for schema evolution without migrations
+    -- Structure: {
+    --   "env_hash": "abc123",
+    --   "eligibility": { "1": { "eligible": ["T1","T2"], "excluded": [...] } },
+    --   "allocation": { "algorithm": "greedy", "assignments": {...}, "rationale": {...} },
+    --   "solver": { "type": "exact", "candidates": 100, "runtime_ms": 150 },
+    --   "final_evidence": { "1": { "waypoints": [...], "fuel": 150.5, "points": 45 } }
+    -- }
+    trace JSONB NOT NULL
+);
+
+-- One trace per run (enforced)
+CREATE UNIQUE INDEX IF NOT EXISTS agent_traces_one_per_run ON agent_traces(agent_run_id);
+CREATE INDEX IF NOT EXISTS agent_traces_run_idx ON agent_traces(agent_run_id);
+
+-- 9. Agent Optimizer Steps Table
+-- Normalized optimizer step history for querying/analytics
+CREATE TABLE IF NOT EXISTS agent_optimizer_steps (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    agent_run_id UUID NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+
+    step_index INTEGER NOT NULL,            -- 0, 1, 2, ...
+    operator TEXT NOT NULL,                 -- 'insert_missed' | 'swap_closer' | 'cross_remove' | '2opt'
+
+    before_routes JSONB NOT NULL,           -- Routes before this step
+    after_routes JSONB NOT NULL,            -- Routes after this step
+
+    delta JSONB NOT NULL,                   -- {points:+, distance:-, fuel:-, per_drone:{...}}
+    accepted BOOLEAN NOT NULL DEFAULT true, -- Was this step kept?
+    notes TEXT NULL,                        -- Optional explanation
+
+    -- Validation tracking
+    validation_status TEXT NOT NULL DEFAULT 'unknown',  -- 'pass' | 'fail' | 'skipped' | 'unknown'
+    validation_details JSONB NOT NULL DEFAULT '{}'::jsonb  -- { "fuel_ok": true, "sam_ok": true, ... }
+);
+
+-- One step per (run, index)
+CREATE UNIQUE INDEX IF NOT EXISTS agent_optimizer_steps_unique ON agent_optimizer_steps(agent_run_id, step_index);
+CREATE INDEX IF NOT EXISTS agent_optimizer_steps_operator_idx ON agent_optimizer_steps(operator);
+
+-- 10. Agent Policy Rules Table
+-- Learning v1: deterministic policy rules from corrections
+CREATE TABLE IF NOT EXISTS agent_policy_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    -- Rule status
+    active BOOLEAN NOT NULL DEFAULT true,
+    scope TEXT NOT NULL DEFAULT 'global',   -- 'global' | 'scenario' | 'mission_type'
+    mode TEXT NOT NULL DEFAULT 'agentic',   -- 'agentic' | 'ui' | 'both'
+
+    -- Rule definition
+    category TEXT NOT NULL,                 -- 'correction' | 'instruction' | 'preference'
+    title TEXT NULL,                        -- Human-readable name
+    rule JSONB NOT NULL,                    -- { "trigger": {...}, "action": {...} }
+
+    -- Provenance
+    created_by TEXT NULL,                   -- 'system' | 'user' | 'agent'
+    notes TEXT NULL
+);
+
+-- Composite index for common query pattern
+CREATE INDEX IF NOT EXISTS agent_policy_rules_active_idx ON agent_policy_rules(active, scope, mode);

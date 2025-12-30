@@ -79,6 +79,13 @@ from ..solver.sam_distance_matrix import calculate_sam_aware_matrix
 from ..solver.post_optimizer import post_optimize_solution
 from ..solver.trajectory_planner import ISRTrajectoryPlanner
 
+# Import policy rules from mission_ledger for Learning v1
+try:
+    from ..database.mission_ledger import get_active_policy_rules
+except ImportError:
+    get_active_policy_rules = None
+    print("⚠️ [v4] mission_ledger not available, policy rules disabled")
+
 # Load environment variables
 load_dotenv()
 
@@ -120,6 +127,13 @@ class MissionState(TypedDict):
     # Solution data
     allocation: Optional[Dict[str, List[str]]]
     routes: Optional[Dict[str, Dict[str, Any]]]
+
+    # Solver metadata (for Decision Trace v1)
+    solver_type: Optional[str]
+    solver_runtime_ms: Optional[int]
+
+    # Policy rules (Learning v1)
+    policy_rules: Optional[List[Dict[str, Any]]]
 
     # Final response
     final_response: Optional[str]
@@ -209,6 +223,17 @@ def build_mission_context(state: MissionState) -> str:
     # Add distance info if available
     if dist_matrix:
         lines.append("\nDISTANCE MATRIX: Available (SAM-aware paths computed)")
+
+    # Add policy rules if any (Learning v1)
+    policy_rules = state.get("policy_rules", [])
+    if policy_rules:
+        lines.append(f"\nACTIVE POLICY RULES ({len(policy_rules)}):")
+        for rule in policy_rules[:5]:  # Show first 5 rules
+            title = rule.get("title", "Untitled")
+            category = rule.get("category", "unknown")
+            lines.append(f"  - [{category}] {title}")
+        if len(policy_rules) > 5:
+            lines.append(f"  ... and {len(policy_rules) - 5} more rules")
 
     lines.append("=" * 60)
     return "\n".join(lines)
@@ -824,6 +849,9 @@ ROUTES_COMPUTED: YES/NO
 
 def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
     """Route optimizer computes and validates routes."""
+    import time as _time
+    solver_start = _time.time()
+
     print("\n🛣️ [ROUTE_OPTIMIZER] Computing routes...", file=sys.stderr)
     sys.stderr.flush()
 
@@ -988,12 +1016,18 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
         route_analysis += "\n\nFEASIBILITY_ISSUES:\n" + "\n".join(feasibility_issues)
     route_analysis += f"\n\nROUTES_COMPUTED: YES"
 
-    print(f"📋 [ROUTE_OPTIMIZER] Routes computed for {len(routes)} drones", file=sys.stderr)
+    # Calculate solver runtime
+    solver_runtime_ms = int((_time.time() - solver_start) * 1000)
+    solver_type = "orienteering_exact" if solver else "heuristic"
+
+    print(f"📋 [ROUTE_OPTIMIZER] Routes computed for {len(routes)} drones in {solver_runtime_ms}ms", file=sys.stderr)
 
     return {
         "messages": [AIMessage(content=f"[ROUTE_OPTIMIZER]\n{route_analysis}")],
         "route_analysis": route_analysis,
         "routes": routes,
+        "solver_type": solver_type,
+        "solver_runtime_ms": solver_runtime_ms,
     }
 
 
@@ -1299,6 +1333,18 @@ def run_multi_agent_v4(
     sys.stderr.flush()
 
     # ------------------------------------------------------------------
+    # 0) Load active policy rules (Learning v1)
+    # ------------------------------------------------------------------
+    policy_rules: List[Dict[str, Any]] = []
+    if get_active_policy_rules is not None:
+        try:
+            policy_rules = get_active_policy_rules(mode="agentic")
+            if policy_rules:
+                print(f"📜 [v4] Loaded {len(policy_rules)} active policy rules", file=sys.stderr)
+        except Exception as e:
+            print(f"⚠️ [v4] Failed to load policy rules: {e}", file=sys.stderr)
+
+    # ------------------------------------------------------------------
     # 1) Normalize inputs
     # ------------------------------------------------------------------
     env: Dict[str, Any] = environment or {}
@@ -1429,6 +1475,9 @@ def run_multi_agent_v4(
         "suggestions": None,
         "allocation": None,
         "routes": None,
+        "solver_type": None,
+        "solver_runtime_ms": None,
+        "policy_rules": policy_rules,  # Learning v1: loaded rules for enforcement
         "final_response": None,
         "error": None,
     }
@@ -1467,6 +1516,12 @@ def run_multi_agent_v4(
             "route_analysis": None,
             "critic_review": None,
             "mission_metrics": {},
+            # Decision Trace v1 fields
+            "solver_type": "unknown",
+            "solver_runtime_ms": 0,
+            "valid": False,
+            "trace": {},
+            "optimizer_steps": [],
         }
 
     # Extract routes + allocation from agent workflow
@@ -1581,7 +1636,54 @@ def run_multi_agent_v4(
         trajectories[str(did)] = traj_pts
 
     # ---------------------------------------------------------------
-    # 7) Return unified V4 result (NOW INCLUDING mission_metrics)
+    # 7) Build Decision Trace v1 structure
+    # ---------------------------------------------------------------
+    solver_type = final_state.get("solver_type", "unknown")
+    solver_runtime_ms = final_state.get("solver_runtime_ms", 0)
+
+    # Determine if solution is valid (all routes within fuel budget)
+    is_valid = True
+    for did, route_data in routes.items():
+        if isinstance(route_data, dict):
+            distance = route_data.get("distance", 0.0)
+            cfg = normalized_configs.get(str(did), {})
+            fuel_budget = cfg.get("fuelBudget", cfg.get("fuel_budget", 200))
+            if distance > fuel_budget:
+                is_valid = False
+                break
+
+    # Build the Decision Trace JSONB structure
+    trace = {
+        "env_hash": None,  # TODO: compute hash of env for cache key
+        "eligibility": {},  # Which targets were eligible per drone
+        "allocation": {
+            "algorithm": final_state.get("allocation_strategy", "unknown"),
+            "assignments": final_state.get("allocation", {}),
+            "rationale": final_state.get("allocation_reasoning"),
+        },
+        "solver": {
+            "type": solver_type,
+            "runtime_ms": solver_runtime_ms,
+        },
+        "final_evidence": {},  # Per-drone route details
+        "policy_rules_applied": [
+            {"id": r.get("id"), "title": r.get("title"), "category": r.get("category")}
+            for r in policy_rules
+        ] if policy_rules else [],
+    }
+
+    # Populate eligibility and final_evidence from routes
+    for did, route_data in routes.items():
+        if isinstance(route_data, dict):
+            trace["final_evidence"][str(did)] = {
+                "waypoints": route_data.get("route", []),
+                "fuel": route_data.get("distance", 0.0),
+                "points": route_data.get("total_points", 0),
+                "visited_targets": route_data.get("visited_targets", []),
+            }
+
+    # ---------------------------------------------------------------
+    # 8) Return unified V4 result with Decision Trace v1 fields
     # ---------------------------------------------------------------
     return {
         "response": response_text,
@@ -1597,4 +1699,10 @@ def run_multi_agent_v4(
         "route_analysis": final_state.get("route_analysis"),
         "critic_review": final_state.get("critic_review"),
         "mission_metrics": mission_metrics,
+        # Decision Trace v1 fields
+        "solver_type": solver_type,
+        "solver_runtime_ms": solver_runtime_ms,
+        "valid": is_valid,
+        "trace": trace,
+        "optimizer_steps": [],  # TODO: populate from post_optimizer if used
     }
