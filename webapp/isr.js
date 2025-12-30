@@ -2980,7 +2980,7 @@ function drawEnvironment() {
   // Draw cut markers
   // For segmented import: use state.pendingCutPositions ONLY (set by Accept)
   // For fresh segmentation: use missionReplay cutPositions + pendingCutPositions
-  console.log(`[drawEnv] VERSION: 2024-12-30-animfix-v1`);
+  console.log(`[drawEnv] VERSION: 2024-12-30-targetfix-v2`);
   const currentSegIdx = missionReplay.getCurrentSegmentIndex();
 
   if (segmentedImport.isActive()) {
@@ -5770,13 +5770,27 @@ function startAnimation(droneIds) {
           if (!String(wp).startsWith("T")) return;  // Only targets
           if (state.visitedTargets.includes(wp)) return;  // Already visited
 
+          // CRITICAL FIX: Only mark targets in SEQUENTIAL ORDER
+          // Check if all previous targets in the route have been visited
+          // This prevents future targets from being marked prematurely even if geometrically close
+          let canMarkThisTarget = true;
+          for (let i = 0; i < wpIdx; i++) {
+            const prevWp = route[i];
+            if (String(prevWp).startsWith("T") && !state.visitedTargets.includes(prevWp)) {
+              // Previous target not yet visited, can't mark this one
+              canMarkThisTarget = false;
+              break;
+            }
+          }
+          if (!canMarkThisTarget) return;
+
           // Find the target's position in the environment
           const target = state.env.targets?.find(t => t.id === wp);
           if (!target) {
-            // Debug: target not found in env
+            // Debug: target not found in env - this target is in a future segment
             if (!droneState[`_debugNoTarget_${wp}`]) {
               droneState[`_debugNoTarget_${wp}`] = true;
-              console.log(`⚠️ D${did} target ${wp} not found in state.env.targets`);
+              console.log(`⚠️ D${did} target ${wp} not in state.env.targets - skipping (future segment)`);
             }
             return;
           }
@@ -6019,6 +6033,10 @@ function startAnimation(droneIds) {
       // have been passed based on current distanceTraveled. This catches targets
       // whose cumulative distance is <= distanceTraveled but weren't marked due
       // to the segment boundary.
+      //
+      // CRITICAL FIX: Only check targets from PREVIOUS segments (already in initialEnvSnapshot),
+      // NOT newly added targets from the current segment. Newly added targets should only be
+      // marked as the drone actually reaches them during continued animation.
       Object.entries(state.animation.drones).forEach(([did, droneState]) => {
         const routeInfo = state.routes[did];
         if (!routeInfo || !routeInfo.route || !routeInfo.trajectory) return;
@@ -6028,9 +6046,22 @@ function startAnimation(droneIds) {
         const cumulativeDistances = droneState.cumulativeDistances || [];
         const currentDistance = droneState.distanceTraveled;
 
+        // Get target IDs that were added in THIS segment switch (newSegment's targets)
+        const newSegmentTargetIds = new Set();
+        if (newSegment && newSegment.env && newSegment.env.targets) {
+          newSegment.env.targets.forEach(t => newSegmentTargetIds.add(t.id));
+        }
+
         route.forEach((wp) => {
           if (!String(wp).startsWith("T")) return;
           if (state.visitedTargets.includes(wp)) return;
+
+          // SKIP targets that were just added in this segment switch
+          // They should only be marked when the drone actually reaches them
+          if (newSegmentTargetIds.has(wp)) {
+            console.log(`⏭️ SEGMENT-SWITCH: D${did} skipping ${wp} (newly added in segment ${newSegment.index})`);
+            return;
+          }
 
           const target = state.env.targets?.find(t => t.id === wp);
           if (!target) return;
