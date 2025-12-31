@@ -690,47 +690,48 @@ Defaulting to optimization mode due to API failure.
 
 ALLOCATOR_PROMPT = """You are the ALLOCATOR agent in an ISR mission planning system.
 
-Your job is to allocate targets to drones to minimize fuel consumption while
-respecting all HARD CONSTRAINTS (see above).
+ROLE
+Allocate a CANDIDATE SET of targets to drones to maximize total achievable priority points
+under fuel budgets, while respecting ALL HARD CONSTRAINTS.
 
-CRITICAL: Check each drone's "ELIGIBLE TARGETS" list in the mission context.
-A drone can ONLY be assigned targets from its eligible list. This is absolute.
+HARD CONSTRAINTS (absolute)
+- A drone may ONLY be assigned targets from its ELIGIBLE TARGETS list.
+- Targets in SAM zones are INELIGIBLE in hard-v1 mode (treat as excluded).
+- Respect user forbiddances (e.g., forbidden priorities, forbidden airports).
+- Each target may be assigned to at most one drone.
 
-AVAILABLE ALLOCATION STRATEGIES:
-You have 5 allocation algorithms available, should you choose to use them:
-- "efficient": Maximize priority/fuel ratio using auction-based algorithm
-- "greedy": Assign highest priority targets to nearest capable drone
-- "balanced": Distribute targets evenly by count across drones
-- "geographic": Minimize detours based on drone corridors
-- "exclusive": Prioritize targets only one drone can reach
+IMPORTANT
+- Do NOT assign every accessible target. Downselect candidates to a manageable set.
+- The exact orienteering solver performs best up to ~12 targets per drone. Prefer <= 12 candidates per drone.
+- If you exclude a target that is eligible, you MUST provide a reason code.
 
-IMPORTANT DISTINCTION:
-Allocation assigns targets to drones. The route optimizer later decides which targets
-actually fit in fuel budgets. Your job: allocate every accessible target to the most
-fuel-efficient drone. Do not skip targets.
+AVAILABLE STRATEGIES (choose one)
+- efficient: maximize priority/fuel ratio (auction style)
+- greedy: highest priority to nearest capable drone
+- balanced: distribute workload evenly
+- geographic: minimize detours / corridor fit
+- exclusive: prioritize targets only one drone can visit
 
-ALLOCATION APPROACH:
-- Assign each target to the closest capable drone
-- Balance workload when distances are similar
-- Follow any user commands about target assignments
+ALLOCATION APPROACH
+1) Start from eligible targets per drone.
+2) Build a candidate list per drone (<= 12 preferred) that maximizes points with good fuel efficiency.
+3) Assign each candidate target to exactly one best drone.
+4) Produce an explicit excluded list with reason codes.
 
-Briefly explain allocation decisions for each drone.
+OUTPUT (MUST BE VALID JSON)
+Return a single JSON object with keys:
+- strategy_used: "efficient"|"greedy"|"balanced"|"geographic"|"exclusive"
+- assignments: { "D1": ["T..."], "D2": [...], ... }
+- excluded: [
+    { "target": "T..", "reason": "IN_SAM_ZONE|TYPE_NOT_ACCESSIBLE|FORBIDDEN_PRIORITY|CANDIDATE_LIMIT|DOMINATED_LOW_VALUE", "notes": "optional" }
+  ]
+- rationale: {
+    "D1": "brief reason",
+    "D2": "brief reason"
+  }
+- tradeoffs: "brief summary"
 
-OUTPUT FORMAT:
-STRATEGY_USED: [name of strategy you chose: efficient/greedy/balanced/geographic/exclusive]
-
-ALLOCATION_REASONING:
-- D1 gets [targets] because [reason]
-- D2 gets [targets] because [reason]
-...
-
-ALLOCATION_RESULT:
-D1: T1, T3, T5, T11
-D2: T2, T4, T6
-...
-
-TRADE_OFFS:
-[Any notable trade-offs or compromises made]
+Be concise but explicit.
 """
 
 
@@ -757,9 +758,7 @@ STRATEGIST'S ANALYSIS:
 {strategy_analysis}
 
 Based on this context, determine the optimal target allocation.
-Remember:
-- ONLY assign targets from each drone's ELIGIBLE TARGETS list
-- Explain WHY each drone gets its targets
+Return your response as a single valid JSON object (no markdown fences).
 """
 
     messages = [HumanMessage(content=allocation_prompt)]
@@ -797,36 +796,117 @@ Remember:
     print(f"📋 [ALLOCATOR] Reasoning complete (LLM success: {llm_success})", file=sys.stderr)
     sys.stderr.flush()
 
-    # Parse allocation from response
-    allocation = parse_allocation_from_reasoning(reasoning, state)
-
-    # Parse strategy used from reasoning
-    strategy_used = "unknown"
-    for line in reasoning.split("\n"):
-        if "STRATEGY_USED:" in line.upper():
-            # Extract strategy name after the colon
-            parts = line.split(":")
-            if len(parts) >= 2:
-                strategy_used = parts[1].strip().lower()
-                # Remove any extra text, keep only the strategy name
-                for strat in ["efficient", "greedy", "balanced", "geographic", "exclusive"]:
-                    if strat in strategy_used:
-                        strategy_used = strat
-                        break
-            break
+    # Parse allocation from JSON response
+    allocation, strategy_used, excluded_targets = parse_allocation_from_json(reasoning, state)
 
     print(f"📋 [ALLOCATOR] Strategy used: {strategy_used}", file=sys.stderr)
+    if excluded_targets:
+        print(f"📋 [ALLOCATOR] Excluded targets: {len(excluded_targets)}", file=sys.stderr)
 
     return {
         "messages": [AIMessage(content=f"[ALLOCATOR]\n{reasoning}")],
         "allocation_reasoning": reasoning,
         "allocation": allocation,
         "allocation_strategy": strategy_used,
+        "excluded_by_allocator": excluded_targets,
     }
 
 
+def parse_allocation_from_json(
+    reasoning: str, state: MissionState
+) -> Tuple[Dict[str, List[str]], str, List[Dict[str, Any]]]:
+    """
+    Parse allocation from JSON response.
+
+    Returns:
+        (allocation, strategy_used, excluded_targets)
+    """
+    import json
+    import re
+
+    configs = state.get("drone_configs", {})
+    allocation: Dict[str, List[str]] = {}
+
+    # Initialize all enabled drones
+    for did in configs.keys():
+        if configs[did].get("enabled", did == "1"):
+            allocation[did] = []
+
+    strategy_used = "unknown"
+    excluded_targets: List[Dict[str, Any]] = []
+
+    # Try to extract JSON from the response
+    try:
+        # Remove markdown code fences if present
+        json_str = reasoning.strip()
+        if json_str.startswith("```"):
+            # Remove opening fence
+            json_str = re.sub(r"^```(?:json)?\s*\n?", "", json_str)
+            # Remove closing fence
+            json_str = re.sub(r"\n?```\s*$", "", json_str)
+
+        # Find JSON object in the response
+        match = re.search(r"\{[\s\S]*\}", json_str)
+        if match:
+            json_str = match.group(0)
+
+        data = json.loads(json_str)
+
+        # Extract strategy
+        strategy_used = data.get("strategy_used", "unknown")
+
+        # Extract assignments
+        assignments = data.get("assignments", {})
+        for drone_key, targets in assignments.items():
+            # Normalize drone ID (remove "D" prefix if present)
+            did = str(drone_key).replace("D", "").strip()
+            if did in allocation:
+                allocation[did] = [str(t) for t in targets] if targets else []
+
+        # Extract excluded targets
+        excluded_targets = data.get("excluded", [])
+
+        print(f"📋 [ALLOCATOR] Successfully parsed JSON allocation", file=sys.stderr)
+
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        print(f"⚠️ [ALLOCATOR] JSON parsing failed: {e}, falling back to text parsing", file=sys.stderr)
+        # Fall back to legacy text parsing
+        allocation = parse_allocation_from_reasoning(reasoning, state)
+        # Try to extract strategy from text
+        for line in reasoning.split("\n"):
+            if "strategy_used" in line.lower() or "STRATEGY_USED:" in line.upper():
+                for strat in ["efficient", "greedy", "balanced", "geographic", "exclusive"]:
+                    if strat in line.lower():
+                        strategy_used = strat
+                        break
+
+    # Log what we parsed
+    print(f"📋 [ALLOCATOR] Parsed allocation: {allocation}", file=sys.stderr)
+    total_allocated = sum(len(targets) for targets in allocation.values())
+    print(f"📋 [ALLOCATOR] Total targets allocated: {total_allocated}", file=sys.stderr)
+
+    # If parsing failed completely, fall back to algorithmic allocation
+    if all(len(v) == 0 for v in allocation.values()):
+        print("⚠️ [ALLOCATOR] Parsing failed, using fallback allocation", file=sys.stderr)
+        env = state.get("environment", {})
+        dist_matrix = state.get("distance_matrix")
+
+        matrix_data = None
+        if dist_matrix:
+            labels = list(dist_matrix.keys())
+            matrix = [[dist_matrix[f].get(t, 1000) for t in labels] for f in labels]
+            matrix_data = {"labels": labels, "matrix": matrix}
+            set_allocator_matrix(matrix_data)
+
+        allocation = _allocate_targets_impl(env, configs, "efficient", matrix_data)
+        strategy_used = "efficient"
+        print(f"📋 [ALLOCATOR] Fallback allocation: {allocation}", file=sys.stderr)
+
+    return allocation, strategy_used, excluded_targets
+
+
 def parse_allocation_from_reasoning(reasoning: str, state: MissionState) -> Dict[str, List[str]]:
-    """Parse allocation from LLM reasoning output."""
+    """Parse allocation from LLM reasoning output (legacy text format)."""
     allocation = {}
     configs = state.get("drone_configs", {})
 
@@ -856,38 +936,6 @@ def parse_allocation_from_reasoning(reasoning: str, state: MissionState) -> Dict
                         allocation[did] = targets
         elif in_result and line.startswith("TRADE") or line.startswith("==="):
             in_result = False
-
-    # Log what we parsed
-    print(f"📋 [ALLOCATOR] Parsed allocation: {allocation}", file=sys.stderr)
-    total_allocated = sum(len(targets) for targets in allocation.values())
-    print(f"📋 [ALLOCATOR] Total targets allocated: {total_allocated}", file=sys.stderr)
-
-    # If parsing failed, fall back to algorithmic allocation
-    if all(len(v) == 0 for v in allocation.values()):
-        print("⚠️ [ALLOCATOR] Parsing failed, using fallback allocation", file=sys.stderr)
-        env = state.get("environment", {})
-        dist_matrix = state.get("distance_matrix")
-
-        matrix_data = None
-        if dist_matrix:
-            labels = list(dist_matrix.keys())
-            matrix = [[dist_matrix[f].get(t, 1000) for t in labels] for f in labels]
-            matrix_data = {"labels": labels, "matrix": matrix}
-            set_allocator_matrix(matrix_data)
-
-        allocation = _allocate_targets_impl(env, configs, "efficient", matrix_data)
-        print(f"📋 [ALLOCATOR] Fallback allocation: {allocation}", file=sys.stderr)
-
-    # Final validation: check if all targets are allocated
-    env = state.get("environment", {})
-    all_targets = {str(t["id"]) for t in env.get("targets", [])}
-    allocated_targets = set()
-    for targets in allocation.values():
-        allocated_targets.update(targets)
-
-    missing_targets = all_targets - allocated_targets
-    if missing_targets:
-        print(f"⚠️ [ALLOCATOR] WARNING: {len(missing_targets)} targets NOT allocated: {sorted(missing_targets)}", file=sys.stderr)
 
     return allocation
 
