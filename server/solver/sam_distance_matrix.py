@@ -474,20 +474,28 @@ _calculator = SAMDistanceMatrixCalculator()
 
 def calculate_sam_aware_matrix(
     env: Dict[str, Any],
-    buffer: float = 0.0
+    buffer: float = 0.0,
+    use_supabase_cache: bool = True,
 ) -> Dict[str, Any]:
     """
     Calculate SAM-aware distance matrix for the given environment.
 
     This is the main entry point for use as a LangGraph tool.
+    Integrates with Supabase caching for reproducibility and performance.
 
     Args:
         env: Environment dict with airports, targets, and sams
-        buffer: Safety buffer around SAMs (default 3 units)
+        buffer: Safety buffer around SAMs (default 0 units)
+        use_supabase_cache: Whether to use Supabase for persistent caching
 
     Returns:
-        Distance matrix data dict
+        Distance matrix data dict with additional fields:
+        - env_hash: Hash of the environment geometry
+        - routing_model_hash: Hash of the routing configuration
+        - distance_matrix_id: UUID from Supabase (if cached)
     """
+    import time
+
     airports = list(env.get("airports", []))
     targets = env.get("targets", [])
     sams = env.get("sams", [])
@@ -503,7 +511,115 @@ def calculate_sam_aware_matrix(
         })
         print(f"📍 [SAM Matrix] Added synthetic start: {node_id} at ({node_data['x']:.1f}, {node_data['y']:.1f})", flush=True)
 
-    return _calculator.calculate_matrix(airports, targets, sams, buffer)
+    # Try Supabase cache first
+    if use_supabase_cache:
+        try:
+            from ..database.mission_ledger import (
+                compute_env_hash,
+                compute_routing_model_hash,
+                get_default_routing_model,
+                get_cached_matrix as get_supabase_cached_matrix,
+                cache_matrix as cache_supabase_matrix,
+            )
+
+            # Compute hashes for cache lookup
+            env_hash = compute_env_hash(airports, targets, sams)
+            routing_model = get_default_routing_model()
+            routing_model["sam_buffer"] = buffer
+            routing_model_hash = compute_routing_model_hash(routing_model)
+
+            # Check Supabase cache
+            cached = get_supabase_cached_matrix(env_hash, routing_model_hash)
+            if cached is not None:
+                print(f"✅ [SAM Matrix] Using Supabase cached matrix (id={cached['id'][:8]}...)", flush=True)
+                # Convert from Supabase format back to our internal format
+                result = {
+                    "matrix": cached["matrix"],
+                    "labels": cached["labels"],
+                    "waypoints": [],  # Will rebuild from labels
+                    "paths": {},  # Paths not stored in cache
+                    "excluded_targets": cached["excluded_targets"],
+                    "sams": [],  # Will need to rebuild if needed
+                    "buffer": buffer,
+                    "wrapped_polygons": [],
+                    # Add cache metadata
+                    "env_hash": env_hash,
+                    "routing_model": routing_model,
+                    "routing_model_hash": routing_model_hash,
+                    "distance_matrix_id": cached["id"],
+                    "cache_hit": True,
+                }
+                # Rebuild waypoints from labels and original data
+                all_wp = airports + targets
+                wp_by_id = {str(wp.get("id", "")): wp for wp in all_wp}
+                for label in cached["labels"]:
+                    wp = wp_by_id.get(label)
+                    if wp:
+                        detail = {
+                            "id": label,
+                            "x": float(wp.get("x", 0)),
+                            "y": float(wp.get("y", 0)),
+                        }
+                        if label.startswith("T"):
+                            detail["priority"] = int(wp.get("priority", 5))
+                            detail["type"] = wp.get("type", "a")
+                        result["waypoints"].append(detail)
+
+                # Cache locally too
+                _calculator._cached_matrix = result
+                return result
+
+        except ImportError:
+            print("⚠️ [SAM Matrix] Supabase caching unavailable - using local only", flush=True)
+        except Exception as e:
+            print(f"⚠️ [SAM Matrix] Supabase cache error: {e}", flush=True)
+
+    # Calculate fresh matrix
+    start_time = time.time()
+    result = _calculator.calculate_matrix(airports, targets, sams, buffer)
+    computation_ms = int((time.time() - start_time) * 1000)
+
+    # Add hashes to result for traceability
+    try:
+        from ..database.mission_ledger import (
+            compute_env_hash,
+            compute_routing_model_hash,
+            get_default_routing_model,
+            cache_matrix as cache_supabase_matrix,
+        )
+
+        env_hash = compute_env_hash(airports, targets, sams)
+        routing_model = get_default_routing_model()
+        routing_model["sam_buffer"] = buffer
+        routing_model_hash = compute_routing_model_hash(routing_model)
+
+        result["env_hash"] = env_hash
+        result["routing_model"] = routing_model
+        result["routing_model_hash"] = routing_model_hash
+        result["cache_hit"] = False
+
+        # Cache in Supabase for future use
+        if use_supabase_cache:
+            matrix_id = cache_supabase_matrix(
+                env_hash=env_hash,
+                routing_model_hash=routing_model_hash,
+                sam_mode=routing_model.get("sam_mode", "hard_v1"),
+                matrix=result["matrix"],
+                labels=result["labels"],
+                excluded_targets=result.get("excluded_targets", []),
+                computation_ms=computation_ms,
+                num_sams=len(sams),
+            )
+            if matrix_id:
+                result["distance_matrix_id"] = matrix_id
+                print(f"✅ [SAM Matrix] Cached in Supabase (id={matrix_id[:8]}..., {computation_ms}ms)", flush=True)
+
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"⚠️ [SAM Matrix] Failed to cache in Supabase: {e}", flush=True)
+
+    return result
 
 
 def get_cached_matrix() -> Optional[Dict[str, Any]]:

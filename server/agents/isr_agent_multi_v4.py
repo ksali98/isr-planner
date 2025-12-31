@@ -111,6 +111,7 @@ class MissionState(TypedDict):
     environment: Optional[Dict[str, Any]]
     drone_configs: Optional[Dict[str, Any]]
     distance_matrix: Optional[Dict[str, Any]]
+    excluded_targets: Optional[List[str]]  # Targets inside SAM zones - DO NOT allocate
 
     # User request analysis
     user_request: str
@@ -158,6 +159,40 @@ def set_state(state: MissionState):
 
 
 # ============================================================================
+# HARD CONSTRAINTS - Shared by ALL agents (MUST NEVER BE VIOLATED)
+# ============================================================================
+
+HARD_CONSTRAINTS = """
+═══════════════════════════════════════════════════════════════════════════════
+                    HARD CONSTRAINTS - MUST NEVER BE VIOLATED
+═══════════════════════════════════════════════════════════════════════════════
+
+1. DRONE TARGET ELIGIBILITY (Sensor Type Restrictions):
+   - Each drone has an "ELIGIBLE TARGETS" list based on its sensor configuration
+   - A drone can ONLY be assigned targets from its eligible list
+   - If D1's eligible targets are "T1, T3, T5" → D1 can ONLY visit T1, T3, T5
+   - NEVER assign a target to a drone not in that drone's eligible list
+   - This is a PHYSICAL constraint (sensor type) and CANNOT be overridden
+
+2. EXCLUDED TARGETS (Inside SAM Zones):
+   - Targets marked as "EXCLUDED (inside SAM zones)" are UNREACHABLE
+   - No drone can visit excluded targets - they must be ignored entirely
+
+3. FUEL BUDGET:
+   - Each drone has a fuel budget that cannot be exceeded
+   - Routes must respect fuel constraints
+
+4. ALL ELIGIBLE TARGETS MUST BE COVERED:
+   - Every target that is NOT excluded must be assigned to exactly one drone
+   - The assigned drone MUST be eligible to visit that target
+
+These constraints apply to ALL operations: allocation, optimization, reallocation,
+and routing. No user request can override these physical constraints.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
+
+# ============================================================================
 # HELPER FUNCTIONS - Build context for agents
 # ============================================================================
 
@@ -166,10 +201,14 @@ def build_mission_context(state: MissionState) -> str:
     env = state.get("environment", {})
     configs = state.get("drone_configs", {})
     dist_matrix = state.get("distance_matrix", {})
+    excluded_targets = set(state.get("excluded_targets", []))  # Targets inside SAM zones
 
     airports = env.get("airports", [])
     targets = env.get("targets", [])
     sams = env.get("sams", [])
+
+    # Filter targets to only show accessible ones (not inside SAM zones)
+    accessible_targets = [t for t in targets if t.get("id", t.get("label", "?")) not in excluded_targets]
 
     lines = [
         "=" * 60,
@@ -184,9 +223,14 @@ def build_mission_context(state: MissionState) -> str:
         ap_id = ap.get("id", ap.get("label", "?"))
         lines.append(f"    {ap_id}: pos=({ap.get('x', 0):.0f}, {ap.get('y', 0):.0f})")
 
-    lines.append(f"\n  Targets: {len(targets)}")
+    # Show excluded targets prominently if any exist
+    if excluded_targets:
+        lines.append(f"\n  ⚠️  EXCLUDED TARGETS (inside SAM zones - DO NOT ALLOCATE): {len(excluded_targets)}")
+        lines.append(f"      {', '.join(sorted(excluded_targets))}")
+
+    lines.append(f"\n  ACCESSIBLE Targets: {len(accessible_targets)} (of {len(targets)} total)")
     total_priority = 0
-    for t in targets:
+    for t in accessible_targets:
         t_id = t.get("id", t.get("label", "?"))
         priority = t.get("priority", t.get("value", 5))
         total_priority += priority
@@ -204,6 +248,13 @@ def build_mission_context(state: MissionState) -> str:
     if not configs:
         lines.append("  (No drone configurations)")
     else:
+        # Build a map of target types for eligibility calculation
+        target_type_map = {}
+        for t in accessible_targets:
+            t_id = t.get("id", t.get("label", "?"))
+            t_type = str(t.get("type", "a")).upper()
+            target_type_map[t_id] = t_type
+
         for did in sorted(configs.keys()):
             cfg = configs[did]
             enabled = cfg.get("enabled", did == "1")
@@ -211,14 +262,31 @@ def build_mission_context(state: MissionState) -> str:
                 continue
             fuel = cfg.get("fuelBudget", cfg.get("fuel_budget", 200))
             airport = cfg.get("homeAirport", cfg.get("home_airport", "A1"))
-            accessible = cfg.get("accessibleTargets", cfg.get("accessible_targets", []))
+
+            # Get allowed target types for this drone
+            allowed_types = cfg.get("accessibleTargets", cfg.get("accessible_targets", []))
+            if allowed_types:
+                allowed_types_upper = {t.upper() for t in allowed_types}
+            else:
+                allowed_types_upper = None  # None means ALL types allowed
+
+            # Calculate which specific targets this drone can visit
+            if allowed_types_upper is None:
+                eligible_targets = list(target_type_map.keys())
+            else:
+                eligible_targets = [
+                    tid for tid, ttype in target_type_map.items()
+                    if ttype in allowed_types_upper
+                ]
 
             lines.append(f"  D{did}:")
             lines.append(f"    Home: {airport}, Fuel: {fuel}")
-            if accessible:
-                lines.append(f"    Accessible: {', '.join(accessible)}")
+            if allowed_types_upper:
+                lines.append(f"    Sensor types: {', '.join(sorted(allowed_types_upper))}")
+                lines.append(f"    ⚠️  ELIGIBLE TARGETS (ONLY THESE): {', '.join(sorted(eligible_targets))}")
             else:
-                lines.append(f"    Accessible: ALL targets")
+                lines.append(f"    Sensor types: ALL")
+                lines.append(f"    Eligible targets: ALL ({len(eligible_targets)} targets)")
 
     # Add distance info if available
     if dist_matrix:
@@ -540,6 +608,8 @@ def strategist_node(state: MissionState) -> Dict[str, Any]:
 
     # Build prompt with full context
     analysis_prompt = f"""
+{HARD_CONSTRAINTS}
+
 {STRATEGIST_PROMPT}
 
 {mission_context}
@@ -620,13 +690,11 @@ Defaulting to optimization mode due to API failure.
 
 ALLOCATOR_PROMPT = """You are the ALLOCATOR agent in an ISR mission planning system.
 
-Your job is to allocate targets to drones to minimize fuel consumption.
+Your job is to allocate targets to drones to minimize fuel consumption while
+respecting all HARD CONSTRAINTS (see above).
 
-MANDATORY REQUIREMENTS:
-1. You MUST allocate ALL targets that are not inside SAM polygons
-2. Every accessible target must be assigned to a drone - NO EXCEPTIONS
-3. Allocate to minimize total fuel usage across all drones
-4. Respect target type accessibility (e.g., if D1 can only access types A-C, don't assign type D)
+CRITICAL: Check each drone's "ELIGIBLE TARGETS" list in the mission context.
+A drone can ONLY be assigned targets from its eligible list. This is absolute.
 
 AVAILABLE ALLOCATION STRATEGIES:
 You have 5 allocation algorithms available, should you choose to use them:
@@ -679,6 +747,8 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
     strategy_analysis = state.get("strategy_analysis", "No strategy analysis available")
 
     allocation_prompt = f"""
+{HARD_CONSTRAINTS}
+
 {ALLOCATOR_PROMPT}
 
 {mission_context}
@@ -687,7 +757,9 @@ STRATEGIST'S ANALYSIS:
 {strategy_analysis}
 
 Based on this context, determine the optimal target allocation.
-Remember: Explain WHY each drone gets its targets.
+Remember:
+- ONLY assign targets from each drone's ELIGIBLE TARGETS list
+- Explain WHY each drone gets its targets
 """
 
     messages = [HumanMessage(content=allocation_prompt)]
@@ -1073,6 +1145,8 @@ def critic_node(state: MissionState) -> Dict[str, Any]:
     current_solution = build_current_solution_context(state)
 
     critic_prompt = f"""
+{HARD_CONSTRAINTS}
+
 {CRITIC_PROMPT}
 
 {mission_context}
@@ -1086,6 +1160,7 @@ ROUTE ANALYSIS:
 {current_solution}
 
 Review this solution and provide your assessment.
+Flag any violations of HARD CONSTRAINTS (e.g., drone assigned targets it cannot visit).
 """
 
     messages = [HumanMessage(content=critic_prompt)]
@@ -1176,6 +1251,8 @@ def handle_question_response(state: MissionState) -> Dict[str, Any]:
     current_solution = build_current_solution_context(state)
 
     prompt = f"""
+{HARD_CONSTRAINTS}
+
 {RESPONDER_PROMPT}
 
 {mission_context}
@@ -1310,11 +1387,9 @@ def run_multi_agent_v4(
     user_message: str,
     environment: Dict[str, Any],
     drone_configs: Dict[str, Any],
-    distance_matrix: Optional[Dict[str, Any]] = None,
+    sam_matrix: Optional[Dict[str, Any]] = None,
     existing_solution: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-
-    print("### V4: run_multi_agent_v4 (isr_agent_multi_v4.py) CALLED ###", flush=True)
     """
     Run the v4 reasoning-based multi-agent system.
 
@@ -1322,11 +1397,15 @@ def run_multi_agent_v4(
         user_message: The user's request
         environment: Environment data (airports, targets, sams)
         drone_configs: Drone configurations from the UI
-        distance_matrix: Optional precomputed distance matrix
+        sam_matrix: Pre-computed SAM-aware distance matrix with metadata
+                   (env_hash, routing_model_hash, distance_matrix_id)
+        existing_solution: Previous routes/allocation for continuation
 
     Returns:
         Result dictionary with response, routes, trajectories, etc.
+        Includes trace.env with matrix metadata for reproducibility.
     """
+    print("### V4: run_multi_agent_v4 (isr_agent_multi_v4.py) CALLED ###", flush=True)
     print(f"\n{'='*60}", file=sys.stderr)
     print(f"[v4] Processing: {user_message[:80]}...", file=sys.stderr)
     print(f"{'='*60}", file=sys.stderr)
@@ -1407,27 +1486,65 @@ def run_multi_agent_v4(
     # ------------------------------------------------------------------
     # 2) Build / compute distance matrix (so the HK solver can run)
     # ------------------------------------------------------------------
+    # Store matrix metadata for trace (Wiring Point C)
+    matrix_env_hash: Optional[str] = None
+    matrix_routing_model_hash: Optional[str] = None
+    matrix_distance_matrix_id: Optional[str] = None
+    matrix_cache_hit: Optional[bool] = None
+    matrix_routing_model: Optional[Dict[str, Any]] = None
+    excluded_targets: List[str] = []  # Targets inside SAM zones
+
     dist_matrix: Dict[str, Dict[str, float]]
 
-    if distance_matrix:
-        # Use provided matrix if given
-        dist_matrix = distance_matrix
+    if sam_matrix and sam_matrix.get("matrix"):
+        # Use pre-computed SAM matrix from main.py (preferred path)
+        print("✅ [v4] Using pre-computed SAM matrix from caller", file=sys.stderr)
+        labels = sam_matrix.get("labels", [])
+        matrix_data = sam_matrix.get("matrix", [])
+        dist_matrix = {}
+        for i, from_id in enumerate(labels):
+            dist_matrix[from_id] = {}
+            for j, to_id in enumerate(labels):
+                dist_matrix[from_id][to_id] = float(matrix_data[i][j])
+
+        # Extract metadata from sam_matrix
+        matrix_env_hash = sam_matrix.get("env_hash")
+        matrix_routing_model_hash = sam_matrix.get("routing_model_hash")
+        matrix_distance_matrix_id = sam_matrix.get("distance_matrix_id")
+        matrix_cache_hit = sam_matrix.get("cache_hit")
+        matrix_routing_model = sam_matrix.get("routing_model")
+        excluded_targets = sam_matrix.get("excluded_targets", [])
+
+        if excluded_targets:
+            print(f"🚫 [v4] Excluded targets (inside SAM zones): {excluded_targets}", file=sys.stderr)
     else:
+        # Fallback: compute matrix locally (for backwards compatibility)
         sams = env.get("sams", [])
         try:
             if sams:
-                print("🎯 [v4] Computing SAM-aware distance matrix...", file=sys.stderr)
+                print("🎯 [v4] Computing SAM-aware distance matrix (fallback)...", file=sys.stderr)
                 dist_data = calculate_sam_aware_matrix(env)
                 labels = dist_data.get("labels", [])
-                matrix = dist_data.get("matrix", [])
+                matrix_data = dist_data.get("matrix", [])
                 dist_matrix = {}
                 for i, from_id in enumerate(labels):
                     dist_matrix[from_id] = {}
                     for j, to_id in enumerate(labels):
-                        dist_matrix[from_id][to_id] = float(matrix[i][j])
+                        dist_matrix[from_id][to_id] = float(matrix_data[i][j])
+
+                # Extract metadata from computed matrix
+                matrix_env_hash = dist_data.get("env_hash")
+                matrix_routing_model_hash = dist_data.get("routing_model_hash")
+                matrix_distance_matrix_id = dist_data.get("distance_matrix_id")
+                matrix_cache_hit = dist_data.get("cache_hit")
+                matrix_routing_model = dist_data.get("routing_model")
+                excluded_targets = dist_data.get("excluded_targets", [])
+
+                if excluded_targets:
+                    print(f"🚫 [v4] Excluded targets (inside SAM zones): {excluded_targets}", file=sys.stderr)
             else:
                 print("📏 [v4] Computing Euclidean distance matrix...", file=sys.stderr)
-                # Simple Euclidean fallback (similar to v3)
+                # Simple Euclidean fallback (no SAMs)
                 waypoints: Dict[str, Tuple[float, float]] = {}
 
                 for airport in env.get("airports", []):
@@ -1465,6 +1582,7 @@ def run_multi_agent_v4(
         "environment": env,
         "drone_configs": normalized_configs,
         "distance_matrix": dist_matrix,
+        "excluded_targets": excluded_targets,  # Targets inside SAM zones - do NOT allocate
         "user_request": user_message,
         "request_type": "optimize",  # default; strategist can refine
         "commands": None,
@@ -1652,9 +1770,17 @@ def run_multi_agent_v4(
                 is_valid = False
                 break
 
-    # Build the Decision Trace JSONB structure
+    # Build the Decision Trace JSONB structure (Wiring Point C)
     trace = {
-        "env_hash": None,  # TODO: compute hash of env for cache key
+        # Environment and matrix metadata for reproducibility
+        "env": {
+            "env_hash": matrix_env_hash,
+            "routing_model_hash": matrix_routing_model_hash,
+            "distance_matrix_id": matrix_distance_matrix_id,
+            "cache_hit": matrix_cache_hit,
+            "sam_mode": matrix_routing_model.get("sam_mode", "hard_v1") if matrix_routing_model else None,
+            "routing_model": matrix_routing_model,
+        },
         "eligibility": {},  # Which targets were eligible per drone
         "allocation": {
             "algorithm": final_state.get("allocation_strategy", "unknown"),

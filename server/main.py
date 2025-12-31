@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -51,7 +55,12 @@ from server.database.mission_ledger import (
     log_event,
     create_env_version,
     create_plan,
+    # Distance matrix cache functions
+    get_default_routing_model,
 )
+
+# Import SAM distance matrix calculator for v4 wiring
+from .solver.sam_distance_matrix import calculate_sam_aware_matrix
 
 import time
 
@@ -691,7 +700,21 @@ def get_environment():
 @app.get("/api/export_environment")
 def export_environment():
     """
-    Export environment with SAM-aware distance matrix in JSON format.
+    Export environment with SAM-aware distance matrix reference in JSON format.
+
+    The exported JSON keeps the environment clean and includes only references
+    to the distance matrix (stored in Supabase), not the matrix itself.
+
+    Export format:
+    {
+        "environment": {...},                    # Clean environment data
+        "env_hash": "abc123...",                 # Hash of env geometry for cache lookup
+        "routing_model": {...},                  # Routing parameters used
+        "routing_model_hash": "def456...",       # Hash for cache lookup
+        "distance_matrix_id": "uuid...",         # Reference to Supabase matrix
+        "matrix_info": {...},                    # Metadata (counts, excluded targets)
+        "exported_at": "2025-12-30T..."
+    }
 
     Returns JSON file with Content-Disposition header to force correct filename.
     Filename format: ise-env-YYMMDDHH-n.json where n is running number.
@@ -715,7 +738,7 @@ def export_environment():
     # Increment counter for next export
     _export_counter += 1
 
-    # Build export data with environment and matrix metadata
+    # Build export data with environment and matrix reference (not the matrix itself)
     cached_matrix = get_current_matrix()
     export_data = {
         "environment": _current_env,
@@ -723,8 +746,19 @@ def export_environment():
         "matrix_cached": cached_matrix is not None,
     }
 
-    # Include matrix metadata if available
+    # Include matrix REFERENCE and routing model (not the matrix itself)
     if cached_matrix is not None:
+        # Add cache keys for reproducibility
+        if "env_hash" in cached_matrix:
+            export_data["env_hash"] = cached_matrix["env_hash"]
+        if "routing_model" in cached_matrix:
+            export_data["routing_model"] = cached_matrix["routing_model"]
+        if "routing_model_hash" in cached_matrix:
+            export_data["routing_model_hash"] = cached_matrix["routing_model_hash"]
+        if "distance_matrix_id" in cached_matrix:
+            export_data["distance_matrix_id"] = cached_matrix["distance_matrix_id"]
+
+        # Include metadata (not the actual matrix)
         export_data["matrix_info"] = {
             "num_waypoints": len(cached_matrix.get("labels", [])),
             "num_sam_avoiding_paths": len(cached_matrix.get("paths", {})),
@@ -732,9 +766,12 @@ def export_environment():
             "wrapped_polygons": cached_matrix.get("wrapped_polygons", []),
             "cluster_info": cached_matrix.get("cluster_info", {}),
             "buffer": cached_matrix.get("buffer", 0.0),
+            "cache_hit": cached_matrix.get("cache_hit", False),
         }
 
     print(f"📤 [ISR_WEB] Exporting environment as {filename}", flush=True)
+    if "distance_matrix_id" in export_data:
+        print(f"   📎 Matrix ref: {export_data['distance_matrix_id'][:8]}...", flush=True)
 
     # Return JSON response with Content-Disposition header to force filename
     return JSONResponse(
@@ -1340,7 +1377,32 @@ async def agent_chat_v4(req: AgentChatRequest):
             mission_id = None
 
         # -------------------------------
-        # 2. Create agent_run row BEFORE calling v4 (Supabase-first)
+        # 2. Pre-compute SAM-aware distance matrix
+        # -------------------------------
+        # This ensures cache lookup happens ONCE before v4,
+        # and gives us env_hash, routing_model_hash, distance_matrix_id
+        sam_matrix: Optional[Dict[str, Any]] = None
+        env_hash: Optional[str] = None
+        routing_model_hash: Optional[str] = None
+        distance_matrix_id: Optional[str] = None
+
+        sams = env.get("sams", [])
+        if sams:
+            try:
+                print(f"[v4] Pre-computing SAM-aware distance matrix...", flush=True)
+                sam_matrix = calculate_sam_aware_matrix(env, use_supabase_cache=True)
+                env_hash = sam_matrix.get("env_hash")
+                routing_model_hash = sam_matrix.get("routing_model_hash")
+                distance_matrix_id = sam_matrix.get("distance_matrix_id")
+                cache_hit = sam_matrix.get("cache_hit", False)
+                print(f"[v4] Matrix ready: env_hash={env_hash[:8] if env_hash else 'N/A'}..., "
+                      f"matrix_id={distance_matrix_id[:8] if distance_matrix_id else 'N/A'}..., "
+                      f"cache_hit={cache_hit}", flush=True)
+            except Exception as e:
+                print(f"[v4] Warning: SAM matrix pre-compute failed: {e}", flush=True)
+
+        # -------------------------------
+        # 3. Create agent_run row BEFORE calling v4 (Supabase-first)
         # -------------------------------
         agent_run_id = create_agent_run(
             request_text=req.message,
@@ -1349,13 +1411,13 @@ async def agent_chat_v4(req: AgentChatRequest):
         )
 
         # -------------------------------
-        # 3. Call the v4 multi-agent planner
+        # 4. Call the v4 multi-agent planner
         # -------------------------------
         result = run_multi_agent_v4(
             user_message=req.message,
             environment=env,
             drone_configs=drone_configs,
-            distance_matrix=None,
+            sam_matrix=sam_matrix,  # Pass pre-computed matrix with metadata
             existing_solution=existing_solution,
         )
 
@@ -1419,6 +1481,10 @@ async def agent_chat_v4(req: AgentChatRequest):
                 summary=summary,
                 solver_type=solver_type,
                 solver_runtime_ms=solver_runtime_ms,
+                # Distance matrix references for reproducibility
+                env_hash=env_hash,
+                routing_model_hash=routing_model_hash,
+                distance_matrix_id=distance_matrix_id,
             )
 
             # -------------------------------

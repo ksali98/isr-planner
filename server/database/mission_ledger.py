@@ -76,9 +76,18 @@ def update_agent_run(
     summary: Optional[Dict[str, Any]] = None,
     solver_type: Optional[str] = None,
     solver_runtime_ms: Optional[int] = None,
+    # Distance matrix references (for reproducibility)
+    env_hash: Optional[str] = None,
+    routing_model_hash: Optional[str] = None,
+    distance_matrix_id: Optional[str] = None,
 ) -> bool:
     """
     Update an agent run with results AFTER the solve completes.
+
+    Includes optional distance matrix references for reproducibility:
+    - env_hash: Hash of the environment geometry
+    - routing_model_hash: Hash of the routing model configuration
+    - distance_matrix_id: UUID reference to the cached matrix in distance_matrices table
     """
     client = get_supabase_client()
     if client is None:
@@ -102,6 +111,13 @@ def update_agent_run(
         updates["solver_type"] = solver_type
     if solver_runtime_ms is not None:
         updates["solver_runtime_ms"] = solver_runtime_ms
+    # Distance matrix references
+    if env_hash is not None:
+        updates["env_hash"] = env_hash
+    if routing_model_hash is not None:
+        updates["routing_model_hash"] = routing_model_hash
+    if distance_matrix_id is not None:
+        updates["distance_matrix_id"] = distance_matrix_id
 
     if not updates:
         return True  # Nothing to update
@@ -487,3 +503,601 @@ def create_plan(
     """Legacy stub - plans are now in agent_runs.routes."""
     print(f"[mission_ledger] LEGACY: create_plan called (no-op)")
     return None
+
+
+# =====================================================
+# DISTANCE MATRIX CACHE - Hash functions and caching
+# =====================================================
+
+import hashlib
+import json
+import math
+
+
+# =====================================================
+# CANONICAL ENVIRONMENT UTILITIES
+# =====================================================
+
+def _sorted_dict(obj: Any) -> Any:
+    """
+    Recursively sort all dicts by key for deterministic JSON output.
+
+    Handles nested dicts, lists, and primitives.
+    Used by canonicalize_env() for consistent hashing.
+    """
+    if isinstance(obj, dict):
+        return {k: _sorted_dict(v) for k, v in sorted(obj.items())}
+    if isinstance(obj, (list, tuple)):
+        return [_sorted_dict(x) for x in obj]
+    return obj
+
+
+def canonicalize_env(
+    airports: List[Dict],
+    targets: List[Dict],
+    sams: List[Dict],
+    drones: Optional[List[Dict]] = None,
+    include_drones: bool = False,
+) -> Dict[str, Any]:
+    """
+    Build a canonical, deterministic representation of environment geometry.
+
+    This is a more comprehensive version that can optionally include
+    drone configurations for scenarios where drone specs affect routing.
+
+    Args:
+        airports: List of airport dicts with x, y, name/id
+        targets: List of target dicts with x, y, name/id
+        sams: List of SAM dicts with x, y or pos, and range/radius
+        drones: Optional list of drone dicts
+        include_drones: Whether to include drone configs in the canonical form
+
+    Returns:
+        A deterministic dict suitable for hashing with json.dumps(sort_keys=True)
+    """
+    def get_sam_pos(s: Dict) -> tuple:
+        """Extract (x, y) from SAM regardless of format."""
+        if "x" in s and "y" in s:
+            return (s["x"], s["y"])
+        elif "pos" in s:
+            pos = s["pos"]
+            if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+                return (pos[0], pos[1])
+        return (0, 0)
+
+    # Normalize airports: sorted by id/name, only position data
+    normalized_airports = sorted(
+        [
+            {
+                "id": a.get("id", a.get("name", f"A{i}")),
+                "x": round(float(a.get("x", 0)), 4),
+                "y": round(float(a.get("y", 0)), 4),
+            }
+            for i, a in enumerate(airports)
+        ],
+        key=lambda p: p["id"]
+    )
+
+    # Normalize targets: sorted by id/name, only position data
+    normalized_targets = sorted(
+        [
+            {
+                "id": t.get("id", t.get("name", f"T{i}")),
+                "x": round(float(t.get("x", 0)), 4),
+                "y": round(float(t.get("y", 0)), 4),
+            }
+            for i, t in enumerate(targets)
+        ],
+        key=lambda p: p["id"]
+    )
+
+    # Normalize SAMs: sorted by (x, y, range)
+    normalized_sams = sorted(
+        [
+            {
+                "x": round(float(get_sam_pos(s)[0]), 4),
+                "y": round(float(get_sam_pos(s)[1]), 4),
+                "range": round(float(s.get("range", s.get("radius", 0))), 4),
+            }
+            for s in sams
+        ],
+        key=lambda p: (p["x"], p["y"], p["range"])
+    )
+
+    canonical = {
+        "airports": normalized_airports,
+        "targets": normalized_targets,
+        "sams": normalized_sams,
+    }
+
+    # Optionally include drone configurations (for future use)
+    if include_drones and drones:
+        normalized_drones = sorted(
+            [
+                {
+                    "id": d.get("id", d.get("name", f"D{i}")),
+                    "fuel_capacity": round(float(d.get("fuel_capacity", d.get("fuelCapacity", 0))), 2),
+                    "speed": round(float(d.get("speed", 0)), 2),
+                }
+                for i, d in enumerate(drones)
+            ],
+            key=lambda d: d["id"]
+        )
+        canonical["drones"] = normalized_drones
+
+    return _sorted_dict(canonical)
+
+
+def compute_env_hash_v2(
+    airports: List[Dict],
+    targets: List[Dict],
+    sams: List[Dict],
+    drones: Optional[List[Dict]] = None,
+    include_drones: bool = False,
+) -> str:
+    """
+    Compute a deterministic SHA256 hash using canonicalize_env().
+
+    This is the v2 hash function that uses the more comprehensive
+    canonicalize_env() for normalization. Use this when you need
+    to include drone configurations in the hash.
+
+    Returns: SHA256 hash string (first 16 chars for brevity)
+    """
+    canonical = canonicalize_env(
+        airports=airports,
+        targets=targets,
+        sams=sams,
+        drones=drones,
+        include_drones=include_drones,
+    )
+    json_str = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    hash_full = hashlib.sha256(json_str.encode()).hexdigest()
+    return hash_full[:16]
+
+
+def compute_env_hash(airports: List[Dict], targets: List[Dict], sams: List[Dict]) -> str:
+    """
+    Compute a deterministic SHA256 hash of environment geometry.
+
+    Canonicalizes by:
+    - Sorting airports by name/id
+    - Sorting targets by name/id
+    - Sorting SAMs by (pos, range)
+    - Excluding derived fields (distances, paths)
+
+    Result: identical env → identical hash.
+
+    Returns: SHA256 hash string (first 16 chars for brevity)
+    """
+    def get_sam_pos(s: Dict) -> tuple:
+        """Extract (x, y) from SAM regardless of format."""
+        if "x" in s and "y" in s:
+            return (s["x"], s["y"])
+        elif "pos" in s:
+            pos = s["pos"]
+            if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+                return (pos[0], pos[1])
+        return (0, 0)
+
+    # Normalize airports: sorted by id/name, only position data
+    normalized_airports = sorted(
+        [
+            {
+                "id": a.get("id", a.get("name", f"A{i}")),
+                "x": round(float(a.get("x", 0)), 4),
+                "y": round(float(a.get("y", 0)), 4),
+            }
+            for i, a in enumerate(airports)
+        ],
+        key=lambda p: p["id"]
+    )
+
+    # Normalize targets: sorted by id/name, only position data
+    normalized_targets = sorted(
+        [
+            {
+                "id": t.get("id", t.get("name", f"T{i}")),
+                "x": round(float(t.get("x", 0)), 4),
+                "y": round(float(t.get("y", 0)), 4),
+            }
+            for i, t in enumerate(targets)
+        ],
+        key=lambda p: p["id"]
+    )
+
+    # Normalize SAMs: sorted by (x, y, range)
+    normalized_sams = sorted(
+        [
+            {
+                "x": round(float(get_sam_pos(s)[0]), 4),
+                "y": round(float(get_sam_pos(s)[1]), 4),
+                "range": round(float(s.get("range", s.get("radius", 0))), 4),
+            }
+            for s in sams
+        ],
+        key=lambda p: (p["x"], p["y"], p["range"])
+    )
+
+    normalized = {
+        "airports": normalized_airports,
+        "targets": normalized_targets,
+        "sams": normalized_sams,
+    }
+
+    json_str = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    hash_full = hashlib.sha256(json_str.encode()).hexdigest()
+    return hash_full[:16]
+
+
+def compute_routing_model_hash(routing_model: Dict[str, Any]) -> str:
+    """
+    Compute a deterministic SHA256 hash of routing model configuration.
+
+    routing_model example:
+    {
+        "sam_mode": "hard_v1",
+        "cost_model": "fuel_distance",
+        "sam_buffer": 0,
+        "path_resolution": 1.0,
+        "planner_version": "2025.12.30"
+    }
+
+    This prevents mixing matrices computed under different assumptions.
+
+    Returns: SHA256 hash string (first 16 chars for brevity)
+    """
+    # Normalize: sort keys, round floats
+    normalized = {}
+    for k in sorted(routing_model.keys()):
+        v = routing_model[k]
+        if isinstance(v, float):
+            normalized[k] = round(v, 4)
+        else:
+            normalized[k] = v
+
+    json_str = json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+    hash_full = hashlib.sha256(json_str.encode()).hexdigest()
+    return hash_full[:16]
+
+
+def get_default_routing_model() -> Dict[str, Any]:
+    """
+    Return the default routing model configuration.
+    Update this when the routing algorithm changes.
+    """
+    return {
+        "sam_mode": "hard_v1",
+        "cost_model": "fuel_distance",
+        "sam_buffer": 0,
+        "path_resolution": 1.0,
+        "planner_version": "2025.12.30",
+    }
+
+
+def matrix_to_flat(matrix: List[List[float]]) -> Dict[str, Any]:
+    """
+    Convert NxN matrix to flat array format for efficient storage.
+
+    Returns: {"n": N, "flat": [...], "dtype": "float32"}
+    """
+    n = len(matrix)
+    flat = []
+    for row in matrix:
+        flat.extend(row)
+    return {
+        "n": n,
+        "flat": flat,
+        "dtype": "float32",
+    }
+
+
+def flat_to_matrix(flat_data: Dict[str, Any]) -> List[List[float]]:
+    """
+    Convert flat array format back to NxN matrix.
+
+    Input: {"n": N, "flat": [...]}
+    Returns: NxN list of lists
+    """
+    n = flat_data["n"]
+    flat = flat_data["flat"]
+    matrix = []
+    for i in range(n):
+        row = flat[i * n : (i + 1) * n]
+        matrix.append(row)
+    return matrix
+
+
+def build_node_index(labels: List[str]) -> Dict[str, int]:
+    """
+    Build stable node_index mapping from labels.
+
+    Input: ["A1", "T1", "T2", "A2"]
+    Returns: {"A1": 0, "T1": 1, "T2": 2, "A2": 3}
+    """
+    return {label: i for i, label in enumerate(labels)}
+
+
+def get_cached_matrix(
+    env_hash: str,
+    routing_model_hash: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Look up a cached distance matrix by env_hash and routing_model_hash.
+
+    Returns:
+        Dict with keys: id, matrix (NxN), node_index, metadata
+        Or None if not found
+    """
+    client = get_supabase_client()
+    if client is None:
+        print("[mission_ledger] Supabase not configured, skipping get_cached_matrix")
+        return None
+
+    try:
+        result = (
+            client.table("distance_matrices")
+            .select("id, matrix, node_index, metadata, sam_mode")
+            .eq("env_hash", env_hash)
+            .eq("routing_model_hash", routing_model_hash)
+            .limit(1)
+            .execute()
+        )
+
+        if result.data and len(result.data) > 0:
+            row = result.data[0]
+            print(f"[mission_ledger] Cache HIT for matrix (env={env_hash[:8]}..., routing={routing_model_hash[:8]}...)")
+
+            # Convert flat to matrix if needed
+            matrix_data = row["matrix"]
+            if isinstance(matrix_data, dict) and "flat" in matrix_data:
+                matrix = flat_to_matrix(matrix_data)
+            else:
+                matrix = matrix_data
+
+            # Build labels from node_index
+            node_index = row["node_index"]
+            labels = [""] * len(node_index)
+            for label, idx in node_index.items():
+                labels[idx] = label
+
+            metadata = row.get("metadata", {})
+
+            return {
+                "id": row["id"],
+                "matrix": matrix,
+                "node_index": node_index,
+                "labels": labels,
+                "excluded_targets": metadata.get("excluded_targets", []),
+                "sam_mode": row["sam_mode"],
+                "metadata": metadata,
+            }
+
+        print(f"[mission_ledger] Cache MISS for matrix (env={env_hash[:8]}..., routing={routing_model_hash[:8]}...)")
+        return None
+
+    except Exception as e:
+        print(f"[mission_ledger] Error fetching cached matrix: {e}")
+        return None
+
+
+def cache_matrix(
+    env_hash: str,
+    routing_model_hash: str,
+    sam_mode: str,
+    matrix: List[List[float]],
+    labels: List[str],
+    excluded_targets: Optional[List[str]] = None,
+    computation_ms: Optional[int] = None,
+    num_sams: Optional[int] = None,
+    use_flat: bool = True,
+) -> Optional[str]:
+    """
+    Store a computed distance matrix in the cache.
+
+    Args:
+        env_hash: SHA256 of canonical environment
+        routing_model_hash: SHA256 of routing model params
+        sam_mode: "hard_v1", "risk_v2", etc.
+        matrix: NxN distance matrix
+        labels: Node labels in order ["A1", "T1", ...]
+        excluded_targets: Targets inside SAM circles
+        computation_ms: How long computation took
+        num_sams: Number of SAMs in environment
+        use_flat: Store as flat array (more efficient) vs 2D array
+
+    Returns:
+        The matrix ID (for use as distance_matrix_id) or None on failure
+    """
+    client = get_supabase_client()
+    if client is None:
+        print("[mission_ledger] Supabase not configured, skipping cache_matrix")
+        return None
+
+    node_index = build_node_index(labels)
+
+    # Convert to flat format if requested
+    if use_flat:
+        matrix_data = matrix_to_flat(matrix)
+    else:
+        matrix_data = matrix
+
+    metadata = {
+        "excluded_targets": excluded_targets or [],
+        "num_waypoints": len(labels),
+        "num_sams": num_sams,
+        "computation_ms": computation_ms,
+    }
+
+    record = {
+        "env_hash": env_hash,
+        "routing_model_hash": routing_model_hash,
+        "sam_mode": sam_mode,
+        "node_index": node_index,
+        "matrix": matrix_data,
+        "metadata": metadata,
+    }
+
+    try:
+        # Use upsert to handle race conditions (unique on env_hash, routing_model_hash)
+        result = (
+            client.table("distance_matrices")
+            .upsert(record, on_conflict="env_hash,routing_model_hash")
+            .execute()
+        )
+
+        matrix_id = result.data[0]["id"]
+        print(f"[mission_ledger] Cached matrix: {matrix_id} (env={env_hash[:8]}..., mode={sam_mode})")
+        return matrix_id
+
+    except Exception as e:
+        print(f"[mission_ledger] Error caching matrix: {e}")
+        return None
+
+
+def get_matrix_by_id(matrix_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Look up a distance matrix by its UUID (the distance_matrix_id).
+
+    Returns:
+        Dict with keys: matrix (NxN), node_index, labels, metadata, env_hash, routing_model_hash
+        Or None if not found
+    """
+    client = get_supabase_client()
+    if client is None:
+        print("[mission_ledger] Supabase not configured, skipping get_matrix_by_id")
+        return None
+
+    try:
+        result = (
+            client.table("distance_matrices")
+            .select("matrix, node_index, metadata, sam_mode, env_hash, routing_model_hash")
+            .eq("id", matrix_id)
+            .limit(1)
+            .execute()
+        )
+
+        if result.data and len(result.data) > 0:
+            row = result.data[0]
+            print(f"[mission_ledger] Loaded matrix by id: {matrix_id}")
+
+            # Convert flat to matrix if needed
+            matrix_data = row["matrix"]
+            if isinstance(matrix_data, dict) and "flat" in matrix_data:
+                matrix = flat_to_matrix(matrix_data)
+            else:
+                matrix = matrix_data
+
+            # Build labels from node_index
+            node_index = row["node_index"]
+            labels = [""] * len(node_index)
+            for label, idx in node_index.items():
+                labels[idx] = label
+
+            metadata = row.get("metadata", {})
+
+            return {
+                "matrix": matrix,
+                "node_index": node_index,
+                "labels": labels,
+                "excluded_targets": metadata.get("excluded_targets", []),
+                "sam_mode": row["sam_mode"],
+                "env_hash": row["env_hash"],
+                "routing_model_hash": row["routing_model_hash"],
+                "metadata": metadata,
+            }
+
+        print(f"[mission_ledger] Matrix not found for id: {matrix_id}")
+        return None
+
+    except Exception as e:
+        print(f"[mission_ledger] Error fetching matrix by id: {e}")
+        return None
+
+
+# =====================================================
+# SAM PATHS CACHE (optional - for visualization)
+# =====================================================
+
+def cache_sam_paths(
+    env_hash: str,
+    routing_model_hash: str,
+    sam_mode: str,
+    paths: Dict[str, List[List[float]]],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    """
+    Store SAM-avoiding polylines for visualization.
+
+    Args:
+        env_hash: SHA256 of canonical environment
+        routing_model_hash: SHA256 of routing model params
+        sam_mode: "hard_v1", "risk_v2", etc.
+        paths: {"A1->T3": [[x,y], ...], ...}
+        metadata: Optional additional info
+
+    Returns:
+        The path record ID or None on failure
+    """
+    client = get_supabase_client()
+    if client is None:
+        print("[mission_ledger] Supabase not configured, skipping cache_sam_paths")
+        return None
+
+    record = {
+        "env_hash": env_hash,
+        "routing_model_hash": routing_model_hash,
+        "sam_mode": sam_mode,
+        "paths": paths,
+        "metadata": metadata or {},
+    }
+
+    try:
+        result = (
+            client.table("sam_paths")
+            .upsert(record, on_conflict="env_hash,routing_model_hash")
+            .execute()
+        )
+
+        path_id = result.data[0]["id"]
+        print(f"[mission_ledger] Cached SAM paths: {path_id} (env={env_hash[:8]}...)")
+        return path_id
+
+    except Exception as e:
+        print(f"[mission_ledger] Error caching SAM paths: {e}")
+        return None
+
+
+def get_cached_sam_paths(
+    env_hash: str,
+    routing_model_hash: str,
+) -> Optional[Dict[str, List[List[float]]]]:
+    """
+    Look up cached SAM-avoiding paths.
+
+    Returns:
+        Dict of paths {"A1->T3": [[x,y], ...], ...} or None if not found
+    """
+    client = get_supabase_client()
+    if client is None:
+        return None
+
+    try:
+        result = (
+            client.table("sam_paths")
+            .select("paths")
+            .eq("env_hash", env_hash)
+            .eq("routing_model_hash", routing_model_hash)
+            .limit(1)
+            .execute()
+        )
+
+        if result.data and len(result.data) > 0:
+            print(f"[mission_ledger] SAM paths cache HIT (env={env_hash[:8]}...)")
+            return result.data[0]["paths"]
+
+        return None
+
+    except Exception as e:
+        print(f"[mission_ledger] Error fetching SAM paths: {e}")
+        return None

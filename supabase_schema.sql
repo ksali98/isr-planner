@@ -212,3 +212,68 @@ CREATE TABLE IF NOT EXISTS agent_policy_rules (
 
 -- Composite index for common query pattern
 CREATE INDEX IF NOT EXISTS agent_policy_rules_active_idx ON agent_policy_rules(active, scope, mode);
+
+-- =====================================================
+-- DISTANCE MATRIX CACHE TABLE
+-- =====================================================
+
+-- 11. Distance Matrices Table
+-- Stores metadata + the matrix payload (JSONB) for SAM-aware distances
+-- Key: (env_hash, routing_model_hash) - unique combination
+CREATE TABLE IF NOT EXISTS distance_matrices (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    -- Cache keys
+    env_hash TEXT NOT NULL,                    -- SHA256 of canonical env (sorted airports, targets, sams)
+    routing_model_hash TEXT NOT NULL,          -- SHA256 of routing model params
+    sam_mode TEXT NOT NULL DEFAULT 'hard_v1',  -- hard_v1 | risk_v2 | etc.
+
+    -- Matrix data
+    node_index JSONB NOT NULL,                 -- {"A1":0,"T3":1,...} stable ordering
+    matrix JSONB NOT NULL,                     -- NxN distances (flat array or list of lists)
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb -- runtime_ms, params, counts, excluded_targets, etc.
+);
+
+-- Unique constraint on cache keys
+CREATE UNIQUE INDEX IF NOT EXISTS distance_matrices_unique
+ON distance_matrices(env_hash, routing_model_hash);
+
+-- Indexes for distance_matrices
+CREATE INDEX IF NOT EXISTS distance_matrices_env_idx ON distance_matrices(env_hash);
+CREATE INDEX IF NOT EXISTS distance_matrices_mode_idx ON distance_matrices(sam_mode);
+
+-- =====================================================
+-- OPTIONAL: SAM PATHS TABLE (for visualization)
+-- =====================================================
+
+-- 12. SAM Paths Table (optional)
+-- Preserves SAM-avoiding polylines for trajectory visualization
+CREATE TABLE IF NOT EXISTS sam_paths (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    env_hash TEXT NOT NULL,
+    routing_model_hash TEXT NOT NULL,
+    sam_mode TEXT NOT NULL DEFAULT 'hard_v1',
+
+    paths JSONB NOT NULL,                      -- {"A1->T3": [[x,y],...], ...}
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS sam_paths_unique
+ON sam_paths(env_hash, routing_model_hash);
+
+-- =====================================================
+-- ADD REFERENCES TO AGENT RUNS (for fast filtering)
+-- =====================================================
+
+-- Add columns to agent_runs for matrix references
+ALTER TABLE agent_runs
+ADD COLUMN IF NOT EXISTS env_hash TEXT NULL;
+
+ALTER TABLE agent_runs
+ADD COLUMN IF NOT EXISTS routing_model_hash TEXT NULL;
+
+ALTER TABLE agent_runs
+ADD COLUMN IF NOT EXISTS distance_matrix_id UUID NULL REFERENCES distance_matrices(id) ON DELETE SET NULL;
