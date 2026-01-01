@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
@@ -40,16 +44,27 @@ from .solver.solver_bridge import (
 from .solver.trajectory_planner import ISRTrajectoryPlanner
 
 from server.database.mission_ledger import (
+    # New Decision Trace v1 functions
+    create_agent_run,
+    update_agent_run,
+    create_agent_trace,
+    log_optimizer_step,
+    get_active_policy_rules,
+    # Legacy stubs for backwards compatibility
     create_mission_run,
+    log_event,
     create_env_version,
     create_plan,
-    log_event,
+    # Distance matrix cache functions
+    get_default_routing_model,
 )
 
+# Import SAM distance matrix calculator for v4 wiring
+from .solver.sam_distance_matrix import calculate_sam_aware_matrix
+
+import time
+
 _current_env = None
-_current_run_id = None
-_current_env_version_id = None
-_current_plan_id = None
 
 
 
@@ -685,7 +700,21 @@ def get_environment():
 @app.get("/api/export_environment")
 def export_environment():
     """
-    Export environment with SAM-aware distance matrix in JSON format.
+    Export environment with SAM-aware distance matrix reference in JSON format.
+
+    The exported JSON keeps the environment clean and includes only references
+    to the distance matrix (stored in Supabase), not the matrix itself.
+
+    Export format:
+    {
+        "environment": {...},                    # Clean environment data
+        "env_hash": "abc123...",                 # Hash of env geometry for cache lookup
+        "routing_model": {...},                  # Routing parameters used
+        "routing_model_hash": "def456...",       # Hash for cache lookup
+        "distance_matrix_id": "uuid...",         # Reference to Supabase matrix
+        "matrix_info": {...},                    # Metadata (counts, excluded targets)
+        "exported_at": "2025-12-30T..."
+    }
 
     Returns JSON file with Content-Disposition header to force correct filename.
     Filename format: ise-env-YYMMDDHH-n.json where n is running number.
@@ -709,7 +738,7 @@ def export_environment():
     # Increment counter for next export
     _export_counter += 1
 
-    # Build export data with environment and matrix metadata
+    # Build export data with environment and matrix reference (not the matrix itself)
     cached_matrix = get_current_matrix()
     export_data = {
         "environment": _current_env,
@@ -717,8 +746,19 @@ def export_environment():
         "matrix_cached": cached_matrix is not None,
     }
 
-    # Include matrix metadata if available
+    # Include matrix REFERENCE and routing model (not the matrix itself)
     if cached_matrix is not None:
+        # Add cache keys for reproducibility
+        if "env_hash" in cached_matrix:
+            export_data["env_hash"] = cached_matrix["env_hash"]
+        if "routing_model" in cached_matrix:
+            export_data["routing_model"] = cached_matrix["routing_model"]
+        if "routing_model_hash" in cached_matrix:
+            export_data["routing_model_hash"] = cached_matrix["routing_model_hash"]
+        if "distance_matrix_id" in cached_matrix:
+            export_data["distance_matrix_id"] = cached_matrix["distance_matrix_id"]
+
+        # Include metadata (not the actual matrix)
         export_data["matrix_info"] = {
             "num_waypoints": len(cached_matrix.get("labels", [])),
             "num_sam_avoiding_paths": len(cached_matrix.get("paths", {})),
@@ -726,9 +766,12 @@ def export_environment():
             "wrapped_polygons": cached_matrix.get("wrapped_polygons", []),
             "cluster_info": cached_matrix.get("cluster_info", {}),
             "buffer": cached_matrix.get("buffer", 0.0),
+            "cache_hit": cached_matrix.get("cache_hit", False),
         }
 
     print(f"📤 [ISR_WEB] Exporting environment as {filename}", flush=True)
+    if "distance_matrix_id" in export_data:
+        print(f"   📎 Matrix ref: {export_data['distance_matrix_id'][:8]}...", flush=True)
 
     # Return JSON response with Content-Disposition header to force filename
     return JSONResponse(
@@ -1294,8 +1337,6 @@ async def agent_chat(req: AgentChatRequest):
     
 @app.post("/api/agents/chat-v4", response_model=AgentChatResponse)
 async def agent_chat_v4(req: AgentChatRequest):
-    result = None
-    print(">>> /api/agents/chat-v4 (v4 endpoint) HIT <<<", flush=True)
     """
     ISR Agent v4 endpoint using the reasoning-based multi-agent system.
 
@@ -1303,63 +1344,12 @@ async def agent_chat_v4(req: AgentChatRequest):
     - If mission_id is provided: load existing mission state and allow
       question-only interaction (no recompute unless the request asks for it).
     """
+    print(">>> /api/agents/chat-v4 (v4 endpoint) HIT <<<", flush=True)
+    t0 = time.time()
+
     try:
         # -------------------------------
-        # Supabase logging for agent plans
-        # -------------------------------
-        global _current_run_id, _current_env_version_id, _current_plan_id
-
-        raw_routes = result.get("routes") or {}
-        trajectories = result.get("trajectories") or {}
-
-        if raw_routes:
-            # Ensure a run exists
-            if _current_run_id is None:
-                _current_run_id = create_mission_run(system_version="v4-agent", mission_name="isr-agent-run")
-
-            # Snapshot env for this agent solve
-            if _current_run_id is not None:
-                _current_env_version_id = create_env_version(
-                    run_id=_current_run_id,
-                    env_snapshot=env,
-                    source="agent",
-                    reason="agent_chat_v4",
-                )
-
-            # Build metrics similar to /api/solve
-            metrics = {}
-            for d, route_info in raw_routes.items():
-                if isinstance(route_info, dict):
-                    metrics[str(d)] = {
-                        "distance": route_info.get("distance", 0.0),
-                        "points": route_info.get("points", 0),
-                        "fuel_budget": route_info.get("fuel_budget", 0.0),
-                        "route": route_info.get("route", []),
-                        "sequence": route_info.get("sequence", ""),
-                    }
-
-            # Store a draft plan
-            if _current_run_id is not None:
-                _current_plan_id = create_plan(
-                    run_id=_current_run_id,
-                    env_version_id=_current_env_version_id,
-                    status="draft",
-                    starts_by_drone={},      # optional; fill later
-                    allocation=result.get("allocation") or {},
-                    trajectories=trajectories,
-                    metrics=metrics,
-                    notes="draft from /api/agents/chat-v4",
-                )
-
-                # Optional: log event
-                log_event(_current_run_id, "AGENT_PLAN_DRAFT_CREATED", {
-                    "env_version_id": _current_env_version_id,
-                    "plan_id": _current_plan_id,
-                    "num_drones": len(raw_routes),
-                })
-
-        # -------------------------------
-        # 1. Resolve env & configs
+        # 1. Resolve env & configs FIRST
         # -------------------------------
         env = req.env
         drone_configs = req.drone_configs or env.get("drone_configs") or {}
@@ -1380,38 +1370,85 @@ async def agent_chat_v4(req: AgentChatRequest):
             existing_solution = {
                 "routes": mission.get("routes") or {},
                 "allocation": mission.get("allocation") or {},
-                # total_points/total_fuel are computed from routes when needed
             }
-            print(f"[v4] Loaded existing mission {mission_id} from store (using fresh env from request)", flush=True)
+            print(f"[v4] Loaded existing mission {mission_id} from store", flush=True)
         elif mission_id:
             print(f"[v4] mission_id={mission_id} not found; treating as new mission", flush=True)
-            mission_id = None  # will create a new one below
+            mission_id = None
 
         # -------------------------------
-        # 2. Call the v4 multi-agent planner
+        # 2. Pre-compute SAM-aware distance matrix
+        # -------------------------------
+        # This ensures cache lookup happens ONCE before v4,
+        # and gives us env_hash, routing_model_hash, distance_matrix_id
+        sam_matrix: Optional[Dict[str, Any]] = None
+        env_hash: Optional[str] = None
+        routing_model_hash: Optional[str] = None
+        distance_matrix_id: Optional[str] = None
+
+        sams = env.get("sams", [])
+        if sams:
+            try:
+                print(f"[v4] Pre-computing SAM-aware distance matrix...", flush=True)
+                sam_matrix = calculate_sam_aware_matrix(env, use_supabase_cache=True)
+                env_hash = sam_matrix.get("env_hash")
+                routing_model_hash = sam_matrix.get("routing_model_hash")
+                distance_matrix_id = sam_matrix.get("distance_matrix_id")
+                cache_hit = sam_matrix.get("cache_hit", False)
+                print(f"[v4] Matrix ready: env_hash={env_hash[:8] if env_hash else 'N/A'}..., "
+                      f"matrix_id={distance_matrix_id[:8] if distance_matrix_id else 'N/A'}..., "
+                      f"cache_hit={cache_hit}", flush=True)
+            except Exception as e:
+                print(f"[v4] Warning: SAM matrix pre-compute failed: {e}", flush=True)
+
+        # -------------------------------
+        # 3. Create agent_run row BEFORE calling v4 (Supabase-first)
+        # -------------------------------
+        agent_run_id = create_agent_run(
+            request_text=req.message,
+            agent_version="v4",
+            mode="agentic",
+        )
+
+        # -------------------------------
+        # 4. Call the v4 multi-agent planner
         # -------------------------------
         result = run_multi_agent_v4(
             user_message=req.message,
             environment=env,
             drone_configs=drone_configs,
-            distance_matrix=None,
+            sam_matrix=sam_matrix,  # Pass pre-computed matrix with metadata
             existing_solution=existing_solution,
         )
 
         if not isinstance(result, dict):
             raise RuntimeError(f"run_multi_agent_v4 returned non-dict: {type(result)}")
 
+        runtime_ms = int((time.time() - t0) * 1000)
+
         # -------------------------------
-        # 3. Extract routes for the UI
+        # 4. Extract outputs from result
         # -------------------------------
         raw_routes = result.get("routes") or {}
-        routes_for_ui: Dict[str, List[str]] = {}
+        trajectories = result.get("trajectories") or {}
+        allocations = result.get("allocation") or {}
+        allocation_strategy = result.get("allocation_strategy", "unknown")
 
+        # Extract Decision Trace v1 fields (if present)
+        trace = result.get("trace", {})
+        optimizer_steps = result.get("optimizer_steps", [])
+        solver_type = result.get("solver_type")
+        solver_runtime_ms = result.get("solver_runtime_ms")
+        is_valid = result.get("valid", True)
+
+        total_points = result.get("total_points", 0)
+        total_fuel = result.get("total_fuel", 0.0)
+
+        # Build routes for UI
+        routes_for_ui: Dict[str, List[str]] = {}
         for did, route_info in raw_routes.items():
-            # Normal case: route_info is a dict with a "route" key
             if isinstance(route_info, dict):
                 routes_for_ui[str(did)] = route_info.get("route", []) or []
-            # Fallback: if it's already a list, just use it
             elif isinstance(route_info, list):
                 routes_for_ui[str(did)] = route_info
             else:
@@ -1420,17 +1457,63 @@ async def agent_chat_v4(req: AgentChatRequest):
         # Legacy single route (D1) for older UI helpers
         legacy_route = routes_for_ui.get("1")
 
-        # Extract allocations and strategy
-        allocations = result.get("allocation") or {}
-        allocation_strategy = result.get("allocation_strategy", "unknown")
+        # -------------------------------
+        # 5. Update agent_run with results (after v4 completes)
+        # -------------------------------
+        if agent_run_id and raw_routes:
+            # Build summary per-drone
+            summary = {}
+            for did, route_info in raw_routes.items():
+                if isinstance(route_info, dict):
+                    summary[str(did)] = {
+                        "route": route_info.get("route", []),
+                        "distance": route_info.get("distance", 0.0),
+                        "points": route_info.get("points", 0),
+                    }
+
+            update_agent_run(
+                agent_run_id,
+                total_points=total_points,
+                total_fuel_used=total_fuel,
+                runtime_ms=runtime_ms,
+                is_valid=is_valid,
+                routes=raw_routes,
+                summary=summary,
+                solver_type=solver_type,
+                solver_runtime_ms=solver_runtime_ms,
+                # Distance matrix references for reproducibility
+                env_hash=env_hash,
+                routing_model_hash=routing_model_hash,
+                distance_matrix_id=distance_matrix_id,
+            )
+
+            # -------------------------------
+            # 6. Insert agent_trace (1:1 with run)
+            # -------------------------------
+            if trace:
+                create_agent_trace(agent_run_id, trace)
+
+            # -------------------------------
+            # 7. Insert optimizer steps (if any)
+            # -------------------------------
+            for step in optimizer_steps:
+                log_optimizer_step(
+                    agent_run_id=agent_run_id,
+                    step_index=step.get("step_index", 0),
+                    operator=step.get("operator", "unknown"),
+                    before_routes=step.get("before_routes", {}),
+                    after_routes=step.get("after_routes", {}),
+                    delta=step.get("delta", {}),
+                    accepted=step.get("accepted", True),
+                    notes=step.get("notes"),
+                    validation_status=step.get("validation_status", "unknown"),
+                    validation_details=step.get("validation_details", {}),
+                )
 
         # -------------------------------
-        # 4. Persist/refresh mission state
+        # 8. Persist/refresh mission state in memory store
         # -------------------------------
-        # We only persist if there is some solution data.
-        has_solution = bool(raw_routes)
-
-        if has_solution:
+        if raw_routes:
             if not mission_id:
                 mission_id = f"m_{uuid4().hex}"
                 print(f"[v4] Creating new mission {mission_id}", flush=True)
@@ -1442,25 +1525,26 @@ async def agent_chat_v4(req: AgentChatRequest):
                 "drone_configs": drone_configs,
                 "routes": raw_routes,
                 "allocation": allocations,
-                "total_points": result.get("total_points"),
-                "total_fuel": result.get("total_fuel"),
+                "total_points": total_points,
+                "total_fuel": total_fuel,
                 "updated_at": datetime.utcnow().isoformat(),
             }
 
         # -------------------------------
-        # 5. Build response
+        # 9. Build and return response
         # -------------------------------
         return AgentChatResponse(
             reply=result.get("response", "(No v4 agent reply)"),
             route=legacy_route,
             routes=routes_for_ui,
-            trajectories=result.get("trajectories"),
-            points=result.get("total_points"),
-            fuel=result.get("total_fuel"),
+            trajectories=trajectories,
+            points=total_points,
+            fuel=total_fuel,
             allocations=allocations,
             allocation_strategy=allocation_strategy,
             mission_id=mission_id,
         )
+
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1474,19 +1558,6 @@ async def agent_chat_v4(req: AgentChatRequest):
             allocations=None,
             allocation_strategy=None,
             mission_id=None,
-        )
-
-        import traceback
-        traceback.print_exc()
-        return AgentChatResponse(
-            reply=f"Error running v4 agent: {str(e)}",
-            route=None,
-            routes=None,
-            trajectories=None,
-            points=None,
-            fuel=None,
-            allocations=None,
-            allocation_strategy=None,
         )
 
 

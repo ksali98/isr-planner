@@ -109,12 +109,14 @@ class SAMDistanceMatrixCalculator:
         # Normalize SAM format
         normalized_sams = self._normalize_sams(sams)
 
-        # Check for targets inside POLYGON BOUNDARY and exclude them
-        # The polygon boundary is what matters, not individual SAM circles
+        # Check for targets inside SAM zones and exclude them
+        # We check BOTH:
+        # 1. Inside individual SAM circles (matches frontend red X display)
+        # 2. Inside wrapped polygon boundaries (convex hull of overlapping SAMs)
         excluded_inside_boundary = []
         valid_targets = []
 
-        # Get wrapped polygon boundaries (same as displayed on UI)
+        # Get wrapped polygon boundaries (for visualization)
         polygon_boundaries = []
         if wrap_sams and normalized_sams:
             # Convert to format expected by wrap_sams
@@ -128,51 +130,40 @@ class SAMDistanceMatrixCalculator:
             wrapped_polygons, _ = wrap_sams(sams_for_wrapping)
             polygon_boundaries = wrapped_polygons
 
-                # --- DEBUG: show polygon bounds and target inside/out status ---
-        try:
-            if polygon_boundaries:
-                print("📐 [DEBUG] SAM polygons in distance-matrix calculator:", flush=True)
-                for i, poly in enumerate(polygon_boundaries):
-                    xs = [p[0] for p in poly]
-                    ys = [p[1] for p in poly]
-                    print(
-                        f"    polygon {i}: X=[{min(xs):.1f},{max(xs):.1f}], "
-                        f"Y=[{min(ys):.1f},{max(ys):.1f}], {len(poly)} vertices",
-                        flush=True,
-                    )
-
-                print("🎯 [DEBUG] Targets vs SAM polygons:", flush=True)
-                for t in targets:
-                    tx, ty = float(t["x"]), float(t["y"])
-                    inside_any = False
-                    for poly in polygon_boundaries:
-                        if point_in_polygon((tx, ty), poly):
-                            inside_any = True
-                            break
-                    print(
-                        f"    target {t['id']} at ({tx:.2f},{ty:.2f}) "
-                        f"inside_boundary={inside_any}",
-                        flush=True,
-                    )
-
-        except Exception as e:
-            print("[DEBUG] Error in polygon/target debug block:", e, flush=True)
+        # --- DEBUG: show SAMs (brief) ---
+        if normalized_sams:
+            print(f"📐 [DEBUG] {len(normalized_sams)} SAM circles in distance-matrix calculator", flush=True)
         # --- END DEBUG ---
 
         for t in targets:
             tx, ty = float(t["x"]), float(t["y"])
-            inside_boundary = False
+            should_exclude = False
 
-            # Check if target is inside any wrapped polygon boundary
-            for polygon in polygon_boundaries:
-                if point_in_polygon((tx, ty), polygon):
+            # CRITICAL: Check if target is inside ANY individual SAM circle
+            # This matches the frontend algorithm that shows red X marks
+            for sam in normalized_sams:
+                sam_x, sam_y = sam["pos"]
+                sam_range = sam["range"]
+                distance = math.sqrt((tx - sam_x)**2 + (ty - sam_y)**2)
+                if distance < sam_range:
                     excluded_inside_boundary.append(t["id"])
-                    print(f"⚠️ Target {t['id']} at ({tx:.1f}, {ty:.1f}) is INSIDE polygon boundary "
+                    print(f"⚠️ Target {t['id']} at ({tx:.1f}, {ty:.1f}) is INSIDE SAM circle "
+                          f"(center=({sam_x:.1f},{sam_y:.1f}), range={sam_range:.1f}, dist={distance:.1f}) "
                           f"- excluding from mission", flush=True)
-                    inside_boundary = True
+                    should_exclude = True
                     break
 
-            if not inside_boundary:
+            # Also check polygon boundaries (for edge cases with overlapping SAMs)
+            if not should_exclude:
+                for polygon in polygon_boundaries:
+                    if point_in_polygon((tx, ty), polygon):
+                        excluded_inside_boundary.append(t["id"])
+                        print(f"⚠️ Target {t['id']} at ({tx:.1f}, {ty:.1f}) is INSIDE polygon boundary "
+                              f"- excluding from mission", flush=True)
+                        should_exclude = True
+                        break
+
+            if not should_exclude:
                 valid_targets.append(t)
 
         # Build list of all waypoints (using only valid targets)
@@ -483,20 +474,28 @@ _calculator = SAMDistanceMatrixCalculator()
 
 def calculate_sam_aware_matrix(
     env: Dict[str, Any],
-    buffer: float = 0.0
+    buffer: float = 0.0,
+    use_supabase_cache: bool = True,
 ) -> Dict[str, Any]:
     """
     Calculate SAM-aware distance matrix for the given environment.
 
     This is the main entry point for use as a LangGraph tool.
+    Integrates with Supabase caching for reproducibility and performance.
 
     Args:
         env: Environment dict with airports, targets, and sams
-        buffer: Safety buffer around SAMs (default 3 units)
+        buffer: Safety buffer around SAMs (default 0 units)
+        use_supabase_cache: Whether to use Supabase for persistent caching
 
     Returns:
-        Distance matrix data dict
+        Distance matrix data dict with additional fields:
+        - env_hash: Hash of the environment geometry
+        - routing_model_hash: Hash of the routing configuration
+        - distance_matrix_id: UUID from Supabase (if cached)
     """
+    import time
+
     airports = list(env.get("airports", []))
     targets = env.get("targets", [])
     sams = env.get("sams", [])
@@ -512,7 +511,115 @@ def calculate_sam_aware_matrix(
         })
         print(f"📍 [SAM Matrix] Added synthetic start: {node_id} at ({node_data['x']:.1f}, {node_data['y']:.1f})", flush=True)
 
-    return _calculator.calculate_matrix(airports, targets, sams, buffer)
+    # Try Supabase cache first
+    if use_supabase_cache:
+        try:
+            from ..database.mission_ledger import (
+                compute_env_hash,
+                compute_routing_model_hash,
+                get_default_routing_model,
+                get_cached_matrix as get_supabase_cached_matrix,
+                cache_matrix as cache_supabase_matrix,
+            )
+
+            # Compute hashes for cache lookup
+            env_hash = compute_env_hash(airports, targets, sams)
+            routing_model = get_default_routing_model()
+            routing_model["sam_buffer"] = buffer
+            routing_model_hash = compute_routing_model_hash(routing_model)
+
+            # Check Supabase cache
+            cached = get_supabase_cached_matrix(env_hash, routing_model_hash)
+            if cached is not None:
+                print(f"✅ [SAM Matrix] Using Supabase cached matrix (id={cached['id'][:8]}...)", flush=True)
+                # Convert from Supabase format back to our internal format
+                result = {
+                    "matrix": cached["matrix"],
+                    "labels": cached["labels"],
+                    "waypoints": [],  # Will rebuild from labels
+                    "paths": {},  # Paths not stored in cache
+                    "excluded_targets": cached["excluded_targets"],
+                    "sams": [],  # Will need to rebuild if needed
+                    "buffer": buffer,
+                    "wrapped_polygons": [],
+                    # Add cache metadata
+                    "env_hash": env_hash,
+                    "routing_model": routing_model,
+                    "routing_model_hash": routing_model_hash,
+                    "distance_matrix_id": cached["id"],
+                    "cache_hit": True,
+                }
+                # Rebuild waypoints from labels and original data
+                all_wp = airports + targets
+                wp_by_id = {str(wp.get("id", "")): wp for wp in all_wp}
+                for label in cached["labels"]:
+                    wp = wp_by_id.get(label)
+                    if wp:
+                        detail = {
+                            "id": label,
+                            "x": float(wp.get("x", 0)),
+                            "y": float(wp.get("y", 0)),
+                        }
+                        if label.startswith("T"):
+                            detail["priority"] = int(wp.get("priority", 5))
+                            detail["type"] = wp.get("type", "a")
+                        result["waypoints"].append(detail)
+
+                # Cache locally too
+                _calculator._cached_matrix = result
+                return result
+
+        except ImportError:
+            print("⚠️ [SAM Matrix] Supabase caching unavailable - using local only", flush=True)
+        except Exception as e:
+            print(f"⚠️ [SAM Matrix] Supabase cache error: {e}", flush=True)
+
+    # Calculate fresh matrix
+    start_time = time.time()
+    result = _calculator.calculate_matrix(airports, targets, sams, buffer)
+    computation_ms = int((time.time() - start_time) * 1000)
+
+    # Add hashes to result for traceability
+    try:
+        from ..database.mission_ledger import (
+            compute_env_hash,
+            compute_routing_model_hash,
+            get_default_routing_model,
+            cache_matrix as cache_supabase_matrix,
+        )
+
+        env_hash = compute_env_hash(airports, targets, sams)
+        routing_model = get_default_routing_model()
+        routing_model["sam_buffer"] = buffer
+        routing_model_hash = compute_routing_model_hash(routing_model)
+
+        result["env_hash"] = env_hash
+        result["routing_model"] = routing_model
+        result["routing_model_hash"] = routing_model_hash
+        result["cache_hit"] = False
+
+        # Cache in Supabase for future use
+        if use_supabase_cache:
+            matrix_id = cache_supabase_matrix(
+                env_hash=env_hash,
+                routing_model_hash=routing_model_hash,
+                sam_mode=routing_model.get("sam_mode", "hard_v1"),
+                matrix=result["matrix"],
+                labels=result["labels"],
+                excluded_targets=result.get("excluded_targets", []),
+                computation_ms=computation_ms,
+                num_sams=len(sams),
+            )
+            if matrix_id:
+                result["distance_matrix_id"] = matrix_id
+                print(f"✅ [SAM Matrix] Cached in Supabase (id={matrix_id[:8]}..., {computation_ms}ms)", flush=True)
+
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"⚠️ [SAM Matrix] Failed to cache in Supabase: {e}", flush=True)
+
+    return result
 
 
 def get_cached_matrix() -> Optional[Dict[str, Any]]:

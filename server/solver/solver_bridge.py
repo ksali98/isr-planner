@@ -265,12 +265,16 @@ def solve_mission(
         }
 
     # Build a global distance matrix; we'll reuse it per drone
-    # Use SAM-aware distances if SAMs are present
-    if sams:
-        print("🎯 SAMs present - calculating SAM-aware distance matrix...", flush=True)
-        dist_data = calculate_sam_aware_matrix(env)
-    else:
-        dist_data = _build_distance_matrix(airports, targets)
+    # ALWAYS use SAM-aware distances for consistency and exclusion detection
+    sam_count = len(sams) if sams else 0
+    print(f"🎯 Calculating fresh distance matrix ({sam_count} SAMs)...", flush=True)
+    clear_matrix_cache()
+    dist_data = calculate_sam_aware_matrix(env)
+
+    # Get excluded targets (inside SAM polygons)
+    excluded_targets = set(dist_data.get("excluded_targets", []))
+    if excluded_targets:
+        print(f"🚫 [DEBUG] EXCLUDED TARGETS from distance matrix: {sorted(excluded_targets)}", flush=True)
 
     sequences: Dict[str, str] = {}
     routes_detail: Dict[str, Dict[str, Any]] = {}
@@ -356,6 +360,8 @@ def solve_mission(
         # Don't set end_id to start_id for flexible endpoints - solver will choose
         end_id = raw_end_id if not flexible_endpoint else None
 
+        print(f"🔧 D{did} endpoint config: cfg.end_airport={cfg.get('end_airport')}, start_id={start_id}, raw_end_id={raw_end_id}, end_id={end_id}, flexible={flexible_endpoint}", flush=True)
+
         # Filter targets by type access (A, B, C, D types)
         target_access = cfg.get("target_access", {})
         allowed_types = {
@@ -367,11 +373,17 @@ def solve_mission(
         if not allowed_types:
             allowed_types = {"a", "b", "c", "d"}
 
-        # Filter targets by allowed types
+        # Filter targets by allowed types AND exclude those inside SAM polygons
         candidate_targets = [
             t for t in targets
             if str(t.get("type", "a")).lower() in allowed_types
+            and str(t.get("id", "")) not in excluded_targets
         ]
+
+        # DEBUG: Check if any excluded targets would have been included
+        excluded_here = [t["id"] for t in targets if str(t.get("id", "")) in excluded_targets]
+        if excluded_here:
+            print(f"   🚫 D{did}: Excluded targets (inside SAM polygons): {excluded_here}", flush=True)
 
         # Additionally filter by assigned_drone if any targets have assignments
         any_assigned = any(t.get("assigned_drone") is not None for t in targets)
@@ -440,7 +452,7 @@ def solve_mission(
             "matrix": filtered_matrix,
             "labels": filtered_ids,  # Use the filtered list, not desired_ids
             "waypoints": [wp for wp in dist_data.get("waypoints", []) if wp["id"] in filtered_ids],
-            "excluded_targets": [],
+            "excluded_targets": list(excluded_targets) if excluded_targets else [],  # Propagate excluded targets
         }
 
         # Count actual airports and targets in filtered list
@@ -578,33 +590,30 @@ def solve_mission_with_allocation(
             "routes": {},
         }
 
-    # Step 1: Get distance matrix (use cached if available AND matches current env)
-    if use_sam_aware_distances and sams:
-        global _cached_env_hash
-        current_hash = _compute_env_hash(env)
-        cached_matrix = get_cached_matrix()
+    # Step 1: Get distance matrix
+    # ALWAYS use SAM-aware matrix calculator for consistency
+    # This ensures targets inside SAM circles are always excluded
+    # When no SAMs present, it still computes correct Euclidean distances
+    current_hash = _compute_env_hash(env)
 
-        # Only use cache if it matches the current environment
-        if cached_matrix is not None and _cached_env_hash == current_hash:
-            print("⚡ Using cached SAM-aware distance matrix (env hash match)", flush=True)
-            dist_data = cached_matrix
-        else:
-            # Cache miss or env changed - recalculate
-            if cached_matrix is not None:
-                print(f"🔄 Environment changed (hash mismatch), recalculating distance matrix...", flush=True)
-                clear_matrix_cache()
-            else:
-                print("⏳ Calculating SAM-aware distance matrix (no cache available)...", flush=True)
-            dist_data = calculate_sam_aware_matrix(env)
-            _cached_env_hash = current_hash  # Update hash after calculation
-    else:
-        # Use simple Euclidean distances
-        dist_data = _build_distance_matrix(airports, targets)
+    # Always clear and recalculate to ensure fresh exclusion detection
+    sam_count = len(sams) if sams else 0
+    print(f"🎯 Calculating fresh distance matrix ({sam_count} SAMs)...", flush=True)
+    clear_matrix_cache()
+    dist_data = calculate_sam_aware_matrix(env)
+    _cached_env_hash = current_hash
 
     # Always set distance matrices for allocator and optimizer
     # Even Euclidean distances are needed for fuel budget calculations
     set_allocator_matrix(dist_data)
     set_optimizer_matrix(dist_data)
+
+    # DEBUG: Log excluded targets from distance matrix
+    excluded_targets = set(dist_data.get("excluded_targets", []))
+    if excluded_targets:
+        print(f"🚫 [DEBUG] EXCLUDED TARGETS from distance matrix: {sorted(excluded_targets)}", flush=True)
+    else:
+        print(f"🔍 [DEBUG] No excluded targets from distance matrix", flush=True)
 
     # Step 2: Allocate targets to drones
     allocations = allocate_targets(
@@ -706,10 +715,16 @@ def solve_mission_with_allocation(
             continue
 
         # Filter targets to only those assigned to this drone
+        # CRITICAL: Also filter out excluded targets (inside SAM polygons)
         candidate_targets = [
             t for t in targets
-            if str(t["id"]) in assigned_target_ids
+            if str(t["id"]) in assigned_target_ids and str(t["id"]) not in excluded_targets
         ]
+
+        # DEBUG: Check if any excluded targets were in the assignment
+        excluded_in_assignment = assigned_target_ids & excluded_targets
+        if excluded_in_assignment:
+            print(f"   🚫 [DEBUG] D{did}: Filtering out EXCLUDED targets from assignment: {sorted(excluded_in_assignment)}", flush=True)
 
         # CRITICAL: Limit targets to prevent exponential solver blowup
         # Orienteering solver has O(n!) complexity - cap at reasonable max
@@ -764,7 +779,7 @@ def solve_mission_with_allocation(
             "matrix": filtered_matrix,
             "labels": filtered_ids,  # Use the filtered list, not desired_ids
             "waypoints": [wp for wp in dist_data.get("waypoints", []) if wp["id"] in filtered_ids],
-            "excluded_targets": [],
+            "excluded_targets": list(excluded_targets) if excluded_targets else [],  # Propagate excluded targets
         }
 
         # Count actual airports and targets in filtered list
@@ -843,12 +858,36 @@ def solve_mission_with_allocation(
         print(f"   route_ids = {route_ids}", flush=True)
         print(f"   total_points = {total_points}, distance = {travel_distance:.2f}", flush=True)
 
+        # Validate: check if route ends at expected endpoint
+        if route_ids:
+            actual_end = route_ids[-1]
+            expected_end = end_id if end_id else start_id  # flexible endpoint defaults to start
+            if actual_end != expected_end:
+                print(f"   ⚠️ ENDPOINT MISMATCH: Route ends at '{actual_end}' but expected '{expected_end}'", flush=True)
+            else:
+                print(f"   ✅ Route correctly ends at '{actual_end}'", flush=True)
+
         seq = ",".join(route_ids) if route_ids else ""
 
         # Generate SAM-avoiding trajectory using ISRTrajectoryPlanner
         trajectory_planner = ISRTrajectoryPlanner(sams)
         waypoint_positions = {wp["id"]: [wp["x"], wp["y"]] for wp in dist_data.get("waypoints", [])}
         trajectory = trajectory_planner.generate_trajectory(route_ids, waypoint_positions, drone_id=did)
+
+        # DEBUG: Log trajectory endpoints vs expected airport position
+        if trajectory and len(trajectory) >= 2:
+            traj_start = trajectory[0]
+            traj_end = trajectory[-1]
+            # Find expected airport position
+            if route_ids:
+                end_id_in_route = route_ids[-1]
+                expected_pos = waypoint_positions.get(end_id_in_route)
+                if expected_pos:
+                    end_diff = ((traj_end[0] - expected_pos[0])**2 + (traj_end[1] - expected_pos[1])**2)**0.5
+                    if end_diff > 1.0:  # More than 1 unit off
+                        print(f"   ⚠️ TRAJECTORY ENDPOINT MISMATCH: traj ends at ({traj_end[0]:.1f},{traj_end[1]:.1f}) but {end_id_in_route} is at ({expected_pos[0]:.1f},{expected_pos[1]:.1f}), diff={end_diff:.1f}", flush=True)
+                    else:
+                        print(f"   ✅ Trajectory correctly ends near {end_id_in_route}", flush=True)
 
         sequences[did] = seq
         routes_detail[did] = {
