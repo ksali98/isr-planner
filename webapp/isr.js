@@ -2980,7 +2980,7 @@ function drawEnvironment() {
   // Draw cut markers
   // For segmented import: use state.pendingCutPositions ONLY (set by Accept)
   // For fresh segmentation: use missionReplay cutPositions + pendingCutPositions
-  console.log(`[drawEnv] VERSION: 2024-12-30-targetfix-v2`);
+  console.log(`[drawEnv] VERSION: 2024-12-30-targetfix-v3`);
   const currentSegIdx = missionReplay.getCurrentSegmentIndex();
 
   if (segmentedImport.isActive()) {
@@ -6046,22 +6046,21 @@ function startAnimation(droneIds) {
         const cumulativeDistances = droneState.cumulativeDistances || [];
         const currentDistance = droneState.distanceTraveled;
 
-        // Get target IDs that were added in THIS segment switch (newSegment's targets)
-        const newSegmentTargetIds = new Set();
-        if (newSegment && newSegment.env && newSegment.env.targets) {
-          newSegment.env.targets.forEach(t => newSegmentTargetIds.add(t.id));
-        }
-
-        route.forEach((wp) => {
+        route.forEach((wp, wpIdx) => {
           if (!String(wp).startsWith("T")) return;
           if (state.visitedTargets.includes(wp)) return;
 
-          // SKIP targets that were just added in this segment switch
-          // They should only be marked when the drone actually reaches them
-          if (newSegmentTargetIds.has(wp)) {
-            console.log(`⏭️ SEGMENT-SWITCH: D${did} skipping ${wp} (newly added in segment ${newSegment.index})`);
-            return;
+          // Sequential order check: only mark if all previous targets visited
+          // This prevents newly added targets from being marked prematurely
+          let canMark = true;
+          for (let i = 0; i < wpIdx; i++) {
+            const prevWp = route[i];
+            if (String(prevWp).startsWith("T") && !state.visitedTargets.includes(prevWp)) {
+              canMark = false;
+              break;
+            }
           }
+          if (!canMark) return;
 
           const target = state.env.targets?.find(t => t.id === wp);
           if (!target) return;
