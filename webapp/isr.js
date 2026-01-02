@@ -1814,6 +1814,69 @@ function acceptSolutionWithManager() {
     // All segments complete - ready to animate
     console.log("[ACCEPT] All segments complete - building final combined trajectory");
 
+    // CRITICAL FIX: Before building combined routes, we need to extract just the final
+    // segment's portion from state.routes (which has the full merged trajectory).
+    // Otherwise buildCombinedRoutesFromSegments() will concatenate the FULL trajectory
+    // from segment 3 onto segments 0-2, causing phantom overlay trajectories.
+
+    // Build previous frozen trajectory from segments 0 to currentSegIdx-1
+    const prevFrozenTraj = {};
+    for (let i = 0; i < currentSegIdx; i++) {
+      const seg = missionReplay.getSegment(i);
+      if (seg && seg.solution && seg.solution.routes) {
+        Object.entries(seg.solution.routes).forEach(([did, routeData]) => {
+          const traj = routeData.trajectory || [];
+          if (traj.length === 0) return;
+
+          if (!prevFrozenTraj[did]) {
+            prevFrozenTraj[did] = [...traj];
+          } else {
+            // Concatenate, skipping duplicate junction point
+            const existing = prevFrozenTraj[did];
+            const lastPoint = existing[existing.length - 1];
+            const firstPoint = traj[0];
+            const isDuplicate = Math.abs(lastPoint[0] - firstPoint[0]) < 0.001 &&
+                               Math.abs(lastPoint[1] - firstPoint[1]) < 0.001;
+            if (isDuplicate) {
+              prevFrozenTraj[did] = existing.concat(traj.slice(1));
+            } else {
+              prevFrozenTraj[did] = existing.concat(traj);
+            }
+          }
+        });
+      }
+    }
+
+    // Now update the FINAL segment (currentSegIdx) with just its portion
+    const finalSeg = missionReplay.getSegment(currentSegIdx);
+    if (finalSeg && finalSeg.solution && finalSeg.solution.routes) {
+      const segmentSolution = {
+        routes: {},
+        sequences: finalSeg.solution.sequences || {},
+      };
+
+      Object.entries(finalSeg.solution.routes).forEach(([did, routeData]) => {
+        // state.routes has the full merged trajectory
+        const fullTraj = state.routes[did]?.trajectory || routeData.trajectory || [];
+        const prevTraj = prevFrozenTraj[did] || [];
+
+        // This segment's trajectory = full - previous
+        const segmentTraj = fullTraj.slice(prevTraj.length);
+
+        segmentSolution.routes[did] = {
+          ...routeData,
+          trajectory: segmentTraj,
+        };
+
+        console.log(`[ACCEPT] Final segment ${currentSegIdx} D${did}: full=${fullTraj.length}pts, prev=${prevTraj.length}pts, thisSegment=${segmentTraj.length}pts`);
+      });
+
+      missionReplay.replaceSegment(currentSegIdx, {
+        ...finalSeg,
+        solution: segmentSolution,
+      });
+    }
+
     const combinedRoutes = buildCombinedRoutesFromSegments();
     state.routes = combinedRoutes;
     Object.keys(combinedRoutes).forEach(did => {
@@ -5405,10 +5468,18 @@ function buildCheckpointEnv() {
         appendDebugLine(`   Drone ${did}: start from checkpoint [${seg.splitPoint[0].toFixed(2)}, ${seg.splitPoint[1].toFixed(2)}]`);
       });
     } else if (segIdx > 0) {
+      // CRITICAL: For segment > 0, we must use synthetic starts from getEnvForSolver()
+      // The solverEnv.drone_configs already has start_airport set to D{did}_START
+      // We need to copy that to droneConfigs (which was based on state.droneConfigs)
       const cutPos = segmentedImport.getCutPositionForSegment(segIdx);
       if (cutPos) {
         Object.entries(cutPos).forEach(([did, pos]) => {
-          appendDebugLine(`   Drone ${did}: start from segment cut [${pos[0].toFixed(2)}, ${pos[1].toFixed(2)}]`);
+          const nodeId = `D${did}_START`;
+          // Update droneConfigs to use synthetic start (fixes the bug!)
+          if (droneConfigs[did]) {
+            droneConfigs[did].start_airport = nodeId;
+          }
+          appendDebugLine(`   Drone ${did}: start from segment cut [${pos[0].toFixed(2)}, ${pos[1].toFixed(2)}] → start_airport=${nodeId}`);
         });
       }
     }

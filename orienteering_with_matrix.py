@@ -143,6 +143,20 @@ def solve_orienteering_with_matrix(env, start_id=None, mode=None, fuel_cap=None,
     targets = env["targets"]
     prio = {t["id"]: int(t.get("priority", 1)) for t in targets}
 
+    # =========================================================================
+    # DEBUG: Dump raw inputs to diagnose D1_START / synthetic label issues
+    # =========================================================================
+    print("\n" + "="*70)
+    print("🔬 RAW SOLVER INPUTS (for debugging)")
+    print("="*70)
+    print(f"  matrix_labels ({len(labels)} items): {labels}")
+    print(f"  airports ({len(airports)} items): {[a.get('id', '?') for a in airports]}")
+    print(f"  targets ({len(targets)} items): {[t.get('id', '?') for t in targets]}")
+    print(f"  start_id param: {start_id}")
+    print(f"  end_id param: {end_id}")
+    print(f"  mode param: {mode}")
+    print("="*70 + "\n")
+
     # Defaults from JSON if not provided
     if start_id is None:
         start_id = env.get("start_airport")
@@ -200,12 +214,30 @@ def solve_orienteering_with_matrix(env, start_id=None, mode=None, fuel_cap=None,
     airport_idxs = [i for i, lab in enumerate(labels) if lab in airport_ids]
     cand_target_idxs = [i for i, lab in enumerate(labels) if lab in target_ids and i != start_idx]
 
-    # Safety check: warn if matrix contains unknown labels (synthetic nodes)
+    # =========================================================================
+    # DEBUG: Diagnose D1_START / synthetic label misclassification
+    # =========================================================================
+
+    # Labels that look like airports but are NOT in env["airports"]
+    suspicious_airport_like = [lab for lab in labels if lab.startswith("A") or lab.endswith("_START")]
+    missing_airport_like = [lab for lab in suspicious_airport_like if lab not in airport_ids]
+
+    print("🔍 AIRPORT DEBUG")
+    print("  airport_ids:", sorted(list(airport_ids))[:50], ("..." if len(airport_ids) > 50 else ""))
+    print("  labels airports (by is_airport):", [labels[i] for i in airport_idxs])
+    print("  suspicious airport-like labels:", suspicious_airport_like)
+    print("  airport-like labels missing from env['airports']:", missing_airport_like)
+    print(f"  start_id={start_id}, is_airport(start_id)={is_airport(start_id, airports)}")
+
+    # STRICT GUARD: Reject unknown labels (neither airport nor target)
+    # This catches bugs where synthetic starts aren't properly added to airports list
     unknown_labels = [lab for lab in labels if lab not in airport_ids and lab not in target_ids]
     if unknown_labels:
-        print(f"⚠️ matrix_labels contains non-airport/non-target nodes (synthetic/cut-points): {unknown_labels[:10]}")
-        if len(unknown_labels) > 10:
-            print(f"   ... and {len(unknown_labels) - 10} more")
+        raise ValueError(
+            f"matrix_labels contains unknown nodes (neither airport nor target): {unknown_labels}. "
+            f"Fix env['airports'] (include synthetic starts like D1_START) or env['targets']. "
+            f"Current airports: {sorted(airport_ids)}, targets: {sorted(target_ids)}"
+        )
 
     # =========================================================================
     # Endpoint candidates for best_end: airports only, optionally filtered

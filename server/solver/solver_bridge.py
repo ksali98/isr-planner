@@ -350,9 +350,26 @@ def solve_mission(
         # otherwise fall back to the first airport.
         airport_by_id = {a["id"]: a for a in airports}
         default_start = f"A{did_int}"
-        start_id = cfg.get("start_airport") or (
-            default_start if default_start in airport_by_id else airports[0]["id"]
-        )
+
+        # DEBUG: Check what start_airport is in the config
+        cfg_start = cfg.get("start_airport")
+        print(f"🔍 D{did} DEBUG: cfg.start_airport='{cfg_start}', airport_by_id keys={list(airport_by_id.keys())}", flush=True)
+
+        # Check if cfg_start is a synthetic start (e.g., D1_START for checkpoint replanning)
+        # Synthetic starts should be used directly, not fall back to real airports
+        is_synthetic_start = cfg_start and cfg_start.endswith("_START") and cfg_start not in airport_by_id
+
+        if is_synthetic_start:
+            # Use the synthetic start directly - it's in matrix_labels but not airports
+            start_id = cfg_start
+            print(f"🔍 D{did} DEBUG: Using SYNTHETIC start '{start_id}' for checkpoint replanning", flush=True)
+        else:
+            start_id = cfg_start or (
+                default_start if default_start in airport_by_id else airports[0]["id"]
+            )
+
+        # DEBUG: Final start_id decision
+        print(f"🔍 D{did} DEBUG: final start_id='{start_id}' (cfg_start was {'set' if cfg_start else 'NOT set'}, synthetic={is_synthetic_start})", flush=True)
 
         # Handle flexible endpoint: "-" means solver chooses optimal endpoint
         raw_end_id = cfg.get("end_airport") or start_id
@@ -460,17 +477,35 @@ def solve_mission(
         actual_target_count = len(filtered_ids) - actual_airport_count
         print(f"   📊 Filtered matrix: {len(filtered_ids)} nodes ({actual_airport_count} airports + {actual_target_count} targets)", flush=True)
 
-        # CRITICAL: Filter out synthetic starts from airports list
-        # Synthetic starts should ONLY exist in the distance matrix, not in the airports list
-        # This prevents the orienteering solver from considering them as valid endpoints
-        real_airports = [a for a in airports if not a.get("is_synthetic", False)]
-        print(f"   🔍 DEBUG: Filtered airports: {len(airports)} total → {len(real_airports)} real airports", flush=True)
-        print(f"   🔍 DEBUG: Real airports: {[a['id'] for a in real_airports]}", flush=True)
-        print(f"   🔍 DEBUG: Synthetic starts filtered out: {[a['id'] for a in airports if a.get('is_synthetic', False)]}", flush=True)
+        # Build airports list for solver - start with real airports
+        solver_airports = list(airports)  # Copy to avoid mutating original
+        real_airport_ids = [a["id"] for a in airports]
+
+        # CRITICAL FIX: Add ALL synthetic starts that are in the filtered matrix
+        # This ensures every node in matrix_labels is classified as either airport or target
+        # Without this, the solver guard will reject unknown labels like D1_START, D2_START
+        waypoint_positions_for_synthetic = {wp["id"]: wp for wp in dist_data.get("waypoints", [])}
+        for fid in filtered_ids:
+            if fid.endswith("_START") and fid not in real_airport_ids:
+                # This is a synthetic start - add it as an airport
+                if fid in waypoint_positions_for_synthetic:
+                    wp = waypoint_positions_for_synthetic[fid]
+                    synthetic_airport = {
+                        "id": fid,
+                        "x": wp["x"],
+                        "y": wp["y"],
+                        "is_synthetic": True,  # Mark so we can filter for endpoints
+                    }
+                    solver_airports.append(synthetic_airport)
+                    print(f"   ✅ Added synthetic start '{fid}' to airports: ({wp['x']:.1f}, {wp['y']:.1f})", flush=True)
+                else:
+                    print(f"   ⚠️ WARNING: Synthetic start '{fid}' not found in waypoints!", flush=True)
+
+        print(f"   🔍 DEBUG: solver_airports: {[a['id'] for a in solver_airports]}", flush=True)
 
         # Build a per-drone environment using your existing interface
         env_for_solver = _solver.build_environment_for_solver(
-            airports=real_airports,  # ← CRITICAL FIX: Use real_airports instead of airports
+            airports=solver_airports,  # ← Include synthetic starts as airports
             targets=candidate_targets,
             sams=sams,
             distance_matrix_data=filtered_dist_data,
@@ -664,9 +699,20 @@ def solve_mission_with_allocation(
         # Get start/end airports
         airport_by_id = {a["id"]: a for a in airports}
         default_start = f"A{did_int}"
-        start_id = cfg.get("start_airport") or (
-            default_start if default_start in airport_by_id else airports[0]["id"]
-        )
+        cfg_start = cfg.get("start_airport")
+
+        # Check if cfg_start is a synthetic start (e.g., D1_START for checkpoint replanning)
+        # Synthetic starts should be used directly, not fall back to real airports
+        is_synthetic_start = cfg_start and cfg_start.endswith("_START") and cfg_start not in airport_by_id
+
+        if is_synthetic_start:
+            # Use the synthetic start directly - it's in matrix_labels but not airports
+            start_id = cfg_start
+            print(f"🔍 [solve_mission_with_allocation] D{did}: Using SYNTHETIC start '{start_id}'", flush=True)
+        else:
+            start_id = cfg_start or (
+                default_start if default_start in airport_by_id else airports[0]["id"]
+            )
 
         # Handle flexible endpoint: "-" means solver chooses optimal endpoint
         raw_end_id = cfg.get("end_airport") or start_id
@@ -676,7 +722,7 @@ def solve_mission_with_allocation(
 
         # Debug logging
         print(f"🔍 [Run Planner] D{did} config: {cfg}", flush=True)
-        print(f"🔍 [Run Planner] D{did} start_id={start_id}, raw_end_id={raw_end_id}, flexible={flexible_endpoint}, end_id={end_id}", flush=True)
+        print(f"🔍 [Run Planner] D{did} start_id={start_id}, raw_end_id={raw_end_id}, flexible={flexible_endpoint}, end_id={end_id}, is_synthetic={is_synthetic_start}", flush=True)
 
         # Get this drone's assigned targets
         assigned_target_ids = set(allocations.get(did, []))
@@ -787,17 +833,35 @@ def solve_mission_with_allocation(
         actual_target_count = len(filtered_ids) - actual_airport_count
         print(f"   📊 Filtered matrix: {len(filtered_ids)} nodes ({actual_airport_count} airports + {actual_target_count} targets)", flush=True)
 
-        # CRITICAL: Filter out synthetic starts from airports list
-        # Synthetic starts should ONLY exist in the distance matrix, not in the airports list
-        # This prevents the orienteering solver from considering them as valid endpoints
-        real_airports = [a for a in airports if not a.get("is_synthetic", False)]
-        print(f"   🔍 DEBUG: Filtered airports: {len(airports)} total → {len(real_airports)} real airports", flush=True)
-        print(f"   🔍 DEBUG: Real airports: {[a['id'] for a in real_airports]}", flush=True)
-        print(f"   🔍 DEBUG: Synthetic starts filtered out: {[a['id'] for a in airports if a.get('is_synthetic', False)]}", flush=True)
+        # Build airports list for solver - start with real airports
+        solver_airports = list(airports)  # Copy to avoid mutating original
+        real_airport_ids = [a["id"] for a in airports]
 
-        # Build environment for solver with FILTERED matrix and REAL airports only
+        # CRITICAL FIX: Add ALL synthetic starts that are in the filtered matrix
+        # This ensures every node in matrix_labels is classified as either airport or target
+        # Without this, the solver guard will reject unknown labels like D1_START, D2_START
+        waypoint_positions_for_synthetic = {wp["id"]: wp for wp in dist_data.get("waypoints", [])}
+        for fid in filtered_ids:
+            if fid.endswith("_START") and fid not in real_airport_ids:
+                # This is a synthetic start - add it as an airport
+                if fid in waypoint_positions_for_synthetic:
+                    wp = waypoint_positions_for_synthetic[fid]
+                    synthetic_airport = {
+                        "id": fid,
+                        "x": wp["x"],
+                        "y": wp["y"],
+                        "is_synthetic": True,  # Mark so we can filter for endpoints
+                    }
+                    solver_airports.append(synthetic_airport)
+                    print(f"   ✅ Added synthetic start '{fid}' to airports: ({wp['x']:.1f}, {wp['y']:.1f})", flush=True)
+                else:
+                    print(f"   ⚠️ WARNING: Synthetic start '{fid}' not found in waypoints!", flush=True)
+
+        print(f"   🔍 DEBUG: solver_airports: {[a['id'] for a in solver_airports]}", flush=True)
+
+        # Build environment for solver with FILTERED matrix
         env_for_solver = _solver.build_environment_for_solver(
-            airports=real_airports,  # ← CRITICAL FIX: Use real_airports instead of airports
+            airports=solver_airports,  # ← Include synthetic starts as airports
             targets=candidate_targets,
             sams=sams,
             distance_matrix_data=filtered_dist_data,
@@ -821,9 +885,9 @@ def solve_mission_with_allocation(
             # CRITICAL: Filter out synthetic starts from valid end airports
             # Synthetic starts (e.g., D1_START) are used for checkpoint replanning
             # but should NOT be valid endpoints - only real airports should be endpoints
-            real_airports = [a for a in airports if not a.get("is_synthetic", False)]
-            if real_airports:
-                env_for_solver["valid_end_airports"] = [a["id"] for a in real_airports]
+            # Use real_airport_ids we defined earlier (before adding synthetic starts)
+            if real_airport_ids:
+                env_for_solver["valid_end_airports"] = real_airport_ids
                 print(f"   ✈️ Valid end airports (excluding synthetic): {env_for_solver['valid_end_airports']}", flush=True)
 
             # Don't set end_airport - let solver choose from valid_end_airports

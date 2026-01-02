@@ -113,6 +113,25 @@ class OrienteeringSolverInterface:
             "end_airport": end_airport_id,
         }
 
+        # DEBUG: Print what we're passing to the solver
+        print("\n" + "="*70, flush=True)
+        print("🔍 ORIENTEERING_INTERFACE.solve() - Data passed to solver:", flush=True)
+        print("="*70, flush=True)
+        print(f"  matrix_labels ({len(labels)} items): {labels}", flush=True)
+        print(f"  airports ({len(airports)} items): {[a.get('id', '?') for a in airports]}", flush=True)
+        print(f"  targets ({len(targets)} items): {[t.get('id', '?') for t in targets]}", flush=True)
+        print(f"  start_airport_id: {start_airport_id}", flush=True)
+        print(f"  end_airport_id: {end_airport_id}", flush=True)
+        print(f"  mode: {mode}", flush=True)
+        print(f"  fuel_budget: {fuel_budget}", flush=True)
+
+        # Check if start_airport_id is in matrix_labels
+        if start_airport_id not in labels:
+            print(f"  ❌ ERROR: start_airport_id '{start_airport_id}' NOT IN matrix_labels!", flush=True)
+        else:
+            print(f"  ✅ start_airport_id '{start_airport_id}' found in matrix_labels at index {labels.index(start_airport_id)}", flush=True)
+        print("="*70 + "\n", flush=True)
+
         # Call the real Held–Karp solver
         solution = self.solver(
             env=solver_env,
