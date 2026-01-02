@@ -187,24 +187,46 @@ def solve_orienteering_with_matrix(env, start_id=None, mode=None, fuel_cap=None,
         raise ValueError(f"Start airport '{start_id}' not found in matrix_labels.")
     start_idx = labels.index(start_id)
 
-    airport_idxs = [i for i, lab in enumerate(labels) if is_airport(lab, airports)]
-    cand_target_idxs = [i for i, lab in enumerate(labels) if i != start_idx and not is_airport(lab, airports)]
+    # =========================================================================
+    # FIX: Use ID-based classification instead of "not airport => target"
+    # This ensures synthetic nodes (D1_START, CUT_1, etc.) are never targets
+    # =========================================================================
 
-    # For best_end mode, filter airport_idxs to only include valid endpoints
-    # This excludes synthetic starts (e.g., D1_START) from being chosen as endpoints
+    # Build explicit ID sets for airports and targets
+    airport_ids = {a["id"] for a in airports if "id" in a}
+    target_ids = {t["id"] for t in targets if "id" in t}
+
+    # Build indices using explicit ID membership (not negation)
+    airport_idxs = [i for i, lab in enumerate(labels) if lab in airport_ids]
+    cand_target_idxs = [i for i, lab in enumerate(labels) if lab in target_ids and i != start_idx]
+
+    # Safety check: warn if matrix contains unknown labels (synthetic nodes)
+    unknown_labels = [lab for lab in labels if lab not in airport_ids and lab not in target_ids]
+    if unknown_labels:
+        print(f"⚠️ matrix_labels contains non-airport/non-target nodes (synthetic/cut-points): {unknown_labels[:10]}")
+        if len(unknown_labels) > 10:
+            print(f"   ... and {len(unknown_labels) - 10} more")
+
+    # =========================================================================
+    # Endpoint candidates for best_end: airports only, optionally filtered
+    # Note: We do NOT exclude start_idx here - returning to start can be valid!
+    # If start_id is a synthetic cut node, it won't be in airport_ids anyway.
+    # =========================================================================
+    best_end_airport_idxs = airport_idxs  # Default: all airports
+
     valid_end_airport_ids = env.get("valid_end_airports", None)
     if mode == "best_end" and valid_end_airport_ids:
+        # Filter to only valid endpoints, but ensure they're real airports
+        valid_end_airport_ids = [aid for aid in valid_end_airport_ids if aid in airport_ids]
         valid_end_idxs = [i for i in airport_idxs if labels[i] in valid_end_airport_ids]
         print(f"🔧 Filtering endpoints: {len(airport_idxs)} total airports → {len(valid_end_idxs)} valid endpoints")
         print(f"🔧 Valid endpoint airports: {[labels[i] for i in valid_end_idxs]}")
-        # Use filtered list for best_end mode
+        # Use filtered list for best_end mode, fallback to all airports if empty
         best_end_airport_idxs = valid_end_idxs if valid_end_idxs else airport_idxs
-    else:
-        best_end_airport_idxs = airport_idxs
 
-    print(f"🔧 Available airports: {[labels[i] for i in airport_idxs]}")
-    print(f"🔧 Start airport index: {start_idx} ({start_id})")
-    print(f"🔧 Available targets: {[labels[i] for i in cand_target_idxs]}")
+    print(f"🔧 Available airports (by ID): {[labels[i] for i in airport_idxs]}")
+    print(f"🔧 Start index: {start_idx} ({start_id})")
+    print(f"🔧 Target candidates (by ID, excludes start): {[labels[i] for i in cand_target_idxs]}")
 
     # For mode=end, validate the provided/JSON end_id
     end_idx = None
