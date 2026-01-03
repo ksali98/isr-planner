@@ -931,7 +931,12 @@ function getUiPermissions() {
   let segmentedComplete = true;
   if (useNewManager) {
     // New SegmentedImportManager: check if all segments are complete
-    segmentedComplete = segmentedImport.isComplete();
+    // OR if we have routes to animate (e.g., after Reset which sets index back to 0)
+    const hasRoutesToAnimate = Object.keys(state.routes || {}).some(did => {
+      const r = state.routes[did];
+      return r && Array.isArray(r.trajectory) && r.trajectory.length >= 2;
+    });
+    segmentedComplete = segmentedImport.isComplete() || hasRoutesToAnimate;
   } else if (missionState.segmentedMission) {
     // Old segmentedMission workflow
     const segCount = missionState.segmentedMission.segments.length;
