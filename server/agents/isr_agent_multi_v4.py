@@ -86,6 +86,9 @@ except ImportError:
     get_active_policy_rules = None
     print("⚠️ [v4] mission_ledger not available, policy rules disabled")
 
+# Import Coordinator v4 for deterministic pre-pass
+from .coordinator_v4 import run_coordinator, CoordinatorDecision
+
 # Load environment variables
 load_dotenv()
 
@@ -117,6 +120,13 @@ class MissionState(TypedDict):
     user_request: str
     request_type: str  # "question", "optimize", "command"
     commands: Optional[List[Dict[str, Any]]]  # Explicit commands extracted
+
+    # Coordinator v4 fields (injected by pre-pass)
+    intent: Optional[str]  # plan|replan|explain|what_if|debug|unknown
+    policy: Optional[Dict[str, Any]]  # allocation_strategy, solver_mode, etc.
+    guardrails: Optional[Dict[str, Any]]  # validation results
+    drone_contracts: Optional[Dict[str, Dict[str, Any]]]  # per-drone start/home/endpoint contracts
+    allocation_strategy: Optional[str]  # efficient|greedy|balanced|geographic|exclusive
 
     # Agent reasoning outputs
     strategy_analysis: Optional[str]  # Strategist's analysis
@@ -597,6 +607,17 @@ def strategist_node(state: MissionState) -> Dict[str, Any]:
 
     set_state(state)
 
+    # Check if Coordinator flagged this as explain_only (skip to responder)
+    policy = state.get("policy") or {}
+    if policy.get("explain_only"):
+        intent = state.get("intent", "explain")
+        print(f"🎯 [STRATEGIST] Coordinator set explain_only=True (intent={intent}), routing to responder", file=sys.stderr)
+        return {
+            "messages": [AIMessage(content=f"[STRATEGIST] Explain/debug mode - routing to responder")],
+            "strategy_analysis": f"Coordinator classified intent as '{intent}'. Skipping allocation/routing.",
+            "request_type": "question",  # Forces routing to responder
+        }
+
     user_request = state.get("user_request", "")
     print(f"📝 [STRATEGIST] User request: '{user_request}'", file=sys.stderr)
     sys.stderr.flush()
@@ -742,6 +763,50 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
 
     set_state(state)
 
+    # Read Coordinator policy
+    policy = state.get("policy") or {}
+    force_algo = bool(policy.get("force_algorithmic_allocation", False))
+    policy_strategy = policy.get("allocation_strategy", "efficient")
+
+    print(f"🎯 [ALLOCATOR] Policy: force_algo={force_algo}, strategy={policy_strategy}", file=sys.stderr)
+
+    # If force_algorithmic_allocation is True, skip LLM entirely
+    if force_algo:
+        print(f"🔧 [ALLOCATOR] Force algorithmic allocation enabled - skipping LLM", file=sys.stderr)
+        env = state.get("environment", {})
+        configs = state.get("drone_configs", {})
+        dist_matrix = state.get("distance_matrix")
+
+        # Build matrix_data for allocator
+        matrix_data = None
+        if dist_matrix:
+            labels = list(dist_matrix.keys())
+            matrix = [[dist_matrix[f].get(t, 1000) for t in labels] for f in labels]
+            matrix_data = {"labels": labels, "matrix": matrix}
+            set_allocator_matrix(matrix_data)
+
+        # Call algorithmic allocation with policy-specified strategy
+        allocation = _allocate_targets_impl(env, configs, policy_strategy, matrix_data)
+        strategy_used = policy_strategy
+        excluded_targets: List[Dict[str, Any]] = []
+
+        reasoning = (
+            f"[Algorithmic allocation - force_algorithmic_allocation=True]\n"
+            f"Strategy: {strategy_used}\n"
+            f"Allocation: {allocation}"
+        )
+
+        print(f"📋 [ALLOCATOR] Algorithmic allocation complete: {allocation}", file=sys.stderr)
+
+        return {
+            "messages": [AIMessage(content=f"[ALLOCATOR]\n{reasoning}")],
+            "allocation_reasoning": reasoning,
+            "allocation": allocation,
+            "allocation_strategy": strategy_used,
+            "excluded_by_allocator": excluded_targets,
+        }
+
+    # Otherwise, use LLM-based allocation
     llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
 
     mission_context = build_mission_context(state)
@@ -796,8 +861,10 @@ Return your response as a single valid JSON object (no markdown fences).
     print(f"📋 [ALLOCATOR] Reasoning complete (LLM success: {llm_success})", file=sys.stderr)
     sys.stderr.flush()
 
-    # Parse allocation from JSON response
-    allocation, strategy_used, excluded_targets = parse_allocation_from_json(reasoning, state)
+    # Parse allocation from JSON response (uses policy_strategy in fallback)
+    allocation, strategy_used, excluded_targets = parse_allocation_from_json(
+        reasoning, state, fallback_strategy=policy_strategy
+    )
 
     print(f"📋 [ALLOCATOR] Strategy used: {strategy_used}", file=sys.stderr)
     if excluded_targets:
@@ -813,10 +880,17 @@ Return your response as a single valid JSON object (no markdown fences).
 
 
 def parse_allocation_from_json(
-    reasoning: str, state: MissionState
+    reasoning: str,
+    state: MissionState,
+    fallback_strategy: str = "efficient",
 ) -> Tuple[Dict[str, List[str]], str, List[Dict[str, Any]]]:
     """
     Parse allocation from JSON response.
+
+    Args:
+        reasoning: LLM response text
+        state: Current mission state
+        fallback_strategy: Strategy to use if parsing fails (from Coordinator policy)
 
     Returns:
         (allocation, strategy_used, excluded_targets)
@@ -886,8 +960,9 @@ def parse_allocation_from_json(
     print(f"📋 [ALLOCATOR] Total targets allocated: {total_allocated}", file=sys.stderr)
 
     # If parsing failed completely, fall back to algorithmic allocation
+    # Use fallback_strategy from Coordinator (not hardcoded "efficient")
     if all(len(v) == 0 for v in allocation.values()):
-        print("⚠️ [ALLOCATOR] Parsing failed, using fallback allocation", file=sys.stderr)
+        print(f"⚠️ [ALLOCATOR] Parsing failed, using fallback allocation (strategy={fallback_strategy})", file=sys.stderr)
         env = state.get("environment", {})
         dist_matrix = state.get("distance_matrix")
 
@@ -898,8 +973,8 @@ def parse_allocation_from_json(
             matrix_data = {"labels": labels, "matrix": matrix}
             set_allocator_matrix(matrix_data)
 
-        allocation = _allocate_targets_impl(env, configs, "efficient", matrix_data)
-        strategy_used = "efficient"
+        allocation = _allocate_targets_impl(env, configs, fallback_strategy, matrix_data)
+        strategy_used = fallback_strategy
         print(f"📋 [ALLOCATOR] Fallback allocation: {allocation}", file=sys.stderr)
 
     return allocation, strategy_used, excluded_targets
@@ -982,6 +1057,25 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
     allocation = state.get("allocation", {})
     dist_matrix = state.get("distance_matrix", {})
 
+    # Read Coordinator policy for solver_mode override
+    policy = state.get("policy") or {}
+    policy_solver_mode = policy.get("solver_mode")  # May override per-drone mode
+
+    # Read drone contracts from state (set by Coordinator pre-pass)
+    # Fallback to policy.drone_contracts for backwards compatibility
+    drone_contracts = state.get("drone_contracts") or policy.get("drone_contracts", {})
+
+    # Source synthetic starts from environment (authoritative data)
+    # NOT from guardrails (which are for validation outcomes only)
+    synthetic_starts = env.get("synthetic_starts", {}) or {}
+
+    # Build real airport IDs set for defensive home_airport validation
+    real_airport_ids: set[str] = {
+        str(a.get("id", a.get("label")))
+        for a in (env.get("airports") or [])
+        if not a.get("is_synthetic", False)
+    }
+
     routes = {}
     route_analysis_lines = ["ROUTE_ANALYSIS:"]
     feasibility_issues = []
@@ -997,28 +1091,64 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
             continue
 
         fuel_budget = cfg.get("fuelBudget", cfg.get("fuel_budget", 200))
-        home_airport = cfg.get("home_airport", "A1")
-        end_airport = cfg.get("end_airport", home_airport)
 
-        # Check for flexible endpoint ("-" means solver chooses optimal end)
-        flexible_endpoint = (end_airport == "-")
-        if flexible_endpoint:
+        # Get drone contract from Coordinator (handles synthetic starts correctly)
+        contract = drone_contracts.get(str(did), {})
+
+        # start_id: Coordinator contract is authoritative, then cfg.start_id, then home_airport
+        # Avoid cfg.start_airport to prevent older UI mismatch issues
+        start_id = (
+            contract.get("start_id")
+            or cfg.get("start_id")
+            or cfg.get("home_airport")
+            or "A1"
+        )
+
+        is_synthetic_start = contract.get(
+            "is_synthetic_start",
+            start_id.endswith("_START") if start_id else False
+        )
+
+        # home_airport: MUST be a real airport (never synthetic)
+        # Defensive enforcement even if upstream misconfigures
+        home_airport = contract.get("home_airport") or cfg.get("home_airport")
+        if not home_airport or str(home_airport) not in real_airport_ids:
+            home_airport = start_id if start_id in real_airport_ids else next(iter(sorted(real_airport_ids)), "A1")
+
+        # end_airport from config (contract may have None for flexible)
+        cfg_end = cfg.get("end_airport", home_airport)
+        flexible_endpoint = contract.get("flexible_endpoint", cfg_end == "-")
+
+        # Determine solver mode
+        if policy_solver_mode:
+            mode = policy_solver_mode
+        elif flexible_endpoint:
             mode = "best_end"
-        elif end_airport == home_airport:
-            mode = "return"
-        else:
+        elif cfg_end and cfg_end != "-" and cfg_end != start_id:
             mode = "end"
+        else:
+            mode = "return"
 
-        print(f"[v4][ROUTE_OPT] D{did} start={home_airport} end={end_airport} flexible={flexible_endpoint} mode={mode}", flush=True)
+        # For synthetic starts with return mode, we need best_end (can't return to synthetic)
+        if is_synthetic_start and mode == "return":
+            mode = "best_end"
+            print(f"[v4][ROUTE_OPT] D{did}: Synthetic start detected, switching mode to best_end", flush=True)
+
+        end_airport = cfg_end if mode == "end" else None
+
+        print(f"[v4][ROUTE_OPT] D{did} start_id={start_id} home={home_airport} end={end_airport} "
+              f"synthetic={is_synthetic_start} flexible={flexible_endpoint} mode={mode}", flush=True)
 
         if not target_ids:
+            # No targets: for synthetic starts, need to go to nearest real airport
+            effective_end = home_airport if is_synthetic_start else start_id
             routes[did] = {
-                "route": [home_airport, home_airport],
+                "route": [start_id, effective_end] if start_id != effective_end else [start_id],
                 "distance": 0,
                 "total_points": 0,
                 "visited_targets": [],
             }
-            route_analysis_lines.append(f"- D{did}: No targets assigned, stays at {home_airport}")
+            route_analysis_lines.append(f"- D{did}: No targets assigned, goes from {start_id} to {effective_end}")
             continue
 
         # Build solver environment
@@ -1028,25 +1158,36 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                 all_labels = list(dist_matrix.keys())
 
                 # Build requested labels based on mode
-                if flexible_endpoint:
-                    # For best_end mode, include ALL airports so solver can choose optimal end
-                    all_airport_ids = [a["id"] for a in env.get("airports", [])]
-                    requested_labels = all_airport_ids + list(target_ids)
+                # Always include start_id (may be synthetic)
+                if flexible_endpoint or mode == "best_end":
+                    # For best_end mode, include ALL real airports so solver can choose optimal end
+                    # Filter out synthetic airports from endpoint candidates
+                    real_airport_ids = [
+                        a["id"] for a in env.get("airports", [])
+                        if not a.get("is_synthetic", False)
+                    ]
+                    requested_labels = [start_id] + real_airport_ids + list(target_ids)
                 else:
-                    # For fixed end, only include start, end, and targets
-                    requested_labels = [home_airport, end_airport] + list(target_ids)
+                    # For fixed end, include start, end, and targets
+                    requested_labels = [start_id]
+                    if end_airport and end_airport != start_id:
+                        requested_labels.append(end_airport)
+                    requested_labels.extend(target_ids)
 
                 # Keep only labels that actually exist in the distance matrix
                 labels = [lab for lab in requested_labels if lab in all_labels]
+                # Deduplicate while preserving order
+                seen = set()
+                labels = [x for x in labels if not (x in seen or seen.add(x))]
 
-                if not labels or home_airport not in labels:
+                if not labels or start_id not in labels:
                     print(
                         f"⚠️ [ROUTE_OPTIMIZER] No valid labels for D{did} "
-                        f"(home={home_airport}, targets={target_ids})",
+                        f"(start_id={start_id}, targets={target_ids})",
                         file=sys.stderr,
                     )
                     routes[did] = {
-                        "route": [home_airport],
+                        "route": [start_id],
                         "distance": 0.0,
                         "total_points": 0,
                         "visited_targets": [],
@@ -1065,29 +1206,51 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                     if str(t.get("id", t.get("label"))) in target_ids
                 ]
 
-                print(f"[v4][ROUTE_OPT] D{did} home={home_airport} end={end_airport} mode={mode} cfg_end={cfg.get('end_airport')} cfg_keys={list(cfg.keys())}", flush=True)
+                # Build airports list - include synthetic starts as airports
+                solver_airports = list(env.get("airports", []))
+                if is_synthetic_start and start_id not in [a["id"] for a in solver_airports]:
+                    # Add synthetic start as an airport
+                    synth_coords = synthetic_starts.get(start_id, {"x": 0, "y": 0})
+                    solver_airports.append({
+                        "id": start_id,
+                        "x": synth_coords.get("x", 0),
+                        "y": synth_coords.get("y", 0),
+                        "is_synthetic": True,
+                    })
+                    print(f"[v4][ROUTE_OPT] Added synthetic start {start_id} to airports", flush=True)
+
+                print(f"[v4][ROUTE_OPT] D{did} start_id={start_id} end={end_airport} mode={mode} "
+                      f"labels={labels[:5]}{'...' if len(labels) > 5 else ''}", flush=True)
 
                 solver_env = {
-                    "airports": env.get("airports", []),
+                    "airports": solver_airports,
                     "targets": targets,
                     "matrix": matrix,
                     "matrix_labels": labels,
-                    "start_airport": home_airport,
+                    "start_airport": start_id,  # Use start_id (may be synthetic)
                     "mode": mode,
                 }
 
-                # Only set end_airport if not flexible (best_end mode lets solver choose)
-                if not flexible_endpoint:
+                # For best_end mode, set valid_end_airports to real airports only
+                if mode == "best_end":
+                    real_airport_ids = [
+                        a["id"] for a in env.get("airports", [])
+                        if not a.get("is_synthetic", False)
+                    ]
+                    solver_env["valid_end_airports"] = real_airport_ids
+
+                # Only set end_airport if fixed end mode
+                if mode == "end" and end_airport:
                     solver_env["end_airport"] = end_airport
 
                 solution = solver.solve(solver_env, fuel_budget)
 
                 # Extract the actual end airport from solution (solver may have chosen it)
                 actual_end = solution.get("end_airport", end_airport if not flexible_endpoint else home_airport)
-                if flexible_endpoint:
+                if flexible_endpoint or mode == "best_end":
                     print(f"   🎯 [v4] Solver chose endpoint: {actual_end}", flush=True)
 
-                route = solution.get("route", [home_airport])
+                route = solution.get("route", [start_id])
                 distance = solution.get("distance", 0)
                 points = solution.get("total_points", 0)
                 visited = solution.get("visited_targets", [])
@@ -1097,6 +1260,9 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                     "distance": distance,
                     "total_points": points,
                     "visited_targets": visited,
+                    "start_id": start_id,  # Track start for trajectory generation
+                    "end_airport": actual_end,
+                    "is_synthetic_start": is_synthetic_start,
                 }
 
                 status = "FEASIBLE" if distance <= fuel_budget else "OVER BUDGET"
@@ -1112,23 +1278,31 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
 
             except Exception as e:
                 print(f"⚠️ [ROUTE_OPTIMIZER] Error solving D{did}: {e}", file=sys.stderr)
+                # Fallback route uses start_id (may be synthetic)
+                fallback_end = home_airport if is_synthetic_start else start_id
                 routes[did] = {
-                    "route": [home_airport] + target_ids + [home_airport],
+                    "route": [start_id] + list(target_ids) + [fallback_end],
                     "distance": 999,
                     "total_points": 0,
                     "visited_targets": [],
                     "error": str(e),
+                    "start_id": start_id,
+                    "is_synthetic_start": is_synthetic_start,
                 }
         else:
             # Fallback: simple route without optimization
+            # Use start_id (may be synthetic) and go to home_airport
+            fallback_end = home_airport if is_synthetic_start else start_id
             routes[did] = {
-                "route": [home_airport] + target_ids + [home_airport],
+                "route": [start_id] + list(target_ids) + [fallback_end],
                 "distance": 0,
                 "total_points": sum(
                     t.get("priority", 5) for t in env.get("targets", [])
                     if str(t.get("id", t.get("label"))) in target_ids
                 ),
-                "visited_targets": target_ids,
+                "visited_targets": list(target_ids),
+                "start_id": start_id,
+                "is_synthetic_start": is_synthetic_start,
             }
 
     route_analysis = "\n".join(route_analysis_lines)
@@ -1484,6 +1658,15 @@ def run_multi_agent_v4(
     # v4:  enabled, fuelBudget, home_airport, accessible_targets:['A','B',...]
     normalized_configs: Dict[str, Dict[str, Any]] = {}
 
+    # Build set of real airport IDs (exclude synthetic starts like D1_START)
+    real_airport_ids: set[str] = set()
+    for a in env.get("airports", []):
+        if not a.get("is_synthetic", False):
+            aid = a.get("id", a.get("label", ""))
+            if aid:
+                real_airport_ids.add(str(aid))
+    default_real_airport = next(iter(sorted(real_airport_ids)), "A1")
+
     for did, cfg in ui_configs.items():
         if cfg is None:
             continue
@@ -1503,24 +1686,28 @@ def run_multi_agent_v4(
         if fuel_budget is not None:
             nc["fuelBudget"] = fuel_budget
 
-        # Home airport: map from start_airport if not already set
-        home_ap = (
-            cfg.get("homeAirport")
-            or cfg.get("home_airport")
-            or cfg.get("start_airport")
-            or cfg.get("startAirport")
-        )
+        # start_id: may be synthetic (D1_START) for checkpoint replanning
+        cfg_start = cfg.get("start_airport") or cfg.get("startAirport") or ""
+        nc["start_id"] = str(cfg_start) if cfg_start else default_real_airport
 
-        if home_ap:
-            nc["home_airport"] = home_ap
+        # home_airport: MUST be a real airport (never synthetic)
+        # Used for endpoint candidates in best_end mode
+        cfg_home = cfg.get("homeAirport") or cfg.get("home_airport") or ""
+        if cfg_home and cfg_home in real_airport_ids:
+            nc["home_airport"] = str(cfg_home)
+        elif cfg_start and cfg_start in real_airport_ids:
+            nc["home_airport"] = str(cfg_start)
+        else:
+            nc["home_airport"] = default_real_airport
 
-        # End airport: ALWAYS set (fallback to home_airport)
-        end_ap = (
-            cfg.get("end_airport")
-            or cfg.get("endAirport")
-        )
-        # Use explicit end if provided; otherwise default to home airport
-        nc["end_airport"] = end_ap if end_ap else nc.get("home_airport", home_ap)
+        # end_airport: explicit end, "-" for flexible, or None
+        cfg_end = cfg.get("end_airport") or cfg.get("endAirport") or ""
+        if cfg_end == "-":
+            nc["end_airport"] = "-"  # Flexible endpoint
+        elif cfg_end:
+            nc["end_airport"] = str(cfg_end)
+        else:
+            nc["end_airport"] = nc["home_airport"]  # Default to home
 
         # Accessible targets: build list from target_access dict if present
         if "accessible_targets" not in nc and "accessibleTargets" not in nc:
@@ -1623,7 +1810,63 @@ def run_multi_agent_v4(
             dist_matrix = {}
 
     # ------------------------------------------------------------------
-    # 3) Build initial mission state for the v4 workflow
+    # 3) Run Coordinator pre-pass (deterministic policy/guardrail layer)
+    # ------------------------------------------------------------------
+    coordinator_decision: CoordinatorDecision = run_coordinator(
+        user_message=user_message,
+        environment=env,
+        drone_configs=normalized_configs,
+        sam_matrix=sam_matrix,
+        ui_state=None,  # Could be passed from main.py if available
+        preferences=None,  # Could be passed from main.py if available
+        debug=True,
+    )
+
+    print(f"🎯 [v4] Coordinator decision: intent={coordinator_decision.intent}, "
+          f"confidence={coordinator_decision.confidence:.2f}", file=sys.stderr)
+
+    # If Coordinator found validation errors, return early
+    if not coordinator_decision.is_valid:
+        print(f"❌ [v4] Coordinator validation failed: {coordinator_decision.errors}", file=sys.stderr)
+        return {
+            "response": f"Validation error: {'; '.join(coordinator_decision.errors)}",
+            "routes": {},
+            "total_points": 0,
+            "total_fuel": 0.0,
+            "trajectories": {},
+            "allocation": {},
+            "allocation_strategy": "unknown",
+            "suggestions": [],
+            "strategy_analysis": None,
+            "allocation_reasoning": None,
+            "route_analysis": None,
+            "critic_review": None,
+            "mission_metrics": {},
+            "solver_type": "unknown",
+            "solver_runtime_ms": 0,
+            "valid": False,
+            "trace": coordinator_decision.trace,
+            "optimizer_steps": [],
+        }
+
+    # Extract policy decisions and drone contracts
+    coordinator_policy = coordinator_decision.policy
+    coordinator_guardrails = coordinator_decision.guardrails
+    coordinator_drone_contracts = coordinator_decision.drone_contracts
+    coordinator_synthetic_starts = coordinator_decision.synthetic_starts
+
+    # ------------------------------------------------------------------
+    # 3b) Populate env.synthetic_starts from decision (authoritative data)
+    #     Coordinator.synthetic_starts is the single source of truth for
+    #     synthetic start coordinates - NOT guardrails (which are for
+    #     validation outcomes only)
+    # ------------------------------------------------------------------
+    if coordinator_synthetic_starts:
+        env["synthetic_starts"] = coordinator_synthetic_starts
+        print(f"📍 [v4] Populated env.synthetic_starts: {list(coordinator_synthetic_starts.keys())}", file=sys.stderr)
+
+    # ------------------------------------------------------------------
+    # 4) Build initial mission state for the v4 workflow
     # ------------------------------------------------------------------
     initial_state: MissionState = {
         "messages": [HumanMessage(content=user_message)],
@@ -1634,6 +1877,13 @@ def run_multi_agent_v4(
         "user_request": user_message,
         "request_type": "optimize",  # default; strategist can refine
         "commands": None,
+        # Coordinator v4 injected fields
+        "intent": coordinator_decision.intent,
+        "policy": coordinator_policy,
+        "guardrails": coordinator_guardrails,
+        "drone_contracts": coordinator_drone_contracts,  # Per-drone start/home/endpoint contracts
+        "allocation_strategy": coordinator_policy.get("allocation_strategy", "efficient"),
+        # Agent reasoning outputs
         "strategy_analysis": None,
         "allocation_reasoning": None,
         "route_analysis": None,
@@ -1660,7 +1910,7 @@ def run_multi_agent_v4(
             initial_state["allocation"] = prev_allocation
 
     # ------------------------------------------------------------------
-    # 4) Run the multi-agent workflow
+    # 5) Run the multi-agent workflow
     # ------------------------------------------------------------------
     workflow = build_reasoning_workflow()
 
@@ -1719,18 +1969,6 @@ def run_multi_agent_v4(
     # 6) Extract routes & compute trajectories (existing logic)
     # ---------------------------------------------------------------
 
-    def get_waypoint_position(wp_id: str, env: Dict[str, Any]) -> Optional[List[float]]:
-        """Get waypoint position from environment."""
-        for airport in env.get("airports", []):
-            aid = airport.get("id", airport.get("label"))
-            if aid == wp_id:
-                return [float(airport["x"]), float(airport["y"])]
-        for target in env.get("targets", []):
-            tid = target.get("id", target.get("label"))
-            if tid == wp_id:
-                return [float(target["x"]), float(target["y"])]
-        return None
-
     routes = final_state.get("routes", {}) or {}
     response_text = final_state.get("final_response", "No response generated")
 
@@ -1753,6 +1991,32 @@ def run_multi_agent_v4(
             float(target.get("x", 0.0)),
             float(target.get("y", 0.0)),
         ]
+
+    # Add synthetic starts from environment (authoritative data, populated in step 3b)
+    env_synthetic_starts = env.get("synthetic_starts", {})
+    for synth_id, synth_coords in env_synthetic_starts.items():
+        if synth_id not in waypoint_positions:
+            waypoint_positions[synth_id] = [
+                float(synth_coords.get("x", 0.0)),
+                float(synth_coords.get("y", 0.0)),
+            ]
+            print(f"📍 [v4] Added synthetic start to waypoints: {synth_id}", file=sys.stderr)
+
+    # Also check routes for synthetic starts that may not be in guardrails
+    for did, route_data in routes.items():
+        if isinstance(route_data, dict):
+            start_id = route_data.get("start_id")
+            if start_id and start_id not in waypoint_positions and start_id.endswith("_START"):
+                # Try to get coords from sam_matrix waypoints
+                if sam_matrix:
+                    for wp in sam_matrix.get("waypoints", []):
+                        if wp.get("id") == start_id:
+                            waypoint_positions[start_id] = [
+                                float(wp.get("x", 0.0)),
+                                float(wp.get("y", 0.0)),
+                            ]
+                            print(f"📍 [v4] Added synthetic start from sam_matrix: {start_id}", file=sys.stderr)
+                            break
 
     sams = env.get("sams", []) or []
     trajectory_planner: Optional[ISRTrajectoryPlanner] = None
@@ -1781,7 +2045,7 @@ def run_multi_agent_v4(
         def _straight_line_traj() -> List[List[float]]:
             traj = []
             for wp_id in route_ids:
-                pos = get_waypoint_position(wp_id, env)
+                pos = waypoint_positions.get(wp_id)
                 if pos is not None:
                     traj.append(pos)
             return traj
@@ -1820,6 +2084,18 @@ def run_multi_agent_v4(
 
     # Build the Decision Trace JSONB structure (Wiring Point C)
     trace = {
+        # Coordinator v4 pre-pass decisions
+        "coordinator": {
+            "intent": {
+                "name": coordinator_decision.intent,
+                "confidence": coordinator_decision.confidence,
+                "rules_hit": coordinator_decision.rules_hit,
+            },
+            "guards": coordinator_guardrails,
+            "policy": coordinator_policy,
+            "drone_contracts": coordinator_drone_contracts,
+            "synthetic_starts": coordinator_synthetic_starts,  # Authoritative coordinate data
+        },
         # Environment and matrix metadata for reproducibility
         "env": {
             "env_hash": matrix_env_hash,
