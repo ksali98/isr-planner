@@ -43,7 +43,7 @@ from .sam_distance_matrix import (
     get_cached_matrix,
     clear_matrix_cache,
 )
-from .target_allocator import allocate_targets, set_allocator_matrix
+from .target_allocator import allocate_targets, set_allocator_matrix, clear_allocator_matrix
 from .post_optimizer import post_optimize_solution, set_optimizer_matrix
 from .trajectory_planner import ISRTrajectoryPlanner
 
@@ -168,11 +168,17 @@ def _parse_env_for_solver(
     """
     airports: List[Dict[str, Any]] = []
     for a in env.get("airports", []):
-        airports.append({
+        airport_entry = {
             "id": str(a["id"]),
             "x": float(a["x"]),
             "y": float(a["y"]),
-        })
+        }
+        # CRITICAL: Preserve is_synthetic flag from frontend
+        # This flag marks synthetic starts (D1_START, D2_START, etc.) added during checkpoint replanning
+        # Synthetic starts can be START points but should NEVER be valid ENDpoints
+        if a.get("is_synthetic", False):
+            airport_entry["is_synthetic"] = True
+        airports.append(airport_entry)
 
     # Add synthetic start nodes (for checkpoint replanning)
     # These act like airports - drones can start from these positions
@@ -256,6 +262,12 @@ def solve_mission(
 
     airports, targets, sams = _parse_env_for_solver(env)
     print(f"📍 Parsed: {len(airports)} airports, {len(targets)} targets, {len(sams)} SAMs", flush=True)
+
+    # DEBUG: Show which airports have is_synthetic flag
+    synthetic_airports = [a["id"] for a in airports if a.get("is_synthetic", False)]
+    real_airports = [a["id"] for a in airports if not a.get("is_synthetic", False)]
+    print(f"   🔍 Real airports: {real_airports}", flush=True)
+    print(f"   🔍 Synthetic airports: {synthetic_airports}", flush=True)
 
     if not airports or not targets:
         print("⚠️ No airports or targets, returning empty", flush=True)
@@ -479,7 +491,13 @@ def solve_mission(
 
         # Build airports list for solver - start with real airports
         solver_airports = list(airports)  # Copy to avoid mutating original
-        real_airport_ids = [a["id"] for a in airports]
+        # CRITICAL: Real airports are those that are NOT synthetic (no is_synthetic flag AND not ending in _START)
+        # Synthetic starts should NEVER be valid endpoints
+        real_airport_ids = [
+            a["id"] for a in airports
+            if not a.get("is_synthetic", False)
+            and not str(a.get("id", "")).endswith("_START")
+        ]
 
         # CRITICAL FIX: Add ALL synthetic starts that are in the filtered matrix
         # This ensures every node in matrix_labels is classified as either airport or target
@@ -525,11 +543,20 @@ def solve_mission(
 
             # CRITICAL: Filter out synthetic starts from valid end airports
             # Synthetic starts (e.g., D1_START) are used for checkpoint replanning
-            # but should NOT be valid endpoints - only real airports should be endpoints
+            # but should NEVER be valid endpoints - only real airports should be endpoints
+            # Check both the is_synthetic flag AND the ID pattern (ends with _START)
             print(f"   🔍 DEBUG: All airports: {[a['id'] for a in airports]}", flush=True)
-            real_airports = [a for a in airports if not a.get("is_synthetic", False)]
+            real_airports = [
+                a for a in airports
+                if not a.get("is_synthetic", False)
+                and not str(a.get("id", "")).endswith("_START")
+            ]
+            synthetic_airports = [
+                a for a in airports
+                if a.get("is_synthetic", False) or str(a.get("id", "")).endswith("_START")
+            ]
             print(f"   🔍 DEBUG: Real airports (non-synthetic): {[a['id'] for a in real_airports]}", flush=True)
-            print(f"   🔍 DEBUG: Synthetic airports: {[a['id'] for a in airports if a.get('is_synthetic', False)]}", flush=True)
+            print(f"   🔍 DEBUG: Synthetic airports: {[a['id'] for a in synthetic_airports]}", flush=True)
             if real_airports:
                 env_for_solver["valid_end_airports"] = [a["id"] for a in real_airports]
                 print(f"   ✈️ Valid end airports (excluding synthetic): {env_for_solver['valid_end_airports']}", flush=True)
@@ -635,6 +662,7 @@ def solve_mission_with_allocation(
     sam_count = len(sams) if sams else 0
     print(f"🎯 Calculating fresh distance matrix ({sam_count} SAMs)...", flush=True)
     clear_matrix_cache()
+    clear_allocator_matrix()  # Also clear allocator's cached matrix
     dist_data = calculate_sam_aware_matrix(env)
     _cached_env_hash = current_hash
 
@@ -835,7 +863,13 @@ def solve_mission_with_allocation(
 
         # Build airports list for solver - start with real airports
         solver_airports = list(airports)  # Copy to avoid mutating original
-        real_airport_ids = [a["id"] for a in airports]
+        # CRITICAL: Real airports are those that are NOT synthetic (no is_synthetic flag AND not ending in _START)
+        # Synthetic starts should NEVER be valid endpoints
+        real_airport_ids = [
+            a["id"] for a in airports
+            if not a.get("is_synthetic", False)
+            and not str(a.get("id", "")).endswith("_START")
+        ]
 
         # CRITICAL FIX: Add ALL synthetic starts that are in the filtered matrix
         # This ensures every node in matrix_labels is classified as either airport or target

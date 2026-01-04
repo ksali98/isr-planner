@@ -98,6 +98,10 @@ const state = {
   // { [did]: [x,y] } - used when committing segments
   pendingCutPositions: null,
 
+  // Drones lost at the current checkpoint (disabled after cut but before solve)
+  // Array of drone IDs: ["1", "3"] - used when drawing lost drone markers
+  pendingLostDrones: [],
+
   // Legacy single cut position (backward compatibility)
   pendingCutPosition: null,
 };
@@ -173,7 +177,9 @@ class Segment {
     isCheckpointReplan = false,
     timestamp = new Date().toISOString(),
     cutPosition = null,      // [x, y] position where segment was cut (legacy, drone 1)
-    cutPositions = null      // { [droneId]: [x, y] } per-drone cut positions for marker display
+    cutPositions = null,     // { [droneId]: [x, y] } per-drone cut positions for marker display
+    lostDrones = null,       // Array of drone IDs that were lost at this checkpoint
+    visitedTargets = null    // Array of target IDs visited up to this segment
   }) {
     this.index = index;
     this.solution = Object.freeze(JSON.parse(JSON.stringify(solution)));
@@ -199,6 +205,10 @@ class Segment {
         Object.entries(cutPositions).map(([did, pos]) => [did, Object.freeze([...pos])])
       )
     ) : null;
+    // Lost drones at this checkpoint (frozen array of drone ID strings)
+    this.lostDrones = lostDrones ? Object.freeze([...lostDrones]) : null;
+    // Visited targets up to this segment
+    this.visitedTargets = visitedTargets ? Object.freeze([...visitedTargets]) : null;
     Object.freeze(this);
   }
 
@@ -1249,13 +1259,17 @@ function cancelEdits() {
  * Accept solution - commit the draft solution as the next segment
  */
 function acceptSolution() {
+  console.log(`[acceptSolution] ENTERED - mode=${missionState.mode}, draftSolution=${!!missionState.draftSolution}`);
   const perms = getUiPermissions();
+  console.log(`[acceptSolution] perms.canAcceptSolution=${perms.canAcceptSolution}`);
   if (!perms.canAcceptSolution) {
+    console.log(`[acceptSolution] BLOCKED - canAcceptSolution is false`);
     appendDebugLine("Cannot accept solution in current state");
     return;
   }
 
   if (!missionState.draftSolution) {
+    console.log(`[acceptSolution] BLOCKED - no draftSolution`);
     appendDebugLine("No draft solution to accept");
     return;
   }
@@ -1335,6 +1349,9 @@ function acceptSolution() {
       cutPositions: state.pendingCutPositions
         ? JSON.parse(JSON.stringify(state.pendingCutPositions))
         : null,
+      lostDrones: state.pendingLostDrones.length > 0
+        ? [...state.pendingLostDrones]
+        : null,
     });
     missionReplay.setCurrentSegmentIndex(segment.index);
   }
@@ -1343,9 +1360,13 @@ function acceptSolution() {
   const savedCutPositions = state.pendingCutPositions
     ? JSON.parse(JSON.stringify(state.pendingCutPositions))
     : null;
+  const savedLostDrones = state.pendingLostDrones.length > 0
+    ? [...state.pendingLostDrones]
+    : null;
 
   // Clear the pending cut data after use
   state.pendingCutPositions = null;
+  state.pendingLostDrones = [];
   state.pendingCutDistance = null;
 
   // Also keep in missionState.committedSegments for backward compatibility
@@ -1647,7 +1668,7 @@ function acceptSolutionWithManager() {
     missionReplay.setCurrentSegmentIndex(newSegIdx);
     missionState.currentBuildSegmentIndex = newSegIdx;
 
-    // Save the cut positions and visited targets we just calculated into the next segment
+    // Save the cut positions, visited targets, and lost drones into the next segment
     // This allows us to draw all previous markers and restore correct visited targets on Reset
     const nextSeg = missionReplay.getSegment(newSegIdx);
     if (nextSeg) {
@@ -1655,8 +1676,9 @@ function acceptSolutionWithManager() {
         ...nextSeg,
         cutPositions: state.pendingCutPositions ? JSON.parse(JSON.stringify(state.pendingCutPositions)) : nextSeg.cutPositions,
         visitedTargets: [...state.visitedTargets],  // Save calculated visited targets
+        lostDrones: savedLostDrones,  // Drones lost at this checkpoint
       });
-      console.log(`[ACCEPT] Saved to segment ${newSegIdx}: cutPositions=`, state.pendingCutPositions, `visitedTargets=[${state.visitedTargets.join(",")}]`);
+      console.log(`[ACCEPT] Saved to segment ${newSegIdx}: cutPositions=`, state.pendingCutPositions, `visitedTargets=[${state.visitedTargets.join(",")}], lostDrones=`, savedLostDrones);
     }
     // More segments to solve
     // PRESERVE existing frozen trajectory and DON'T recalculate it
@@ -1922,8 +1944,43 @@ function discardDraftSolution() {
     return;
   }
 
+  // CRITICAL: If discarding a checkpoint replan, restore the checkpoint state
+  // so the next solve will still respect frozen trajectories
+  const draft = missionState.draftSolution;
+  if (draft && draft.isCheckpointReplan) {
+    appendDebugLine("🔄 Restoring checkpoint state from discarded draft...");
+
+    // Restore checkpoint segments (frozen trajectory data)
+    if (draft.checkpointSegments) {
+      state.checkpoint = {
+        active: true,
+        pct: 0.5,
+        segments: JSON.parse(JSON.stringify(draft.checkpointSegments)),
+      };
+      appendDebugLine(`   Restored ${Object.keys(draft.checkpointSegments).length} checkpoint segments`);
+    }
+
+    // Restore pending cut positions (cut marker locations)
+    if (draft.pendingCutPositions) {
+      state.pendingCutPositions = JSON.parse(JSON.stringify(draft.pendingCutPositions));
+      appendDebugLine(`   Restored pendingCutPositions for drones: [${Object.keys(draft.pendingCutPositions).join(", ")}]`);
+    }
+
+    // Restore cut distance
+    if (draft.cutDistance !== null && draft.cutDistance !== undefined) {
+      state.pendingCutDistance = draft.cutDistance;
+      appendDebugLine(`   Restored pendingCutDistance: ${draft.cutDistance.toFixed(1)}`);
+    }
+  }
+
   // Clear the draft solution
   missionState.draftSolution = null;
+
+  // Clear pending lost drones (from rejected solve attempts)
+  state.pendingLostDrones = [];
+
+  // Check if we restored checkpoint state (determines what mode to go to)
+  const restoredCheckpoint = draft && draft.isCheckpointReplan && state.checkpoint?.active;
 
   // Check if we have a committed solution to restore from MissionReplay
   const currentSegment = missionReplay.getCurrentSegment();
@@ -1948,8 +2005,13 @@ function discardDraftSolution() {
         };
       });
     }
-    // Go back to ready to animate (we have a valid solution)
-    setMissionMode(MissionMode.READY_TO_ANIMATE, "draft discarded, restored committed solution");
+    // If checkpoint state was restored, go to CHECKPOINT mode so user can solve again
+    // Otherwise go back to ready to animate
+    if (restoredCheckpoint) {
+      setMissionMode(MissionMode.CHECKPOINT, "draft discarded, checkpoint state restored - ready to solve again");
+    } else {
+      setMissionMode(MissionMode.READY_TO_ANIMATE, "draft discarded, restored committed solution");
+    }
   } else {
     // Fallback to old system
     const oldSegment = missionState.committedSegments[missionState.committedSegments.length - 1];
@@ -1964,15 +2026,25 @@ function discardDraftSolution() {
           points: r.points || 0,
         };
       });
-      setMissionMode(MissionMode.READY_TO_ANIMATE, "draft discarded, restored committed solution");
+      if (restoredCheckpoint) {
+        setMissionMode(MissionMode.CHECKPOINT, "draft discarded, checkpoint state restored - ready to solve again");
+      } else {
+        setMissionMode(MissionMode.READY_TO_ANIMATE, "draft discarded, restored committed solution");
+      }
     } else {
       // No committed solution - clear routes and go to IDLE
       state.routes = {};
-      setMissionMode(MissionMode.IDLE, "draft discarded");
+      if (restoredCheckpoint) {
+        setMissionMode(MissionMode.CHECKPOINT, "draft discarded, checkpoint state restored - ready to solve again");
+      } else {
+        setMissionMode(MissionMode.IDLE, "draft discarded");
+      }
     }
   }
 
-  appendDebugLine("❌ Draft solution discarded");
+  appendDebugLine(restoredCheckpoint
+    ? "🔄 Draft discarded - checkpoint state restored, ready to solve again"
+    : "❌ Draft solution discarded");
   drawEnvironment();
 }
 
@@ -2009,6 +2081,7 @@ function resetMission() {
   state.checkpoint = { active: false, pct: 0.5, segments: {} };
   state.pendingCutDistance = null;
   state.pendingCutPositions = null;
+  state.pendingLostDrones = [];
   state.missionHistory = [];
   state.visitedTargets = [];
   state.currentCutSegment = 1;
@@ -2208,6 +2281,11 @@ function resetMission() {
     }
   });
 
+  // Make trajectories visible for all restored routes (so user can see them before/during animation)
+  Object.keys(state.routes).forEach(did => {
+    state.trajectoryVisible[did] = true;
+  });
+
   // =====================================================
   // 6. Set mode and redraw
   // =====================================================
@@ -2238,8 +2316,18 @@ function appendDebugLine(msg) {
 function invalidateMission(reason) {
   // Drop current mission so backend will treat next v4 call as a new mission
   state.missionId = null;
-  state.routes = {};
-  state.trajectoryVisible = {};
+
+  // IMPORTANT: During checkpoint workflow, preserve frozen trajectories
+  // Only clear routes if we don't have committed segments (no frozen trajectories to preserve)
+  const hasCommittedSegments = missionState.committedSegments && missionState.committedSegments.length > 0;
+  if (!hasCommittedSegments) {
+    state.routes = {};
+    state.trajectoryVisible = {};
+  } else {
+    // In checkpoint workflow - keep frozen routes/trajectories for continuity
+    console.log(`[invalidateMission] Preserving frozen trajectories (${missionState.committedSegments.length} committed segments)`);
+  }
+
   if (reason) {
     appendDebugLine("Mission invalidated: " + reason);
   }
@@ -2635,24 +2723,35 @@ function resizeCanvasToContainer() {
 // Environment drawing
 // ----------------------------------------------------
 
-// Helper: Draw a white dot cut marker with optional label
-function drawCutMarker(ctx, mx, my, label) {
-  const r = 5;
-  ctx.beginPath();
-  ctx.arc(mx, my, r, 0, Math.PI * 2);
-  ctx.fillStyle = "#ffffff";
-  ctx.fill();
+// Helper: Draw a diamond cut marker with optional label
+// isLost: if true, draw a larger solid red diamond (drone lost at this checkpoint)
+function drawCutMarker(ctx, mx, my, label, isLost = false) {
+  const r = isLost ? 12 : 8;  // Larger sizes: lost=12, normal=8
 
-  // Subtle outline for visibility
-  ctx.strokeStyle = "rgba(0,0,0,0.35)";
-  ctx.lineWidth = 1;
-  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(mx, my - r);      // top
+  ctx.lineTo(mx + r, my);      // right
+  ctx.lineTo(mx, my + r);      // bottom
+  ctx.lineTo(mx - r, my);      // left
+  ctx.closePath();
+
+  if (isLost) {
+    // Lost drone: red diamond outline (not filled)
+    ctx.strokeStyle = "#ef4444";  // red-500
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  } else {
+    // Normal: white diamond outline
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+  }
 
   // Optional label
   if (label) {
-    ctx.font = "bold 9px system-ui";
-    ctx.fillStyle = "#ffffff";
-    ctx.fillText(label, mx + r + 3, my + 3);
+    ctx.font = "bold 10px system-ui";
+    ctx.fillStyle = isLost ? "#ef4444" : "#ffffff";
+    ctx.fillText(label, mx + r + 4, my + 4);
   }
 }
 
@@ -3141,11 +3240,13 @@ function drawEnvironment() {
       console.log(`[drawEnv-IMPORT] segIdx=${segIdx}, seg.cutPositions=`, seg?.cutPositions);
       if (seg && seg.cutPositions && Object.keys(seg.cutPositions).length > 0) {
         console.log(`[drawEnv-IMPORT] Drawing marker C${segIdx} at:`, seg.cutPositions);
-        Object.entries(seg.cutPositions).forEach(([_, pos]) => {
+        const lostDrones = seg.lostDrones || [];
+        Object.entries(seg.cutPositions).forEach(([did, pos]) => {
           if (!pos || pos.length !== 2) return;
           if (isAtAirport(pos[0], pos[1])) return;
           const [mx, my] = w2c(pos[0], pos[1]);
-          drawCutMarker(ctx, mx, my, `C${segIdx}`);
+          const isLost = lostDrones.includes(did);
+          drawCutMarker(ctx, mx, my, `C${segIdx}`, isLost);
         });
       }
     }
@@ -3153,11 +3254,14 @@ function drawEnvironment() {
     // Also draw the current pending marker (if we just pressed Accept but haven't solved yet)
     if (state.pendingCutPositions && Object.keys(state.pendingCutPositions).length > 0) {
       const nextSegIdx = currentSegIdx;
-      Object.entries(state.pendingCutPositions).forEach(([_, pos]) => {
+      Object.entries(state.pendingCutPositions).forEach(([did, pos]) => {
         if (!pos || pos.length !== 2) return;
         if (isAtAirport(pos[0], pos[1])) return;
         const [mx, my] = w2c(pos[0], pos[1]);
-        drawCutMarker(ctx, mx, my, `C${nextSegIdx}`);
+        // Check drone's CURRENT enabled state for pending markers
+        const cfg = state.droneConfigs[did];
+        const isLost = cfg && cfg.enabled === false;
+        drawCutMarker(ctx, mx, my, `C${nextSegIdx}`, isLost);
       });
     }
   } else {
@@ -3173,11 +3277,13 @@ function drawEnvironment() {
       console.log(`[drawEnv] segIdx=${segIdx}, prevHasSolution=${prevHasSolution}`);
 
       if (seg && seg.cutPositions && prevHasSolution) {
-        Object.entries(seg.cutPositions).forEach(([_, pos]) => {
+        const lostDrones = seg.lostDrones || [];
+        Object.entries(seg.cutPositions).forEach(([did, pos]) => {
           if (!pos || pos.length !== 2) return;
           if (isAtAirport(pos[0], pos[1])) return;
           const [mx, my] = w2c(pos[0], pos[1]);
-          drawCutMarker(ctx, mx, my, `C${segIdx}`);
+          const isLost = lostDrones.includes(did);
+          drawCutMarker(ctx, mx, my, `C${segIdx}`, isLost);
         });
       }
     }
@@ -3185,11 +3291,14 @@ function drawEnvironment() {
     // Draw pending cut marker (fresh segmentation - after pressing C but before Accept)
     if (state.pendingCutPositions && Object.keys(state.pendingCutPositions).length > 0) {
       const nextSegIdx = missionReplay.getSegmentCount();
-      Object.entries(state.pendingCutPositions).forEach(([_, pos]) => {
+      Object.entries(state.pendingCutPositions).forEach(([did, pos]) => {
         if (!pos || pos.length !== 2) return;
         if (isAtAirport(pos[0], pos[1])) return;
         const [mx, my] = w2c(pos[0], pos[1]);
-        drawCutMarker(ctx, mx, my, `C${nextSegIdx}`);
+        // Check drone's CURRENT enabled state for pending markers
+        const cfg = state.droneConfigs[did];
+        const isLost = cfg && cfg.enabled === false;
+        drawCutMarker(ctx, mx, my, `C${nextSegIdx}`, isLost);
       });
     }
   }
@@ -4217,6 +4326,7 @@ function loadSegmentInfoFromJson(data, filename = "") {
 
   // 6. NO cut marker on import - markers appear after you Accept solutions
   state.pendingCutPositions = null;
+  state.pendingLostDrones = [];
 
   appendDebugLine(`✅ Loaded ${segmentedImport.getTotalSegments()} segments. Solve segment 0 first.`);
   console.log(`[loadSegmentInfoFromJson] segmentedImport debug:`, segmentedImport.getDebugInfo());
@@ -4286,6 +4396,7 @@ function loadSegmentedMissionFromJson(data, filename = "") {
 
   // 6. NO cut marker on import - it appears after Solve
   state.pendingCutPositions = null;
+  state.pendingLostDrones = [];
 
   appendDebugLine(`✅ Loaded ${segmentedImport.getTotalSegments()} segments. Solve segment 0 first.`);
   console.log(`[loadSegmentedMissionFromJson] segmentedImport debug:`, segmentedImport.getDebugInfo());
@@ -4314,6 +4425,7 @@ function loadFromJson(data, filename = "") {
   state.importedSegmentCuts = [];  // Clear segmented import state
   state.wrappedPolygons = [];  // Clear any ghost SAM polygons from previous imports
   state.pendingCutPositions = null;  // Clear any ghost markers from previous imports
+  state.pendingLostDrones = [];  // Clear lost drones from previous imports
 
   // Stop animation if running
   if (state.animation) {
@@ -5194,8 +5306,9 @@ async function regenerateTrajectories() {
           const nodeId = `D${did}_START`;
           envWithConfigs.synthetic_starts[nodeId] = { id: nodeId, x: seg.splitPoint[0], y: seg.splitPoint[1] };
           // Also add as airport so /api/apply_sequence can find it
+          // IMPORTANT: Mark as is_synthetic: true so backend filters it from valid_end_airports
           if (!envWithConfigs.airports.some(a => a.id === nodeId)) {
-            envWithConfigs.airports.push({ id: nodeId, x: seg.splitPoint[0], y: seg.splitPoint[1] });
+            envWithConfigs.airports.push({ id: nodeId, x: seg.splitPoint[0], y: seg.splitPoint[1], is_synthetic: true });
           }
           console.log(`[regenerateTrajectories] Added synthetic start ${nodeId} from draftSolution: (${seg.splitPoint[0].toFixed(1)}, ${seg.splitPoint[1].toFixed(1)})`);
         }
@@ -5210,8 +5323,9 @@ async function regenerateTrajectories() {
         const lastFrozenPt = routeData.trajectory[frozenCount - 1];
         envWithConfigs.synthetic_starts[nodeId] = { id: nodeId, x: lastFrozenPt[0], y: lastFrozenPt[1] };
         // Also add as airport so /api/apply_sequence can find it
+        // IMPORTANT: Mark as is_synthetic: true so backend filters it from valid_end_airports
         if (!envWithConfigs.airports.some(a => a.id === nodeId)) {
-          envWithConfigs.airports.push({ id: nodeId, x: lastFrozenPt[0], y: lastFrozenPt[1] });
+          envWithConfigs.airports.push({ id: nodeId, x: lastFrozenPt[0], y: lastFrozenPt[1], is_synthetic: true });
         }
         console.log(`[regenerateTrajectories] Added synthetic start ${nodeId} from frozen trajectory: (${lastFrozenPt[0].toFixed(1)}, ${lastFrozenPt[1].toFixed(1)})`);
       }
@@ -5724,6 +5838,19 @@ async function runPlanner() {
   const isCheckpointMode = missionState.mode === MissionMode.CHECKPOINT;
   const { env: envToSolve, droneConfigs: configsToSolve, isCheckpointReplan } = buildCheckpointEnv();
 
+  // Detect lost drones: drones that have cut positions but are now disabled
+  // These are drones that were "lost" at this checkpoint
+  state.pendingLostDrones = [];
+  if (isCheckpointReplan && state.pendingCutPositions) {
+    Object.keys(state.pendingCutPositions).forEach(did => {
+      const cfg = configsToSolve[did] || state.droneConfigs[did];
+      if (cfg && !cfg.enabled) {
+        state.pendingLostDrones.push(did);
+        appendDebugLine(`🔴 Drone ${did} LOST at checkpoint (had cut position but now disabled)`);
+      }
+    });
+  }
+
   // If this is the first solve (no history), save the initial snapshot
   if (missionState.committedSegments.length === 0 && !isCheckpointMode) {
     saveInitialEnvSnapshot();
@@ -5851,6 +5978,7 @@ async function runPlanner() {
 
     // Store as draft solution (two-phase commit)
     // IMPORTANT: Deep copy routes to prevent modifications to state.routes from affecting the draft
+    // Also save checkpoint state so it can be restored if the draft is discarded
     missionState.draftSolution = {
       sequences: JSON.parse(JSON.stringify(data.sequences || {})),
       routes: JSON.parse(JSON.stringify(data.routes || {})),
@@ -5861,6 +5989,8 @@ async function runPlanner() {
       isCheckpointReplan: isCheckpointReplan,
       checkpointSegments: isCheckpointReplan ? JSON.parse(JSON.stringify(state.checkpoint.segments)) : null,
       cutDistance: isCheckpointReplan ? state.pendingCutDistance : null,
+      // Save cut positions so they can be restored on discard
+      pendingCutPositions: state.pendingCutPositions ? JSON.parse(JSON.stringify(state.pendingCutPositions)) : null,
     };
 
     // Apply the draft solution visually (but not committed yet)
@@ -7473,15 +7603,37 @@ function attachMissionControlHandlers() {
   // Run Planner / Accept toggle button
   if (mcRunPlanner) {
     mcRunPlanner.addEventListener("click", () => {
-      const perms = getUiPermissions();
-      if (perms.canAcceptSolution) {
-        // In Accept mode - accept the solution
-        acceptSolution();
-      } else if (perms.canSolve) {
-        // In Run Planner mode - run the planner
-        runPlanner();
+      try {
+        console.log(`[Accept Button] Click detected!`);
+        console.log(`[Accept Button] missionState.mode=${missionState.mode}`);
+        console.log(`[Accept Button] missionState.draftSolution exists=${!!missionState.draftSolution}`);
+        const perms = getUiPermissions();
+        console.log(`[Accept Button] perms.canAcceptSolution=${perms.canAcceptSolution}, perms.canSolve=${perms.canSolve}`);
+
+        if (perms.canAcceptSolution) {
+          // In Accept mode - accept the solution
+          console.log(`[Accept Button] Calling acceptSolution()...`);
+          acceptSolution();
+        } else if (perms.canSolve) {
+          // In Run Planner mode - run the planner
+          console.log(`[Accept Button] Calling runPlanner()...`);
+          runPlanner();
+        } else if (missionState.mode === MissionMode.DRAFT_READY && missionState.draftSolution) {
+          // Fallback: If we're in DRAFT_READY mode with a draft solution, accept anyway
+          // This handles any edge case where perms isn't reflecting the correct state
+          console.warn(`[Accept Button] FALLBACK: mode=${missionState.mode}, forcing acceptSolution()`);
+          acceptSolution();
+        } else {
+          console.log(`[Accept Button] Neither canAcceptSolution nor canSolve is true - button click ignored`);
+          console.log(`[Accept Button] Full perms:`, perms);
+        }
+      } catch (err) {
+        console.error(`[Accept Button] ERROR:`, err);
+        appendDebugLine(`Accept button error: ${err.message}`);
       }
     });
+  } else {
+    console.error(`[Accept Button] mc-run-planner element not found!`);
   }
 
   // Display button - toggle all trajectories
@@ -7888,10 +8040,16 @@ async function sendAgentMessage() {
     return;
   }
 
-  // UI-permission guard: only allow agent solve when Solve is allowed by the mode machine
+  // UI-permission guard: allow agent chat in most modes except animation
+  // Agent can answer questions, re-optimize, or explain even after a solution exists
   const perms = (typeof getUiPermissions === "function") ? getUiPermissions() : null;
-  if (perms && !perms.canSolve) {
-    appendDebugLine("⚠️ Agent Solve disabled in current mission mode. Reset or finish playback first.");
+  if (perms && perms.isAnimating) {
+    appendDebugLine("⚠️ Agent disabled during animation. Pause or stop animation first.");
+    return;
+  }
+  // Block during editing mode to avoid conflicts
+  if (perms && perms.isEditing) {
+    appendDebugLine("⚠️ Agent disabled during Edit mode. Accept or cancel edits first.");
     return;
   }
 
@@ -7913,6 +8071,25 @@ async function sendAgentMessage() {
     console.log(`🚀 Agent request: ${targetCount} targets [${targetIds}], mission_id=${state.missionId || 'null'}`);
     appendDebugLine(`🚀 Agent: ${targetCount} targets [${targetIds}]`);
 
+    // Build existing solution context for agent memory
+    // This allows follow-up requests like "move T5 to D1" to work
+    const existingSolution = {};
+    if (state.sequences && Object.keys(state.sequences).length > 0) {
+      // Convert sequences like "A1,T1,T2,A1" to route arrays like ["A1","T1","T2","A1"]
+      existingSolution.routes = {};
+      existingSolution.allocation = {};
+      for (const [did, seq] of Object.entries(state.sequences)) {
+        if (seq) {
+          const routeArr = seq.split(",").map(s => s.trim()).filter(s => s);
+          existingSolution.routes[did] = routeArr;
+          // Extract targets (non-airport waypoints) for allocation
+          existingSolution.allocation[did] = routeArr.filter(wp => wp.startsWith("T"));
+        }
+      }
+      console.log("📦 Sending existing solution to agent:", existingSolution);
+      appendDebugLine(`📦 Agent context: ${Object.keys(existingSolution.routes).length} drone routes`);
+    }
+
     const response = await fetch("/api/agents/chat-v4", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -7921,6 +8098,7 @@ async function sendAgentMessage() {
         env: state.env,
         drone_configs: state.droneConfigs,
         mission_id: state.missionId || null,
+        existing_solution: Object.keys(existingSolution).length > 0 ? existingSolution : null,
       }),
     });
 

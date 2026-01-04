@@ -42,12 +42,14 @@ try:
     from .target_allocator import (
         allocate_targets,
         set_allocator_matrix,
+        clear_allocator_matrix,
         AllocationStrategy,
         TARGET_ALLOCATOR_TOOL,
     )
 except ImportError:
     allocate_targets = None
     set_allocator_matrix = None
+    clear_allocator_matrix = None
     AllocationStrategy = None
     TARGET_ALLOCATOR_TOOL = None
 
@@ -108,6 +110,7 @@ __all__ = [
     # Target allocator
     'allocate_targets',
     'set_allocator_matrix',
+    'clear_allocator_matrix',
     'AllocationStrategy',
     'TARGET_ALLOCATOR_TOOL',
     # Post-optimizer

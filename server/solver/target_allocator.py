@@ -647,6 +647,15 @@ def set_allocator_matrix(matrix_data: Dict[str, Any]):
     _allocator.set_distance_matrix(matrix_data)
 
 
+def clear_allocator_matrix():
+    """Clear the cached distance matrix from the global allocator.
+
+    This should be called before each fresh solve to ensure the allocator
+    doesn't use stale distance data from a previous environment state.
+    """
+    _allocator._distance_matrix = None
+
+
 # ============================================================================
 # Priority-Based Constraint Parsing
 # ============================================================================

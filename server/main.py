@@ -98,6 +98,7 @@ class AgentChatRequest(BaseModel):
     sequences: Optional[Dict[str, str]] = None
     drone_configs: Optional[Dict[str, Any]] = None
     mission_id: Optional[str] = None  # Existing mission to continue chatting about
+    existing_solution: Optional[Dict[str, Any]] = None  # Previous routes/allocation from frontend
 
 
 class AgentChatResponse(BaseModel):
@@ -1357,9 +1358,13 @@ async def agent_chat_v4(req: AgentChatRequest):
         mission_id = req.mission_id
         existing_solution: Optional[Dict[str, Any]] = None
 
-        # If mission_id exists, load stored mission snapshot for solution continuity
-        # BUT always use the incoming env/configs (user may have edited targets)
-        if mission_id and mission_id in MISSION_STORE:
+        # Priority 1: Use existing_solution from request (frontend sends current routes)
+        # This enables follow-up requests like "move T5 to D1" to work
+        if req.existing_solution:
+            existing_solution = req.existing_solution
+            print(f"[v4] Using existing_solution from request: {len(existing_solution.get('routes', {}))} routes", flush=True)
+        # Priority 2: Load from mission store by mission_id
+        elif mission_id and mission_id in MISSION_STORE:
             mission = MISSION_STORE[mission_id]
             # Use incoming env if provided, fallback to stored env
             if not req.env:
@@ -1628,6 +1633,7 @@ class TrajectorySwapRequest(BaseModel):
     solution: Dict[str, Any]  # routes from solve_with_allocation
     env: Dict[str, Any]
     drone_configs: Dict[str, Any]
+    visited_targets: List[str] = []  # Frozen targets that should NOT be swapped
 
 
 @app.post("/api/trajectory_swap_optimize")

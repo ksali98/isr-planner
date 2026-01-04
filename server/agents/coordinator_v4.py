@@ -39,6 +39,69 @@ PLAN_TOKENS = (
     "allocate", "route"
 )
 
+# Allocation modification tokens - user wants to change existing allocation
+ALLOCATION_MOD_TOKENS = (
+    "move", "reassign", "transfer", "shift", "switch",
+    "give", "take", "from d", "to d", "from drone", "to drone",
+)
+
+import re
+
+def parse_allocation_modifications(user_message: str) -> List[Dict[str, Any]]:
+    """
+    Parse allocation modification requests from user message.
+
+    Detects patterns like:
+    - "move T5 to D1"
+    - "reassign T8 and T10 to drone 2"
+    - "transfer T3 from D1 to D2"
+    - "give T5, T6 to D1"
+
+    Returns:
+        List of modification dicts: [{"target": "T5", "to_drone": "1"}, ...]
+    """
+    modifications = []
+    msg = user_message.upper()
+
+    # Pattern 1: "move/reassign/transfer T<id> to D<id>/drone <id>"
+    # Matches: "move T5 to D1", "reassign T8 to drone 2"
+    pattern1 = r'(?:MOVE|REASSIGN|TRANSFER|SHIFT|GIVE)\s+(T\d+(?:\s*(?:,|AND)\s*T\d+)*)\s+(?:TO|INTO)\s+(?:D|DRONE\s*)(\d+)'
+    matches1 = re.findall(pattern1, msg)
+    for targets_str, drone_id in matches1:
+        # Extract all target IDs from the targets string
+        target_ids = re.findall(r'T(\d+)', targets_str)
+        for tid in target_ids:
+            modifications.append({
+                "target": f"T{tid}",
+                "to_drone": drone_id,
+            })
+
+    # Pattern 2: "move T<id> from D<id> to D<id>"
+    # Matches: "move T5 from D2 to D1"
+    pattern2 = r'(?:MOVE|REASSIGN|TRANSFER)\s+(T\d+)\s+FROM\s+(?:D|DRONE\s*)(\d+)\s+TO\s+(?:D|DRONE\s*)(\d+)'
+    matches2 = re.findall(pattern2, msg)
+    for target_id, from_drone, to_drone in matches2:
+        modifications.append({
+            "target": target_id,
+            "from_drone": from_drone,
+            "to_drone": to_drone,
+        })
+
+    # Pattern 3: Simple pattern "T<id> to D<id>" anywhere in message
+    # Matches: "put T5 to D1", "T5 should go to D1"
+    pattern3 = r'(T\d+)\s+(?:TO|SHOULD\s+GO\s+TO|GOES\s+TO)\s+(?:D|DRONE\s*)(\d+)'
+    matches3 = re.findall(pattern3, msg)
+    for target_id, drone_id in matches3:
+        # Avoid duplicates
+        existing = [m for m in modifications if m.get("target") == target_id]
+        if not existing:
+            modifications.append({
+                "target": target_id,
+                "to_drone": drone_id,
+            })
+
+    return modifications
+
 
 @dataclass
 class CoordinatorDecision:
@@ -126,6 +189,16 @@ class CoordinatorV4:
         if any(tok in msg_lower for tok in REPLAN_TOKENS):
             rules_hit.append("replan_token_match")
             return ("replan", 0.80, rules_hit)
+
+        # Check for allocation modification requests (more specific than general plan)
+        # This detects "move T5 to D1", "reassign T8 to drone 2", etc.
+        if any(tok in msg_lower for tok in ALLOCATION_MOD_TOKENS):
+            # Parse to verify it's actually an allocation modification
+            mods = parse_allocation_modifications(user_message)
+            if mods:
+                rules_hit.append("allocation_modification_detected")
+                rules_hit.append(f"modifications:{len(mods)}")
+                return ("reallocate", 0.90, rules_hit)
 
         if any(tok in msg_lower for tok in PLAN_TOKENS):
             rules_hit.append("plan_token_match")
@@ -241,6 +314,7 @@ class CoordinatorV4:
         environment: Dict[str, Any],
         preferences: Optional[Dict[str, Any]] = None,
         ui_state: Optional[Dict[str, Any]] = None,
+        user_message: str = "",
     ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
         """
         Select allocation strategy, solver mode, and build drone contracts.
@@ -249,6 +323,11 @@ class CoordinatorV4:
             (policy dict, drone_contracts dict)
         """
         prefs = preferences or {}
+
+        # Parse allocation modifications if this is a reallocate intent
+        allocation_modifications = []
+        if intent == "reallocate" and user_message:
+            allocation_modifications = parse_allocation_modifications(user_message)
 
         # Base policy
         policy: Dict[str, Any] = {
@@ -283,6 +362,15 @@ class CoordinatorV4:
             # What-if scenarios still run allocation/solver but may use different strategy
             policy["force_algorithmic_allocation"] = True
             policy["what_if_lightweight"] = True
+
+        if intent == "reallocate" and allocation_modifications:
+            # User wants to modify existing allocation, not compute new one
+            # Tell the Allocator to use existing allocation and apply modifications
+            policy["force_algorithmic_allocation"] = False  # Don't overwrite with algo
+            policy["use_existing_allocation"] = True
+            policy["allocation_modifications"] = allocation_modifications
+            policy["skip_allocation"] = False  # Still run allocator to apply mods
+            policy["skip_solver"] = False  # Re-route with new allocation
 
         # Get real airport IDs for home_airport fallback
         real_airport_ids = self._get_real_airport_ids(environment)
@@ -375,7 +463,7 @@ class CoordinatorV4:
 
         # 3. Select policy and build drone contracts
         policy, drone_contracts = self.select_policy(
-            intent, drone_configs, environment, preferences, ui_state
+            intent, drone_configs, environment, preferences, ui_state, user_message
         )
 
         # 4. Build trace for reproducibility
@@ -390,6 +478,8 @@ class CoordinatorV4:
                     "solver_mode": policy["solver_mode"],
                     "force_algorithmic_allocation": policy["force_algorithmic_allocation"],
                     "explain_only": policy["explain_only"],
+                    "use_existing_allocation": policy.get("use_existing_allocation", False),
+                    "allocation_modifications": policy.get("allocation_modifications", []),
                 },
                 "guardrails_summary": {
                     "env_valid": guardrails["env_valid"],

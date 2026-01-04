@@ -74,6 +74,7 @@ from ..solver.target_allocator import (
     parse_priority_constraints,
     allocate_with_priority_filters,
     set_allocator_matrix,
+    clear_allocator_matrix,
 )
 from ..solver.sam_distance_matrix import calculate_sam_aware_matrix
 from ..solver.post_optimizer import post_optimize_solution
@@ -761,16 +762,79 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
     print("\n🎯 [ALLOCATOR] Reasoning about allocation...", file=sys.stderr)
     sys.stderr.flush()
 
+    # CRITICAL: Clear any cached distance matrix from previous solves
+    # This ensures we use fresh distances from the current environment
+    clear_allocator_matrix()
+
     set_state(state)
 
     # Read Coordinator policy
     policy = state.get("policy") or {}
     force_algo = bool(policy.get("force_algorithmic_allocation", False))
     policy_strategy = policy.get("allocation_strategy", "efficient")
+    use_existing = bool(policy.get("use_existing_allocation", False))
+    allocation_mods = policy.get("allocation_modifications", [])
 
     print(f"🎯 [ALLOCATOR] Policy: force_algo={force_algo}, strategy={policy_strategy}", file=sys.stderr)
 
-    # If force_algorithmic_allocation is True, skip LLM entirely
+    # Priority 1: If use_existing_allocation is True, apply modifications to existing allocation
+    if use_existing and allocation_mods:
+        print(f"🔄 [ALLOCATOR] Applying {len(allocation_mods)} modifications to existing allocation", file=sys.stderr)
+
+        # Get existing allocation from state (seeded from existing_solution)
+        existing_allocation = state.get("allocation") or {}
+
+        if not existing_allocation:
+            print(f"⚠️ [ALLOCATOR] No existing allocation found, falling back to algorithmic", file=sys.stderr)
+        else:
+            # Deep copy to avoid mutation
+            new_allocation = {did: list(targets) for did, targets in existing_allocation.items()}
+
+            # Apply each modification
+            mods_applied = []
+            for mod in allocation_mods:
+                target_id = mod.get("target")
+                to_drone = mod.get("to_drone")
+
+                if not target_id or not to_drone:
+                    continue
+
+                # Find and remove target from its current drone
+                from_drone = None
+                for did, targets in new_allocation.items():
+                    if target_id in targets:
+                        targets.remove(target_id)
+                        from_drone = did
+                        break
+
+                # Add to new drone
+                if to_drone not in new_allocation:
+                    new_allocation[to_drone] = []
+
+                if target_id not in new_allocation[to_drone]:
+                    new_allocation[to_drone].append(target_id)
+
+                mods_applied.append(f"{target_id}: D{from_drone or '?'} → D{to_drone}")
+                print(f"   ✅ Moved {target_id} from D{from_drone or '?'} to D{to_drone}", file=sys.stderr)
+
+            reasoning = (
+                f"[Allocation modification - use_existing_allocation=True]\n"
+                f"Applied {len(mods_applied)} modifications:\n"
+                + "\n".join(f"  - {m}" for m in mods_applied) + "\n"
+                f"New allocation: {new_allocation}"
+            )
+
+            print(f"📋 [ALLOCATOR] Modified allocation: {new_allocation}", file=sys.stderr)
+
+            return {
+                "messages": [AIMessage(content=f"[ALLOCATOR]\n{reasoning}")],
+                "allocation_reasoning": reasoning,
+                "allocation": new_allocation,
+                "allocation_strategy": "user_modified",
+                "excluded_by_allocator": [],
+            }
+
+    # Priority 2: If force_algorithmic_allocation is True, skip LLM entirely
     if force_algo:
         print(f"🔧 [ALLOCATOR] Force algorithmic allocation enabled - skipping LLM", file=sys.stderr)
         env = state.get("environment", {})
@@ -1070,11 +1134,19 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
     synthetic_starts = env.get("synthetic_starts", {}) or {}
 
     # Build real airport IDs set for defensive home_airport validation
-    real_airport_ids: set[str] = {
-        str(a.get("id", a.get("label")))
-        for a in (env.get("airports") or [])
-        if not a.get("is_synthetic", False)
-    }
+    # A real airport must:
+    # 1. NOT have is_synthetic=True flag
+    # 2. NOT have an ID ending in _START (synthetic start pattern)
+    real_airport_ids: set[str] = set()
+    for a in (env.get("airports") or []):
+        aid = str(a.get("id", a.get("label", "")))
+        # Skip if marked as synthetic
+        if a.get("is_synthetic", False):
+            continue
+        # Skip if ID matches synthetic start pattern (e.g., D1_START, D2_START)
+        if aid.endswith("_START"):
+            continue
+        real_airport_ids.add(aid)
 
     routes = {}
     route_analysis_lines = ["ROUTE_ANALYSIS:"]
@@ -1232,12 +1304,15 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                 }
 
                 # For best_end mode, set valid_end_airports to real airports only
+                # CRITICAL: Synthetic starts (e.g., D1_START, D2_START) must NEVER be endpoints
                 if mode == "best_end":
-                    real_airport_ids = [
+                    valid_end_airports_for_solver = [
                         a["id"] for a in env.get("airports", [])
                         if not a.get("is_synthetic", False)
+                        and not str(a.get("id", "")).endswith("_START")
                     ]
-                    solver_env["valid_end_airports"] = real_airport_ids
+                    solver_env["valid_end_airports"] = valid_end_airports_for_solver
+                    print(f"   ✈️ [v4] Valid end airports (real only): {valid_end_airports_for_solver}", flush=True)
 
                 # Only set end_airport if fixed end mode
                 if mode == "end" and end_airport:

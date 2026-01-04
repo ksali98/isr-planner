@@ -113,6 +113,13 @@ class OrienteeringSolverInterface:
             "end_airport": end_airport_id,
         }
 
+        # CRITICAL: Pass valid_end_airports if provided
+        # This filters which airports can be used as endpoints in best_end mode
+        # Synthetic starts (D1_START, D2_START, etc.) should NEVER be valid endpoints
+        if "valid_end_airports" in env_data:
+            solver_env["valid_end_airports"] = env_data["valid_end_airports"]
+            print(f"  ✈️ Passing valid_end_airports to solver: {solver_env['valid_end_airports']}", flush=True)
+
         # DEBUG: Print what we're passing to the solver
         print("\n" + "="*70, flush=True)
         print("🔍 ORIENTEERING_INTERFACE.solve() - Data passed to solver:", flush=True)
