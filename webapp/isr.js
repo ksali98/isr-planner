@@ -206,39 +206,36 @@ function concatenateTrajectories(existingTraj, newTraj) {
 /**
  * Build cumulative routes from MissionReplay segments 0 to segmentIndex
  * This is the SINGLE SOURCE OF TRUTH for trajectory building
+ *
+ * IMPORTANT: Each segment in MissionReplay stores CUMULATIVE trajectories
+ * (frozen + new), not just that segment's portion. So we return the LAST
+ * segment's routes that have data for each drone.
+ *
  * @param {number} segmentIndex - Build routes up to and including this segment
  * @returns {Object} Routes object with cumulative trajectories per drone
  */
 function buildCumulativeRoutesUpToSegment(segmentIndex) {
   const cumulativeRoutes = {};
 
+  // Each segment stores CUMULATIVE trajectories, so we want the LATEST
+  // trajectory for each drone (from the highest segment that has it)
   for (let segIdx = 0; segIdx <= segmentIndex; segIdx++) {
     const seg = missionReplay.getSegment(segIdx);
     if (!seg || !seg.solution || !seg.solution.routes) continue;
 
     Object.entries(seg.solution.routes).forEach(([did, routeData]) => {
       const traj = routeData.trajectory || [];
-      const route = routeData.route || [];
       if (traj.length === 0) return; // Skip empty trajectories
 
-      if (!cumulativeRoutes[did]) {
-        // First segment for this drone - copy all properties
-        cumulativeRoutes[did] = {
-          ...routeData,
-          trajectory: [...traj],
-          route: [...route],
-          distance: routeData.distance || 0
-        };
-        console.log(`🔗 D${did} seg${segIdx}: initial ${traj.length} pts`);
-      } else {
-        // Concatenate with previous segments
-        cumulativeRoutes[did].trajectory = concatenateTrajectories(
-          cumulativeRoutes[did].trajectory, traj
-        );
-        cumulativeRoutes[did].route = cumulativeRoutes[did].route.concat(route);
-        cumulativeRoutes[did].distance += (routeData.distance || 0);
-        console.log(`🔗 D${did} seg${segIdx}: added ${traj.length} pts, cumulative now ${cumulativeRoutes[did].trajectory.length} pts`);
-      }
+      // REPLACE with this segment's routes (they're cumulative)
+      // Later segments have more complete trajectories
+      cumulativeRoutes[did] = {
+        ...routeData,
+        trajectory: [...traj],
+        route: [...(routeData.route || [])],
+        distance: routeData.distance || 0
+      };
+      console.log(`🔗 D${did} seg${segIdx}: set to ${traj.length} pts (cumulative)`);
     });
   }
 
@@ -4276,19 +4273,20 @@ function updateStatsFromRoutes() {
   const envTargets = (state.env && state.env.targets) || [];
   const totalTargets = envTargets.length; // reserved if you need it
 
-  // For segmented missions: aggregate stats across ALL segments from MissionReplay
-  // This ensures we count ALL targets visited by each drone, not just current segment
+  // For segmented missions: get stats from the LAST segment for each drone
+  // Each segment stores CUMULATIVE data, so the last segment has the complete picture
   const segmentCount = missionReplay.getSegmentCount();
   const isMultiSegment = segmentCount > 1;
 
-  // Build cumulative stats per drone from all segments
+  // Build stats per drone - use LAST segment that has data for each drone
+  // (since segments store cumulative trajectories, later segments have more complete data)
   const droneStats = {};
   for (let did = 1; did <= 5; did++) {
     droneStats[did] = { targets: new Set(), points: 0, distance: 0 };
   }
 
   if (isMultiSegment) {
-    // Aggregate from all MissionReplay segments
+    // Find the LAST segment with data for each drone (stores cumulative values)
     for (let i = 0; i < segmentCount; i++) {
       const seg = missionReplay.getSegment(i);
       if (!seg || !seg.solution || !seg.solution.routes) continue;
@@ -4298,18 +4296,21 @@ function updateStatsFromRoutes() {
         const points = Number(routeData.points || 0);
         const distance = Number(routeData.distance || 0);
 
-        // Count unique targets (using Set to avoid double counting)
+        // Count targets from route
+        const targets = new Set();
         route.forEach(label => {
           if (String(label).toUpperCase().startsWith("T")) {
-            droneStats[did].targets.add(label);
+            targets.add(label);
           }
         });
 
-        droneStats[did].points += points;
-        droneStats[did].distance += distance;
+        // REPLACE (not add) - later segments have cumulative data
+        droneStats[did].targets = targets;
+        droneStats[did].points = points;
+        droneStats[did].distance = distance;
       });
     }
-    console.log(`📊 Multi-segment stats aggregated from ${segmentCount} segments`);
+    console.log(`📊 Multi-segment stats from ${segmentCount} segments (using cumulative from last)`);
   }
 
   let missionPoints = 0;
