@@ -1734,6 +1734,14 @@ function acceptSolutionWithManager() {
         // This segment's trajectory = cumulative - previous
         const segmentTraj = cumulativeTraj.slice(prevTraj.length);
 
+        // CRITICAL: If segmentTraj is empty but cumulativeTraj had data, this drone finished
+        // in an earlier segment - don't store an empty trajectory, skip it entirely
+        // so buildCombinedRoutesFromSegments can use the earlier segment's data
+        if (segmentTraj.length === 0 && cumulativeTraj.length > 0) {
+          console.log(`[ACCEPT] Segment ${currentSegIdx} D${did}: SKIPPING - drone finished earlier (cumulative=${cumulativeTraj.length}pts, prev=${prevTraj.length}pts)`);
+          return; // Skip this drone - its data is in earlier segments
+        }
+
         segmentSolution.routes[did] = {
           ...routeData,
           trajectory: segmentTraj,
@@ -1847,6 +1855,14 @@ function acceptSolutionWithManager() {
 
         // This segment's trajectory = full - previous
         const segmentTraj = fullTraj.slice(prevTraj.length);
+
+        // CRITICAL: If segmentTraj is empty but fullTraj had data, this drone finished
+        // in an earlier segment - don't store an empty trajectory, skip it entirely
+        // so buildCombinedRoutesFromSegments can use the earlier segment's data
+        if (segmentTraj.length === 0 && fullTraj.length > 0) {
+          console.log(`[ACCEPT] Final segment ${currentSegIdx} D${did}: SKIPPING - drone finished earlier (full=${fullTraj.length}pts, prev=${prevTraj.length}pts)`);
+          return; // Skip this drone - its data is in earlier segments
+        }
 
         segmentSolution.routes[did] = {
           ...routeData,
