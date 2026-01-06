@@ -179,7 +179,8 @@ class Segment {
     cutPosition = null,      // [x, y] position where segment was cut (legacy, drone 1)
     cutPositions = null,     // { [droneId]: [x, y] } per-drone cut positions for marker display
     lostDrones = null,       // Array of drone IDs that were lost at this checkpoint
-    visitedTargets = null    // Array of target IDs visited up to this segment
+    visitedTargets = null,   // Array of target IDs visited up to this segment
+    droneConfigs = null      // Drone configs at time of solve (which drones enabled, fuel, airports)
   }) {
     this.index = index;
     this.solution = Object.freeze(JSON.parse(JSON.stringify(solution)));
@@ -209,6 +210,8 @@ class Segment {
     this.lostDrones = lostDrones ? Object.freeze([...lostDrones]) : null;
     // Visited targets up to this segment
     this.visitedTargets = visitedTargets ? Object.freeze([...visitedTargets]) : null;
+    // Drone configs at time of solve (frozen deep copy)
+    this.droneConfigs = droneConfigs ? Object.freeze(JSON.parse(JSON.stringify(droneConfigs))) : null;
     Object.freeze(this);
   }
 
@@ -794,6 +797,7 @@ function mergeEnvForwardFromCurrent(startSegmentIndex) {
       cutPosition: seg.cutPosition,
       cutPositions: seg.cutPositions,
       cutDistance: seg.cutDistance,  // Preserve cutDistance for segmentInfo workflow
+      droneConfigs: seg.droneConfigs,  // Preserve droneConfigs
     });
   }
 
@@ -1242,6 +1246,7 @@ function acceptSolution() {
       cutDistance: existingSegment.cutDistance,
       cutPositions: existingSegment.cutPositions,
       isCheckpointReplan: existingSegment.isCheckpointReplan,
+      droneConfigs: JSON.parse(JSON.stringify(state.droneConfigs)),  // Store current droneConfigs
     });
     segment = missionReplay.getSegment(currentIdx);
     if (nextSegment) {
@@ -1261,6 +1266,7 @@ function acceptSolution() {
       lostDrones: state.pendingLostDrones.length > 0
         ? [...state.pendingLostDrones]
         : null,
+      droneConfigs: JSON.parse(JSON.stringify(state.droneConfigs)),  // Store current droneConfigs
     });
     missionReplay.setCurrentSegmentIndex(segment.index);
   }
@@ -1472,6 +1478,7 @@ function acceptSolutionWithManager() {
       cutDistance: currentSeg.cutDistance,
       cutPositions: currentSeg.cutPositions,
       isCheckpointReplan: currentSeg.isCheckpointReplan,
+      droneConfigs: JSON.parse(JSON.stringify(state.droneConfigs)),  // Store current droneConfigs
     });
   }
 
@@ -1771,21 +1778,30 @@ function acceptSolutionWithManager() {
 
     state.env = displayEnv;
 
-    // PRESERVE current state.droneConfigs - user's UI checkboxes are the source of truth
-    // For fresh segmentation: user controls which drones are enabled via UI
-    // For imported segments: UI was already synced to segment's droneConfigs on load
-    // Either way, state.droneConfigs reflects what the user wants for the NEXT solve
-    // Do NOT load from stored segment data (that would reset user's choices)
-
-    // Log which drones are disabled going into new segment
-    const disabledDrones = Object.entries(state.droneConfigs)
-      .filter(([, cfg]) => cfg && !cfg.enabled)
-      .map(([did]) => did);
-    if (disabledDrones.length > 0) {
-      console.log(`[ACCEPT] Preserving disabled drones for segment ${newSegIdx}: ${disabledDrones.join(", ")}`);
+    // For IMPORTED segmented missions: Load the new segment's droneConfigs
+    // This reflects which drones were active when this segment was originally solved
+    // For FRESH segmentation: Preserve user's current UI choices
+    if (segmentedImport.isActive()) {
+      // Get the new segment's droneConfigs (derived from trajectory data on import)
+      const newSegDroneConfigs = segmentedImport.getDroneConfigsForSegment(newSegIdx);
+      if (newSegDroneConfigs && Object.keys(newSegDroneConfigs).length > 0) {
+        state.droneConfigs = JSON.parse(JSON.stringify(newSegDroneConfigs));
+        console.log(`[ACCEPT] Loaded segment ${newSegIdx} droneConfigs:`,
+          Object.entries(newSegDroneConfigs).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(','));
+        // Sync UI checkboxes to match
+        syncUiWithDroneConfigs(state.droneConfigs);
+      }
+    } else {
+      // Fresh segmentation: preserve user's current choices
+      const disabledDrones = Object.entries(state.droneConfigs)
+        .filter(([, cfg]) => cfg && !cfg.enabled)
+        .map(([did]) => did);
+      if (disabledDrones.length > 0) {
+        console.log(`[ACCEPT] Preserving disabled drones for segment ${newSegIdx}: ${disabledDrones.join(", ")}`);
+      }
     }
 
-    // Sync env with current droneConfigs (preserve user's choices)
+    // Sync env with current droneConfigs
     state.env.drone_configs = JSON.parse(JSON.stringify(state.droneConfigs));
     missionState.acceptedEnv = JSON.parse(JSON.stringify(displayEnv));
     missionState.acceptedEnv.drone_configs = JSON.parse(JSON.stringify(state.droneConfigs));
@@ -2180,6 +2196,13 @@ function resetMission() {
     state.env = JSON.parse(JSON.stringify(firstSegment.env));
     missionState.acceptedEnv = JSON.parse(JSON.stringify(firstSegment.env));
 
+    // CRITICAL: Restore segment 0's droneConfigs (which drones were enabled)
+    if (firstSegment.droneConfigs) {
+      state.droneConfigs = JSON.parse(JSON.stringify(firstSegment.droneConfigs));
+      state.env.drone_configs = state.droneConfigs;
+      console.log(`[resetMission] Restored segment 0 droneConfigs: enabled=[${Object.entries(state.droneConfigs).filter(([_,c])=>c.enabled).map(([d])=>d).join(",")}]`);
+    }
+
     // For fresh segmentation (NOT segmentInfo workflow), filter targets to only those in segment 0's routes
     // This is because during fresh segmentation, segment 0 is created with ALL targets in env,
     // but we only want to show the targets that the solution actually visits
@@ -2267,6 +2290,8 @@ function resetMission() {
     setMissionMode(MissionMode.READY_TO_ANIMATE, "mission reset to start");
     appendDebugLine("🔄 Mission reset - ready to replay from beginning");
   }
+  // Sync UI checkboxes with restored droneConfigs
+  initDroneConfigsFromEnv();
   updateAirportDropdowns();
   updateAnimationButtonStates();
   updateStatsFromRoutes();
@@ -3477,13 +3502,16 @@ async function exportEnvironment() {
           const activeTargets = (s.env?.targets || []).map(t => t.id);
 
           // 4. Drone configs for THIS segment
-          // Use the segment's actual drone_configs if available, otherwise derive from cumulative lost
+          // Priority: s.droneConfigs (set by Accept) > s.env.drone_configs > derive from cumulative lost
           let segmentDroneConfigs;
-          if (s.env?.drone_configs) {
-            // Use segment's own drone_configs (source of truth)
+          if (s.droneConfigs && Object.keys(s.droneConfigs).length > 0) {
+            // Best source: segment's own droneConfigs (saved by Accept at solve time)
+            segmentDroneConfigs = JSON.parse(JSON.stringify(s.droneConfigs));
+          } else if (s.env?.drone_configs && Object.keys(s.env.drone_configs).length > 0) {
+            // Fallback: env.drone_configs
             segmentDroneConfigs = JSON.parse(JSON.stringify(s.env.drone_configs));
           } else {
-            // Fallback: derive from baseDroneConfigs + cumulativeLost
+            // Last resort: derive from baseDroneConfigs + cumulativeLost
             segmentDroneConfigs = JSON.parse(JSON.stringify(baseDroneConfigs));
             cumulativeLost.forEach(did => {
               if (segmentDroneConfigs[did]) {
@@ -4405,12 +4433,14 @@ function loadSegmentInfoFromJson(data, filename = "") {
   for (let i = 0; i < totalSegments; i++) {
     const cutDistance = segmentedImport.getCutDistanceForSegment(i);
     const lostDrones = segmentedImport.getLostDronesForSegment(i);
+    const segDroneConfigs = segmentedImport.getDroneConfigsForSegment(i);
     // Don't load cutPositions on import - they're calculated fresh when you Accept
     // const cutPositions = segmentedImport.getCutPositionForSegment(i);
 
     // Log segment info
     const visited = segmentedImport.getVisitedTargetsForSegment(i);
-    appendDebugLine(`   Segment ${i}: cutDist=${cutDistance.toFixed(1)}, visited=[${visited.join(",")}], lostDrones=[${lostDrones.join(",")}]`);
+    const enabledDrones = Object.entries(segDroneConfigs || {}).filter(([_, c]) => c.enabled).map(([d]) => d);
+    appendDebugLine(`   Segment ${i}: cutDist=${cutDistance.toFixed(1)}, visited=[${visited.join(",")}], lostDrones=[${lostDrones.join(",")}], enabled=[${enabledDrones.join(",")}]`);
 
     missionReplay.addSegment({
       solution: { routes: {}, sequences: {} },
@@ -4419,6 +4449,7 @@ function loadSegmentInfoFromJson(data, filename = "") {
       cutPositions: null,  // Don't copy cutPositions on import - they're set when you Accept
       isCheckpointReplan: i > 0,
       lostDrones: lostDrones.length > 0 ? lostDrones : null,  // Drones killed at this checkpoint
+      droneConfigs: segDroneConfigs,  // Store segment's drone configs (which drones enabled)
     });
   }
 
@@ -4455,9 +4486,18 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   // 2. Set up global state - show only segment 0's targets on import
   const displayEnv = segmentedImport.getEnvForDisplay();  // Only segment 0's targets
   const fullEnv = segmentedImport.getFullEnv();           // All targets for snapshot
+
+  // DEBUG: Log what displayEnv.drone_configs contains
+  console.log(`[loadSegmentedMissionFromJson] displayEnv.drone_configs:`,
+    Object.entries(displayEnv.drone_configs || {}).map(([d, c]) => `D${d}:${c.enabled}`).join(', '));
+
   state.env = displayEnv;
   state.droneConfigs = JSON.parse(JSON.stringify(displayEnv.drone_configs || {}));
   state.env.drone_configs = state.droneConfigs;
+
+  // DEBUG: Log state.droneConfigs after assignment
+  console.log(`[loadSegmentedMissionFromJson] state.droneConfigs after assignment:`,
+    Object.entries(state.droneConfigs).map(([d, c]) => `D${d}:${c.enabled}`).join(', '));
 
   // Store initial snapshot (ALL targets - never overwrite this)
   state.initialEnvSnapshot = JSON.parse(JSON.stringify(fullEnv));
@@ -4481,12 +4521,14 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   for (let i = 0; i < totalSegments; i++) {
     const cutDistance = segmentedImport.getCutDistanceForSegment(i);
     const lostDrones = segmentedImport.getLostDronesForSegment(i);
+    const segDroneConfigs = segmentedImport.getDroneConfigsForSegment(i);
     // Don't load cutPositions on import - they're calculated fresh when you Accept
     // const cutPositions = segmentedImport.getCutPositionForSegment(i);
 
     // Log segment info
     const visited = segmentedImport.getVisitedTargetsForSegment(i);
-    appendDebugLine(`   Segment ${i}: cutDist=${cutDistance.toFixed(1)}, visited=[${visited.join(",")}], lostDrones=[${lostDrones.join(",")}]`);
+    const enabledDrones = Object.entries(segDroneConfigs || {}).filter(([_, c]) => c.enabled).map(([d]) => d);
+    appendDebugLine(`   Segment ${i}: cutDist=${cutDistance.toFixed(1)}, visited=[${visited.join(",")}], lostDrones=[${lostDrones.join(",")}], enabled=[${enabledDrones.join(",")}]`);
 
     missionReplay.addSegment({
       solution: { routes: {}, sequences: {} },
@@ -4495,6 +4537,7 @@ function loadSegmentedMissionFromJson(data, filename = "") {
       cutPositions: null,  // Don't copy cutPositions on import - they're set when you Accept
       isCheckpointReplan: i > 0,
       lostDrones: lostDrones.length > 0 ? lostDrones : null,  // Drones killed at this checkpoint
+      droneConfigs: segDroneConfigs,  // Store segment's drone configs (which drones enabled)
     });
   }
 
@@ -6219,8 +6262,11 @@ function applyDraftSolutionToUI(draft) {
   // Deep copy to allow UI modifications without affecting the stored draft
   state.sequences = JSON.parse(JSON.stringify(draft.sequences || {}));
 
-  // For segmented import: MERGE draft routes with frozen routes (don't replace!)
-  if (segmentedImport.isActive() && draft.isCheckpointReplan) {
+  // For segmented import OR fresh segmentation checkpoint: MERGE draft routes with frozen routes (don't replace!)
+  // Fresh segmentation: state.checkpoint.active indicates we cut during animation
+  const isFreshSegmentationCheckpoint = state.checkpoint?.active && draft.isCheckpointReplan;
+  if ((segmentedImport.isActive() && draft.isCheckpointReplan) || isFreshSegmentationCheckpoint) {
+    console.log(`📥 Merging frozen routes (segmentedImport=${segmentedImport.isActive()}, freshCheckpoint=${isFreshSegmentationCheckpoint})`);
     // Keep existing frozen routes and add/update with draft routes
     const mergedRoutes = { ...state.routes };
     Object.entries(draft.routes || {}).forEach(([did, routeData]) => {

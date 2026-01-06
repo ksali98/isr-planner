@@ -151,7 +151,14 @@ class SegmentedMissionManager {
 
   getDroneConfigs(segmentIndex) {
     const seg = this._segments[segmentIndex];
-    return seg?.droneConfigs ? JSON.parse(JSON.stringify(seg.droneConfigs)) : {};
+    // Return segment's droneConfigs if it has meaningful data, otherwise fall back to baseEnv
+    if (seg?.droneConfigs && Object.keys(seg.droneConfigs).length > 0) {
+      return JSON.parse(JSON.stringify(seg.droneConfigs));
+    }
+    // Fallback to base environment's drone_configs
+    return this._baseEnv?.drone_configs
+      ? JSON.parse(JSON.stringify(this._baseEnv.drone_configs))
+      : {};
   }
 
   getStartPositions(segmentIndex) {
@@ -276,11 +283,19 @@ class SegmentedMissionManager {
     if (segments.length === 0) return null;
 
     // Extract base environment
-    const seg0Env = segments[0]?.env || {};
+    // CRITICAL: Use segment 0's droneConfigs as the base, NOT the top-level data.drone_configs
+    // The top-level drone_configs may reflect the state at export time (last segment's config)
+    const seg0 = segments[0] || {};
+    const seg0Env = seg0.env || {};
+    const seg0DroneConfigs = seg0.droneConfigs || data.drone_configs || seg0Env.drone_configs || {};
+
+    console.log(`[loadFromSegmentsArray] seg0.droneConfigs keys:`, Object.keys(seg0.droneConfigs || {}));
+    console.log(`[loadFromSegmentsArray] Using seg0DroneConfigs:`, Object.entries(seg0DroneConfigs).map(([d,c]) => `D${d}:${c.enabled}`).join(', '));
+
     this._baseEnv = {
       airports: JSON.parse(JSON.stringify(data.airports || seg0Env.airports || [])),
       sams: JSON.parse(JSON.stringify(data.sams || seg0Env.sams || [])),
-      drone_configs: JSON.parse(JSON.stringify(data.drone_configs || seg0Env.drone_configs || {}))
+      drone_configs: JSON.parse(JSON.stringify(seg0DroneConfigs))
     };
 
     // Collect all unique targets
@@ -295,7 +310,71 @@ class SegmentedMissionManager {
     this._allTargets = Array.from(targetMap.values());
 
     // Build segment data
+    // IMPORTANT: We derive droneConfigs from actual trajectory data, not stored droneConfigs
+    // The stored droneConfigs may be incorrect (export bug - all segments got final state)
+    console.log(`[loadFromSegmentsArray] ====== STARTING DERIVATION for ${segments.length} segments ======`);
+
     segments.forEach((seg, idx) => {
+      console.log(`[loadFromSegmentsArray] Processing segment ${idx}...`);
+
+      // Start with a FRESH drone config template (all drones with default settings)
+      // Don't use _baseEnv.drone_configs because it may have wrong enabled states
+      const derivedDroneConfigs = {};
+      for (let d = 1; d <= 5; d++) {
+        const did = String(d);
+        const baseConfig = this._baseEnv.drone_configs[did] || {};
+        derivedDroneConfigs[did] = {
+          enabled: false,  // Start with all disabled, we'll enable the active ones
+          fuel_budget: baseConfig.fuel_budget ?? 150,
+          start_airport: baseConfig.start_airport || `A${d}`,
+          end_airport: baseConfig.end_airport || `A${d}`,
+          target_access: baseConfig.target_access || { a: true, b: true, c: true, d: true, e: true }
+        };
+      }
+
+      // Derive which drones were active for this segment
+      let activeDrones = new Set();
+
+      // Look at next segment's frozenTrajectories to see which drones flew in this segment
+      const nextSeg = segments[idx + 1];
+      console.log(`[loadFromSegmentsArray] Segment ${idx}: nextSeg exists=${!!nextSeg}, nextSeg.frozenTrajectories keys=${nextSeg?.frozenTrajectories ? Object.keys(nextSeg.frozenTrajectories) : 'N/A'}`);
+
+      if (nextSeg && nextSeg.frozenTrajectories && Object.keys(nextSeg.frozenTrajectories).length > 0) {
+        activeDrones = new Set(Object.keys(nextSeg.frozenTrajectories));
+        console.log(`[loadFromSegmentsArray] Segment ${idx}: ✅ Deriving active drones from seg${idx+1} frozen: [${[...activeDrones].join(',')}]`);
+      } else if (seg.startPositions && Object.keys(seg.startPositions).length > 0) {
+        // For last segment or segment without next frozen data, use startPositions
+        activeDrones = new Set(Object.keys(seg.startPositions));
+        console.log(`[loadFromSegmentsArray] Segment ${idx}: ✅ Deriving active drones from startPositions: [${[...activeDrones].join(',')}]`);
+      } else if (idx === 0 && (!nextSeg || !nextSeg.frozenTrajectories)) {
+        // Segment 0 with no next segment data - use stored droneConfigs
+        console.log(`[loadFromSegmentsArray] Segment ${idx}: ⚠️ Using stored droneConfigs (segment 0 with no frozen data)`);
+        if (seg.droneConfigs) {
+          Object.entries(seg.droneConfigs).forEach(([did, cfg]) => {
+            if (cfg.enabled) activeDrones.add(did);
+          });
+        }
+      } else {
+        // Fallback: use stored droneConfigs if we can't derive
+        console.log(`[loadFromSegmentsArray] Segment ${idx}: ⚠️ Using stored droneConfigs (no trajectory data to derive from)`);
+        if (seg.droneConfigs) {
+          Object.entries(seg.droneConfigs).forEach(([did, cfg]) => {
+            if (cfg.enabled) activeDrones.add(did);
+          });
+        }
+      }
+
+      // Enable the active drones
+      console.log(`[loadFromSegmentsArray] Segment ${idx}: activeDrones before enable: [${[...activeDrones].join(',')}]`);
+      activeDrones.forEach(did => {
+        if (derivedDroneConfigs[did]) {
+          derivedDroneConfigs[did].enabled = true;
+        }
+      });
+
+      console.log(`[loadFromSegmentsArray] Segment ${idx} final config:`,
+        Object.entries(derivedDroneConfigs).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(',') || 'none');
+
       this._segments.push({
         index: idx,
         frozenTargets: seg.frozenTargets ? [...seg.frozenTargets] : [],
@@ -303,9 +382,7 @@ class SegmentedMissionManager {
         activeTargets: seg.activeTargets
           ? (seg.env?.targets || []).filter(t => seg.activeTargets.includes(t.id))
           : (seg.env?.targets || []),
-        droneConfigs: seg.droneConfigs
-          ? JSON.parse(JSON.stringify(seg.droneConfigs))
-          : JSON.parse(JSON.stringify(this._baseEnv.drone_configs)),
+        droneConfigs: derivedDroneConfigs,
         startPositions: seg.startPositions ? JSON.parse(JSON.stringify(seg.startPositions)) : null,
         cutDistance: seg.cutDistance ?? 0,
         lostDrones: seg.lostDrones ? [...seg.lostDrones] : [],
@@ -313,8 +390,18 @@ class SegmentedMissionManager {
       });
     });
 
+    console.log(`[loadFromSegmentsArray] ====== DERIVATION COMPLETE ======`);
+
     this._currentSegmentIndex = 0;
     this._isActive = true;
+
+    // Update _baseEnv.drone_configs with segment 0's derived config (for getEnvForDisplay etc.)
+    const seg0Derived = this._segments[0]?.droneConfigs;
+    if (seg0Derived) {
+      this._baseEnv.drone_configs = JSON.parse(JSON.stringify(seg0Derived));
+      console.log(`[SegmentedMissionManager] Updated baseEnv with seg0 derived configs:`,
+        Object.entries(seg0Derived).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(','));
+    }
 
     console.log(`[SegmentedMissionManager] Loaded ${this._segments.length} segments, ${this._allTargets.length} targets`);
 
@@ -780,8 +867,8 @@ function syncUiWithDroneConfigs(droneConfigs) {
 // Export for use in isr.js
 if (typeof window !== 'undefined') {
   window.SegmentedMissionManager = SegmentedMissionManager;
-  window.MissionReplayClean = MissionReplay;
-  window.SegmentClean = Segment;
+  window.MissionReplayClean = SM_MissionReplay;
+  window.SegmentClean = SM_Segment;
   window.exportSegmentedMission = exportSegmentedMission;
   window.exportSingleEnvironment = exportSingleEnvironment;
   window.isSegmentedJson = isSegmentedJson;
