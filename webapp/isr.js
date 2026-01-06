@@ -167,7 +167,7 @@ const missionState = {
  * - The solution (routes/trajectories)
  * - The checkpoint boundary (where this segment ends and next begins)
  */
-class MissionSegment {
+class Segment {
   constructor({
     index,
     solution,
@@ -254,7 +254,7 @@ class MissionReplay {
    * Add a new segment to the mission
    */
   addSegment(segmentData) {
-    const segment = new MissionSegment({
+    const segment = new Segment({
       index: this._segments.length,
       ...segmentData
     });
@@ -374,7 +374,7 @@ class MissionReplay {
       console.warn(`[MissionReplay] Cannot replace segment at invalid index ${index}`);
       return false;
     }
-    const newSegment = new MissionSegment({
+    const newSegment = new Segment({
       index: index,
       ...segmentData
     });
