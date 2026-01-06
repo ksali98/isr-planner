@@ -4110,6 +4110,42 @@ function updateStatsFromRoutes() {
   const envTargets = (state.env && state.env.targets) || [];
   const totalTargets = envTargets.length; // reserved if you need it
 
+  // For segmented missions: aggregate stats across ALL segments from MissionReplay
+  // This ensures we count ALL targets visited by each drone, not just current segment
+  const segmentCount = missionReplay.getSegmentCount();
+  const isMultiSegment = segmentCount > 1;
+
+  // Build cumulative stats per drone from all segments
+  const droneStats = {};
+  for (let did = 1; did <= 5; did++) {
+    droneStats[did] = { targets: new Set(), points: 0, distance: 0 };
+  }
+
+  if (isMultiSegment) {
+    // Aggregate from all MissionReplay segments
+    for (let i = 0; i < segmentCount; i++) {
+      const seg = missionReplay.getSegment(i);
+      if (!seg || !seg.solution || !seg.solution.routes) continue;
+
+      Object.entries(seg.solution.routes).forEach(([did, routeData]) => {
+        const route = routeData.route || [];
+        const points = Number(routeData.points || 0);
+        const distance = Number(routeData.distance || 0);
+
+        // Count unique targets (using Set to avoid double counting)
+        route.forEach(label => {
+          if (String(label).toUpperCase().startsWith("T")) {
+            droneStats[did].targets.add(label);
+          }
+        });
+
+        droneStats[did].points += points;
+        droneStats[did].distance += distance;
+      });
+    }
+    console.log(`📊 Multi-segment stats aggregated from ${segmentCount} segments`);
+  }
+
   let missionPoints = 0;
   let missionFuel = 0;
   let missionBudget = 0;
@@ -4119,27 +4155,37 @@ function updateStatsFromRoutes() {
     const idStr = String(did);
     const routeInfo = state.routes[idStr] || {};
     const droneConfig = state.droneConfigs[idStr] || {};
-    const route = routeInfo.route || [];
-    const points = Number(routeInfo.points || 0);
-    const distance = Number(routeInfo.distance || 0);
-    console.log(`📊 Drone ${did}: points=${points}, distance=${distance}, route=`, route);
+
+    let targetCount, points, distance;
+
+    if (isMultiSegment && droneStats[did].targets.size > 0) {
+      // Use aggregated stats for multi-segment missions
+      targetCount = droneStats[did].targets.size;
+      points = droneStats[did].points;
+      distance = droneStats[did].distance;
+      console.log(`📊 Drone ${did} (aggregated): targets=${targetCount}, points=${points}, distance=${distance.toFixed(1)}`);
+    } else {
+      // Single segment - use state.routes
+      const route = routeInfo.route || [];
+      points = Number(routeInfo.points || 0);
+      distance = Number(routeInfo.distance || 0);
+      targetCount = route.filter((label) =>
+        String(label).toUpperCase().startsWith("T")
+      ).length;
+      console.log(`📊 Drone ${did}: points=${points}, distance=${distance}, route=`, routeInfo.route || []);
+    }
 
     // Use fuel budget from droneConfigs (Config tab) as the source of truth
-    // Fall back to route info if config not available
     const budget = Number(droneConfig.fuel_budget || routeInfo.fuel_budget || 0);
 
-    const targetCount = route.filter((label) =>
-      String(label).toUpperCase().startsWith("T")
-    ).length;
-
-    const fuelUsed = distance; // for now, assume distance == fuel
+    const fuelUsed = distance;
     const pf = fuelUsed > 0 ? points / fuelUsed : 0;
 
     setText(`stat-d${did}-tp`, `${targetCount} / ${points}`);
     setText(`stat-d${did}-fuel`, `${Math.round(fuelUsed)} / ${Math.round(budget)}`);
     setText(`stat-d${did}-pf`, pf.toFixed(2));
 
-    if (route && route.length > 0) {
+    if (targetCount > 0 || points > 0) {
       missionPoints += points;
       missionFuel += fuelUsed;
       missionBudget += budget;
@@ -6162,12 +6208,20 @@ function applyDraftSolutionToUI(draft) {
     // Keep existing frozen routes and add/update with draft routes
     const mergedRoutes = { ...state.routes };
     Object.entries(draft.routes || {}).forEach(([did, routeData]) => {
+      const newTraj = routeData.trajectory || [];
+
+      // CRITICAL: If solver returned empty route for this drone, KEEP the frozen route
+      // Don't overwrite frozen trajectory with empty trajectory
+      if (newTraj.length === 0) {
+        console.log(`📥 D${did}: Solver returned empty route - KEEPING frozen trajectory (${mergedRoutes[did]?.trajectory?.length || 0}pts)`);
+        return; // Skip this drone - keep existing frozen route
+      }
+
       // For checkpoint replans, the draft contains ONLY the new segment's trajectory
       // We need to prepend the frozen trajectory for this drone
-      if (mergedRoutes[did] && mergedRoutes[did].trajectory) {
+      if (mergedRoutes[did] && mergedRoutes[did].trajectory && mergedRoutes[did].trajectory.length > 0) {
         // Already have frozen trajectory - concatenate new segment
         const frozenTraj = mergedRoutes[did].trajectory;
-        const newTraj = routeData.trajectory || [];
 
         // Check for duplicate at junction
         const lastPoint = frozenTraj[frozenTraj.length - 1];
