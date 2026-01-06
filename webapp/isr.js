@@ -157,143 +157,6 @@ const missionState = {
 };
 
 // ----------------------------------------------------
-// Trajectory Management Helpers - Single Source of Truth
-// ----------------------------------------------------
-
-/**
- * Calculate cumulative distances along a trajectory
- * @param {Array<[number, number]>} trajectory - Array of [x, y] points
- * @returns {{ cumulativeDistances: number[], totalDistance: number }}
- */
-function calculateCumulativeDistances(trajectory) {
-  const cumulativeDistances = [0];
-  let totalDistance = 0;
-  if (trajectory && trajectory.length >= 2) {
-    for (let i = 1; i < trajectory.length; i++) {
-      const dx = trajectory[i][0] - trajectory[i - 1][0];
-      const dy = trajectory[i][1] - trajectory[i - 1][1];
-      totalDistance += Math.sqrt(dx * dx + dy * dy);
-      cumulativeDistances.push(totalDistance);
-    }
-  }
-  return { cumulativeDistances, totalDistance };
-}
-
-/**
- * Concatenate two trajectories, handling duplicate junction points
- * @param {Array<[number, number]>} existingTraj - First trajectory
- * @param {Array<[number, number]>} newTraj - Second trajectory to append
- * @returns {Array<[number, number]>} Concatenated trajectory
- */
-function concatenateTrajectories(existingTraj, newTraj) {
-  if (!existingTraj || existingTraj.length === 0) {
-    return newTraj ? [...newTraj] : [];
-  }
-  if (!newTraj || newTraj.length === 0) {
-    return [...existingTraj];
-  }
-
-  const lastPoint = existingTraj[existingTraj.length - 1];
-  const firstPoint = newTraj[0];
-  const isDuplicate = Math.abs(lastPoint[0] - firstPoint[0]) < 0.001 &&
-                      Math.abs(lastPoint[1] - firstPoint[1]) < 0.001;
-
-  return isDuplicate
-    ? existingTraj.concat(newTraj.slice(1))
-    : existingTraj.concat(newTraj);
-}
-
-/**
- * Build cumulative routes from MissionReplay segments 0 to segmentIndex
- * This is the SINGLE SOURCE OF TRUTH for trajectory building
- *
- * Each segment stores that drone's CUMULATIVE trajectory at accept time.
- * But drones may finish at different segments - D1 might finish at seg2,
- * while D3 continues to seg5. So we need the LONGEST trajectory for each
- * drone, not just the last segment's data.
- *
- * @param {number} segmentIndex - Build routes up to and including this segment
- * @returns {Object} Routes object with cumulative trajectories per drone
- */
-function buildCumulativeRoutesUpToSegment(segmentIndex) {
-  const cumulativeRoutes = {};
-
-  // For each drone, keep the trajectory with the MOST points
-  // (that's their complete cumulative trajectory from their last active segment)
-  for (let segIdx = 0; segIdx <= segmentIndex; segIdx++) {
-    const seg = missionReplay.getSegment(segIdx);
-    if (!seg || !seg.solution || !seg.solution.routes) continue;
-
-    Object.entries(seg.solution.routes).forEach(([did, routeData]) => {
-      const traj = routeData.trajectory || [];
-      if (traj.length === 0) return; // Skip empty trajectories
-
-      const existingLen = cumulativeRoutes[did]?.trajectory?.length || 0;
-
-      // Keep the LONGER trajectory (drones that finish early won't have data in later segments)
-      if (traj.length >= existingLen) {
-        cumulativeRoutes[did] = {
-          ...routeData,
-          trajectory: [...traj],
-          route: [...(routeData.route || [])],
-          distance: routeData.distance || 0
-        };
-        console.log(`🔗 D${did} seg${segIdx}: updated to ${traj.length} pts (was ${existingLen})`);
-      } else {
-        console.log(`🔗 D${did} seg${segIdx}: keeping ${existingLen} pts (this seg has ${traj.length})`);
-      }
-    });
-  }
-
-  return cumulativeRoutes;
-}
-
-/**
- * Update state.routes from cumulative routes, optionally updating animation state
- * @param {Object} cumulativeRoutes - Routes object from buildCumulativeRoutesUpToSegment
- * @param {boolean} updateAnimationState - If true, also update animation distances
- */
-function updateStateRoutesFromCumulative(cumulativeRoutes, updateAnimationState = false) {
-  Object.entries(cumulativeRoutes).forEach(([did, routeData]) => {
-    // Initialize if needed
-    if (!state.routes[did]) {
-      state.routes[did] = {};
-    }
-
-    const oldLen = state.routes[did].trajectory?.length || 0;
-    state.routes[did].trajectory = routeData.trajectory;
-    state.routes[did].route = routeData.route;
-    state.routes[did].distance = routeData.distance;
-
-    // Copy other properties if present
-    if (routeData.points !== undefined) state.routes[did].points = routeData.points;
-    if (routeData.fuel_budget !== undefined) state.routes[did].fuel_budget = routeData.fuel_budget;
-
-    const newLen = state.routes[did].trajectory?.length || 0;
-    appendDebugLine(`🔄 D${did}: trajectory ${oldLen}→${newLen} pts`);
-
-    // Update animation state if requested
-    if (updateAnimationState && state.animation.drones[did]) {
-      const { cumulativeDistances, totalDistance } = calculateCumulativeDistances(routeData.trajectory);
-      state.animation.drones[did].cumulativeDistances = cumulativeDistances;
-      state.animation.drones[did].totalDistance = totalDistance;
-
-      // Re-enable animation if there's more to fly
-      if (state.animation.drones[did].distanceTraveled < totalDistance) {
-        if (!state.animation.drones[did].animating) {
-          appendDebugLine(`🔄 D${did}: Re-enabling animation (was finished, now has more trajectory)`);
-        }
-        state.animation.drones[did].animating = true;
-      }
-
-      appendDebugLine(`🔄 D${did}: totalDistance now ${totalDistance.toFixed(1)}, distanceTraveled=${state.animation.drones[did].distanceTraveled.toFixed(1)}, animating=${state.animation.drones[did].animating}`);
-    }
-
-    state.trajectoryVisible[did] = true;
-  });
-}
-
-// ----------------------------------------------------
 // MissionReplay - Clean architecture for segment-based mission replay
 // ----------------------------------------------------
 
@@ -2216,20 +2079,19 @@ function resetMission() {
   // NEW PATH: For SegmentedImportManager workflow
   // =====================================================
   if (segmentedImport.isActive()) {
-    console.log("[resetMission] SegmentedImportManager workflow - resetting with cumulative routes");
+    console.log("[resetMission] SegmentedImportManager workflow - resetting to segment 0 state");
 
-    // Build cumulative routes from ALL segments using centralized helper
-    const segmentCount = missionReplay.getSegmentCount();
-    if (segmentCount > 0) {
-      const cumulativeRoutes = buildCumulativeRoutesUpToSegment(segmentCount - 1);
-      state.routes = cumulativeRoutes;
+    // Reset to segment 0 (just the first segment's truncated trajectory with C1 marker)
+    const seg0 = missionReplay.getSegment(0);
+    if (seg0 && seg0.solution && seg0.solution.routes) {
+      state.routes = JSON.parse(JSON.stringify(seg0.solution.routes));
       Object.keys(state.routes).forEach(did => {
         state.trajectoryVisible[did] = true;
       });
-      console.log(`[resetMission] Built cumulative routes from ${segmentCount} segments for drones: ${Object.keys(cumulativeRoutes).join(", ")}`);
+      console.log("[resetMission] Loaded segment 0 routes");
     } else {
       state.routes = {};
-      console.log("[resetMission] No segments found");
+      console.log("[resetMission] No segment 0 solution found");
     }
 
     // CRITICAL: Start animation with EMPTY visited targets
@@ -2349,7 +2211,7 @@ function resetMission() {
   }
 
   // =====================================================
-  // 5. Restore routes (without drawing)
+  // 5. Restore first segment's routes (without drawing)
   // =====================================================
   // For segmentInfo workflow, we've cleared all solutions - start fresh with no routes
   if (isSegmentInfoWorkflow) {
@@ -2360,24 +2222,9 @@ function resetMission() {
     state.allocationStrategy = null;
     state.distanceMatrix = null;
     console.log(`[resetMission] segmentInfo workflow - cleared state.routes`);
-  } else if (missionReplay.getSegmentCount() > 1) {
-    // MULTI-SEGMENT: Build cumulative routes from ALL segments using centralized helper
-    console.log(`[resetMission] Building cumulative routes from ${missionReplay.getSegmentCount()} segments`);
-    const cumulativeRoutes = buildCumulativeRoutesUpToSegment(missionReplay.getSegmentCount() - 1);
-    state.routes = cumulativeRoutes;
-
-    // Restore other state from first segment
-    if (firstSegment && firstSegment.solution) {
-      state.sequences = JSON.parse(JSON.stringify(firstSegment.solution.sequences || {}));
-      state.wrappedPolygons = JSON.parse(JSON.stringify(firstSegment.solution.wrappedPolygons || []));
-      state.allocations = JSON.parse(JSON.stringify(firstSegment.solution.allocations || {}));
-      state.allocationStrategy = firstSegment.solution.allocationStrategy || null;
-      state.distanceMatrix = firstSegment.solution.distanceMatrix ? JSON.parse(JSON.stringify(firstSegment.solution.distanceMatrix)) : null;
-    }
-    console.log(`[resetMission] Cumulative routes built for drones: ${Object.keys(cumulativeRoutes).join(", ")}`);
   } else if (firstSegment && firstSegment.solution) {
-    // SINGLE SEGMENT: Just use segment 0's routes
     const solution = firstSegment.solution;
+    // Manually restore routes without calling applyDraftSolutionToUI (which draws)
     state.sequences = JSON.parse(JSON.stringify(solution.sequences || {}));
     state.routes = JSON.parse(JSON.stringify(solution.routes || {}));
     state.wrappedPolygons = JSON.parse(JSON.stringify(solution.wrappedPolygons || []));
@@ -4279,20 +4126,19 @@ function updateStatsFromRoutes() {
   const envTargets = (state.env && state.env.targets) || [];
   const totalTargets = envTargets.length; // reserved if you need it
 
-  // For segmented missions: get stats from the segment with MOST targets for each drone
-  // Drones finish at different segments - D1 might finish at seg2, D3 continues to seg5
-  // So we need the stats from each drone's most complete segment
+  // For segmented missions: aggregate stats across ALL segments from MissionReplay
+  // This ensures we count ALL targets visited by each drone, not just current segment
   const segmentCount = missionReplay.getSegmentCount();
   const isMultiSegment = segmentCount > 1;
 
-  // Build stats per drone - use segment with MOST targets for each drone
+  // Build cumulative stats per drone from all segments
   const droneStats = {};
   for (let did = 1; did <= 5; did++) {
     droneStats[did] = { targets: new Set(), points: 0, distance: 0 };
   }
 
   if (isMultiSegment) {
-    // Find the segment with MOST targets for each drone (that's their complete stats)
+    // Aggregate from all MissionReplay segments
     for (let i = 0; i < segmentCount; i++) {
       const seg = missionReplay.getSegment(i);
       if (!seg || !seg.solution || !seg.solution.routes) continue;
@@ -4302,23 +4148,18 @@ function updateStatsFromRoutes() {
         const points = Number(routeData.points || 0);
         const distance = Number(routeData.distance || 0);
 
-        // Count targets from route
-        const targets = new Set();
+        // Count unique targets (using Set to avoid double counting)
         route.forEach(label => {
           if (String(label).toUpperCase().startsWith("T")) {
-            targets.add(label);
+            droneStats[did].targets.add(label);
           }
         });
 
-        // Keep stats from segment with MORE targets (drones finish at different segments)
-        if (targets.size >= droneStats[did].targets.size) {
-          droneStats[did].targets = targets;
-          droneStats[did].points = points;
-          droneStats[did].distance = distance;
-        }
+        droneStats[did].points += points;
+        droneStats[did].distance += distance;
       });
     }
-    console.log(`📊 Multi-segment stats from ${segmentCount} segments (using max targets per drone)`);
+    console.log(`📊 Multi-segment stats aggregated from ${segmentCount} segments`);
   }
 
   let missionPoints = 0;
@@ -5640,10 +5481,22 @@ async function regenerateTrajectories() {
         if (frozenTraj && frozenTraj.length > 0) {
           // FROZEN TRAJECTORY RESPECT: Merge frozen trajectory with regenerated
           // The new trajectory starts from the synthetic start (cut position),
-          // so we simply append it to the frozen trajectory using helper
+          // so we simply append it to the frozen trajectory
           const newTraj = data.trajectory || [];
-          state.routes[did].trajectory = concatenateTrajectories(frozenTraj, newTraj);
-          console.log(`[regenerateTrajectories] D${did}: preserved ${frozenTraj.length}pt frozen, appended up to ${newTraj.length}pt new`);
+
+          // Check for duplicate at junction - new trajectory starts from synthetic start
+          // which should be at or near the last frozen point
+          const lastFrozen = frozenTraj[frozenTraj.length - 1];
+          const firstNew = newTraj[0];
+          const isDuplicate = lastFrozen && firstNew &&
+            Math.abs(lastFrozen[0] - firstNew[0]) < 1.0 &&
+            Math.abs(lastFrozen[1] - firstNew[1]) < 1.0;
+
+          state.routes[did].trajectory = isDuplicate
+            ? frozenTraj.concat(newTraj.slice(1))
+            : frozenTraj.concat(newTraj);
+
+          console.log(`[regenerateTrajectories] D${did}: preserved ${frozenTraj.length}pt frozen, appended ${isDuplicate ? newTraj.length - 1 : newTraj.length}pt new (isDuplicate=${isDuplicate})`);
         } else {
           // No frozen trajectory - use regenerated directly
           state.routes[did].trajectory = data.trajectory;
@@ -6036,11 +5889,54 @@ function buildCombinedRoutesFromSegments() {
     return state.routes;
   }
 
-  console.log(`[buildCombinedRoutesFromSegments] Combining ${segmentCount} segments using helper`);
+  console.log(`[buildCombinedRoutesFromSegments] Combining ${segmentCount} segments`);
   appendDebugLine(`Building combined routes from ${segmentCount} segments...`);
 
-  // Use centralized helper function
-  const combinedRoutes = buildCumulativeRoutesUpToSegment(segmentCount - 1);
+  const combinedRoutes = {};
+
+  for (let i = 0; i < segmentCount; i++) {
+    const seg = missionReplay.getSegment(i);
+    if (!seg || !seg.solution || !seg.solution.routes) {
+      console.log(`[buildCombinedRoutesFromSegments] Segment ${i}: no solution/routes`);
+      continue;
+    }
+
+    Object.entries(seg.solution.routes).forEach(([droneId, routeData]) => {
+      const trajectory = routeData.trajectory || [];
+      if (trajectory.length === 0) return;
+
+      if (!combinedRoutes[droneId]) {
+        // First segment for this drone - copy route data
+        combinedRoutes[droneId] = {
+          ...routeData,
+          trajectory: [...trajectory],
+          distance: routeData.distance || 0,
+        };
+        console.log(`[buildCombinedRoutesFromSegments] Drone ${droneId}: segment ${i} init with ${trajectory.length} pts`);
+      } else {
+        // Subsequent segment - concatenate trajectory
+        const existing = combinedRoutes[droneId].trajectory;
+        if (existing.length > 0 && trajectory.length > 0) {
+          const lastPoint = existing[existing.length - 1];
+          const firstPoint = trajectory[0];
+          // Check for duplicate point at junction
+          const isDuplicate = Math.abs(lastPoint[0] - firstPoint[0]) < 0.001 &&
+                             Math.abs(lastPoint[1] - firstPoint[1]) < 0.001;
+          if (isDuplicate) {
+            // Skip duplicate
+            combinedRoutes[droneId].trajectory = existing.concat(trajectory.slice(1));
+          } else {
+            combinedRoutes[droneId].trajectory = existing.concat(trajectory);
+          }
+        } else {
+          combinedRoutes[droneId].trajectory = existing.concat(trajectory);
+        }
+        // Accumulate distance
+        combinedRoutes[droneId].distance += (routeData.distance || 0);
+        console.log(`[buildCombinedRoutesFromSegments] Drone ${droneId}: segment ${i} added, total pts=${combinedRoutes[droneId].trajectory.length}`);
+      }
+    });
+  }
 
   const droneCount = Object.keys(combinedRoutes).length;
   appendDebugLine(`Combined routes: ${droneCount} drones from ${segmentCount} segments`);
@@ -6340,11 +6236,19 @@ function applyDraftSolutionToUI(draft) {
       // For checkpoint replans, the draft contains ONLY the new segment's trajectory
       // We need to prepend the frozen trajectory for this drone
       if (mergedRoutes[did] && mergedRoutes[did].trajectory && mergedRoutes[did].trajectory.length > 0) {
-        // Already have frozen trajectory - concatenate new segment using helper
+        // Already have frozen trajectory - concatenate new segment
         const frozenTraj = mergedRoutes[did].trajectory;
+
+        // Check for duplicate at junction
+        const lastPoint = frozenTraj[frozenTraj.length - 1];
+        const firstPoint = newTraj[0];
+        const isDuplicate = lastPoint && firstPoint &&
+          Math.abs(lastPoint[0] - firstPoint[0]) < 0.001 &&
+          Math.abs(lastPoint[1] - firstPoint[1]) < 0.001;
+
         mergedRoutes[did] = {
           ...routeData,
-          trajectory: concatenateTrajectories(frozenTraj, newTraj),
+          trajectory: isDuplicate ? frozenTraj.concat(newTraj.slice(1)) : frozenTraj.concat(newTraj),
           distance: (mergedRoutes[did].distance || 0) + (routeData.distance || 0),
         };
       } else {
@@ -6380,9 +6284,20 @@ function applyDraftSolutionToUI(draft) {
     const cutDist = state.pendingCutDistance;
     Object.keys(state.animation.drones).forEach((did) => {
       if (state.routes[did]) {
-        const trajectory = state.routes[did].trajectory || [];
-        // Use helper for cumulative distance calculation
-        const { cumulativeDistances, totalDistance } = calculateCumulativeDistances(trajectory);
+        const routeInfo = state.routes[did];
+        const trajectory = routeInfo.trajectory || [];
+
+        // Recalculate cumulative distances for the new spliced trajectory
+        let cumulativeDistances = [0];
+        let totalDistance = 0;
+        if (trajectory.length >= 2) {
+          for (let i = 1; i < trajectory.length; i++) {
+            const dx = trajectory[i][0] - trajectory[i - 1][0];
+            const dy = trajectory[i][1] - trajectory[i - 1][1];
+            totalDistance += Math.sqrt(dx * dx + dy * dy);
+            cumulativeDistances.push(totalDistance);
+          }
+        }
 
         state.animation.drones[did] = {
           progress: totalDistance > 0 ? cutDist / totalDistance : 0,
@@ -7081,14 +6996,172 @@ function startAnimation(droneIds) {
         }
       }
 
-      // Build CUMULATIVE trajectory from all segments 0 to newSegment.index
+      // SEGMENTED IMPORT: Build CUMULATIVE trajectory from all segments 0 to newSegment.index
       // Each segment in MissionReplay stores only its PORTION (e.g., C1->C2)
       // We need to concatenate them to get the full trajectory (A1->C1->C2)
-      // Uses centralized helper functions for single source of truth
-      console.log(`🔄 SEGMENT SWITCH: Building cumulative trajectory for segments 0 to ${newSegment.index}`);
+      if (segmentedImport.isActive()) {
+        console.log(`🔄 SEGMENT SWITCH (SegmentedImport): Building cumulative trajectory for segments 0 to ${newSegment.index}`);
 
-      const cumulativeRoutes = buildCumulativeRoutesUpToSegment(newSegment.index);
-      updateStateRoutesFromCumulative(cumulativeRoutes, true); // true = update animation state
+        // Build cumulative routes from all segments
+        const cumulativeRoutes = {};
+        for (let segIdx = 0; segIdx <= newSegment.index; segIdx++) {
+          const seg = missionReplay.getSegment(segIdx);
+          if (!seg || !seg.solution || !seg.solution.routes) continue;
+
+          Object.entries(seg.solution.routes).forEach(([did, routeData]) => {
+            const traj = routeData.trajectory || [];
+            const route = routeData.route || [];
+            if (traj.length === 0) return;
+
+            if (!cumulativeRoutes[did]) {
+              // First segment for this drone
+              cumulativeRoutes[did] = {
+                trajectory: [...traj],
+                route: [...route],
+              };
+              console.log(`🔄 D${did} seg${segIdx}: initial ${traj.length} pts`);
+            } else {
+              // Concatenate with previous segments
+              const existingTraj = cumulativeRoutes[did].trajectory;
+              const existingRoute = cumulativeRoutes[did].route;
+              const lastPoint = existingTraj[existingTraj.length - 1];
+              const firstPoint = traj[0];
+
+              // Check for duplicate at junction
+              const isDuplicate = lastPoint && firstPoint &&
+                Math.abs(lastPoint[0] - firstPoint[0]) < 0.001 &&
+                Math.abs(lastPoint[1] - firstPoint[1]) < 0.001;
+
+              cumulativeRoutes[did].trajectory = isDuplicate
+                ? existingTraj.concat(traj.slice(1))
+                : existingTraj.concat(traj);
+              cumulativeRoutes[did].route = existingRoute.concat(route);
+
+              console.log(`🔄 D${did} seg${segIdx}: added ${traj.length} pts, cumulative now ${cumulativeRoutes[did].trajectory.length} pts`);
+            }
+          });
+        }
+
+        // Update state.routes with cumulative trajectories
+        Object.entries(cumulativeRoutes).forEach(([did, routeData]) => {
+          if (state.routes[did]) {
+            const oldLen = state.routes[did].trajectory?.length || 0;
+            state.routes[did].trajectory = routeData.trajectory;
+            state.routes[did].route = routeData.route;
+            const newLen = state.routes[did].trajectory.length;
+            appendDebugLine(`🔄 D${did}: cumulative trajectory ${oldLen}→${newLen} pts (segments 0-${newSegment.index})`);
+
+            // Update drone's cumulative distances and total distance for the new trajectory
+            const droneState = state.animation.drones[did];
+            if (droneState) {
+              const trajectory = state.routes[did].trajectory;
+              let cumulativeDistances = [0];
+              let totalDistance = 0;
+              for (let i = 1; i < trajectory.length; i++) {
+                const dx = trajectory[i][0] - trajectory[i - 1][0];
+                const dy = trajectory[i][1] - trajectory[i - 1][1];
+                totalDistance += Math.sqrt(dx * dx + dy * dy);
+                cumulativeDistances.push(totalDistance);
+              }
+              droneState.cumulativeDistances = cumulativeDistances;
+              droneState.totalDistance = totalDistance;
+              // Keep distanceTraveled as-is (we're continuing from C point)
+
+              // Re-enable animation if there's more to fly
+              if (droneState.distanceTraveled < totalDistance) {
+                if (!droneState.animating) {
+                  appendDebugLine(`🔄 D${did}: Re-enabling animation (was finished, now has more trajectory)`);
+                }
+                droneState.animating = true;
+              }
+
+              appendDebugLine(`🔄 D${did}: totalDistance now ${totalDistance.toFixed(1)}, distanceTraveled=${droneState.distanceTraveled.toFixed(1)}, animating=${droneState.animating}`);
+            }
+          }
+        });
+      } else {
+        // LEGACY/FRESH SEGMENTATION: Build cumulative trajectories from all segments
+        // (same logic as segmented import - concatenate all segments up to newSegment.index)
+        console.log(`🔄 SEGMENT SWITCH (Legacy): Building cumulative trajectory for segments 0 to ${newSegment.index}`);
+
+        const cumulativeRoutes = {};
+        for (let segIdx = 0; segIdx <= newSegment.index; segIdx++) {
+          const seg = missionReplay.getSegment(segIdx);
+          if (!seg || !seg.solution || !seg.solution.routes) continue;
+
+          Object.entries(seg.solution.routes).forEach(([did, routeData]) => {
+            const traj = routeData.trajectory || [];
+            const route = routeData.route || [];
+            if (traj.length === 0) return;
+
+            if (!cumulativeRoutes[did]) {
+              // First segment for this drone
+              cumulativeRoutes[did] = {
+                trajectory: [...traj],
+                route: [...route],
+              };
+              console.log(`🔄 D${did} seg${segIdx}: initial ${traj.length} pts`);
+            } else {
+              // Concatenate with previous segments
+              const existingTraj = cumulativeRoutes[did].trajectory;
+              const existingRoute = cumulativeRoutes[did].route;
+              const lastPoint = existingTraj[existingTraj.length - 1];
+              const firstPoint = traj[0];
+
+              // Check for duplicate at junction
+              const isDuplicate = lastPoint && firstPoint &&
+                Math.abs(lastPoint[0] - firstPoint[0]) < 0.001 &&
+                Math.abs(lastPoint[1] - firstPoint[1]) < 0.001;
+
+              cumulativeRoutes[did].trajectory = isDuplicate
+                ? existingTraj.concat(traj.slice(1))
+                : existingTraj.concat(traj);
+              cumulativeRoutes[did].route = existingRoute.concat(route);
+
+              console.log(`🔄 D${did} seg${segIdx}: added ${traj.length} pts, cumulative now ${cumulativeRoutes[did].trajectory.length} pts`);
+            }
+          });
+        }
+
+        // Update state.routes with cumulative trajectories
+        Object.entries(cumulativeRoutes).forEach(([did, routeData]) => {
+          if (state.routes[did]) {
+            const oldLen = state.routes[did].trajectory?.length || 0;
+            state.routes[did].trajectory = routeData.trajectory;
+            state.routes[did].route = routeData.route;
+            const newLen = state.routes[did].trajectory.length;
+            appendDebugLine(`🔄 D${did}: trajectory ${oldLen}→${newLen} pts`);
+
+            // Update drone's cumulative distances and total distance for the new trajectory
+            const droneState = state.animation.drones[did];
+            if (droneState) {
+              const trajectory = state.routes[did].trajectory;
+              let cumulativeDistances = [0];
+              let totalDistance = 0;
+              for (let i = 1; i < trajectory.length; i++) {
+                const dx = trajectory[i][0] - trajectory[i - 1][0];
+                const dy = trajectory[i][1] - trajectory[i - 1][1];
+                totalDistance += Math.sqrt(dx * dx + dy * dy);
+                cumulativeDistances.push(totalDistance);
+              }
+              droneState.cumulativeDistances = cumulativeDistances;
+              droneState.totalDistance = totalDistance;
+              // Keep distanceTraveled as-is (we're continuing from C point)
+
+              // IMPORTANT: Re-enable animation for drones that have more to fly
+              // This handles drones that completed their segment 1 flight but have new targets in segment 2
+              if (droneState.distanceTraveled < totalDistance) {
+                if (!droneState.animating) {
+                  appendDebugLine(`🔄 D${did}: Re-enabling animation (was finished, now has more trajectory)`);
+                }
+                droneState.animating = true;
+              }
+
+              appendDebugLine(`🔄 D${did}: totalDistance now ${totalDistance.toFixed(1)}, distanceTraveled=${droneState.distanceTraveled.toFixed(1)}, animating=${droneState.animating}`);
+            }
+          }
+        });
+      }
 
       appendDebugLine(`🔄 === SEGMENT SWITCH COMPLETE ===`);
 
