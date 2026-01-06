@@ -2213,19 +2213,20 @@ function resetMission() {
   // NEW PATH: For SegmentedImportManager workflow
   // =====================================================
   if (segmentedImport.isActive()) {
-    console.log("[resetMission] SegmentedImportManager workflow - resetting to segment 0 state");
+    console.log("[resetMission] SegmentedImportManager workflow - resetting with cumulative routes");
 
-    // Reset to segment 0 (just the first segment's truncated trajectory with C1 marker)
-    const seg0 = missionReplay.getSegment(0);
-    if (seg0 && seg0.solution && seg0.solution.routes) {
-      state.routes = JSON.parse(JSON.stringify(seg0.solution.routes));
+    // Build cumulative routes from ALL segments using centralized helper
+    const segmentCount = missionReplay.getSegmentCount();
+    if (segmentCount > 0) {
+      const cumulativeRoutes = buildCumulativeRoutesUpToSegment(segmentCount - 1);
+      state.routes = cumulativeRoutes;
       Object.keys(state.routes).forEach(did => {
         state.trajectoryVisible[did] = true;
       });
-      console.log("[resetMission] Loaded segment 0 routes");
+      console.log(`[resetMission] Built cumulative routes from ${segmentCount} segments for drones: ${Object.keys(cumulativeRoutes).join(", ")}`);
     } else {
       state.routes = {};
-      console.log("[resetMission] No segment 0 solution found");
+      console.log("[resetMission] No segments found");
     }
 
     // CRITICAL: Start animation with EMPTY visited targets
@@ -2345,7 +2346,7 @@ function resetMission() {
   }
 
   // =====================================================
-  // 5. Restore first segment's routes (without drawing)
+  // 5. Restore routes (without drawing)
   // =====================================================
   // For segmentInfo workflow, we've cleared all solutions - start fresh with no routes
   if (isSegmentInfoWorkflow) {
@@ -2356,9 +2357,24 @@ function resetMission() {
     state.allocationStrategy = null;
     state.distanceMatrix = null;
     console.log(`[resetMission] segmentInfo workflow - cleared state.routes`);
+  } else if (missionReplay.getSegmentCount() > 1) {
+    // MULTI-SEGMENT: Build cumulative routes from ALL segments using centralized helper
+    console.log(`[resetMission] Building cumulative routes from ${missionReplay.getSegmentCount()} segments`);
+    const cumulativeRoutes = buildCumulativeRoutesUpToSegment(missionReplay.getSegmentCount() - 1);
+    state.routes = cumulativeRoutes;
+
+    // Restore other state from first segment
+    if (firstSegment && firstSegment.solution) {
+      state.sequences = JSON.parse(JSON.stringify(firstSegment.solution.sequences || {}));
+      state.wrappedPolygons = JSON.parse(JSON.stringify(firstSegment.solution.wrappedPolygons || []));
+      state.allocations = JSON.parse(JSON.stringify(firstSegment.solution.allocations || {}));
+      state.allocationStrategy = firstSegment.solution.allocationStrategy || null;
+      state.distanceMatrix = firstSegment.solution.distanceMatrix ? JSON.parse(JSON.stringify(firstSegment.solution.distanceMatrix)) : null;
+    }
+    console.log(`[resetMission] Cumulative routes built for drones: ${Object.keys(cumulativeRoutes).join(", ")}`);
   } else if (firstSegment && firstSegment.solution) {
+    // SINGLE SEGMENT: Just use segment 0's routes
     const solution = firstSegment.solution;
-    // Manually restore routes without calling applyDraftSolutionToUI (which draws)
     state.sequences = JSON.parse(JSON.stringify(solution.sequences || {}));
     state.routes = JSON.parse(JSON.stringify(solution.routes || {}));
     state.wrappedPolygons = JSON.parse(JSON.stringify(solution.wrappedPolygons || []));
