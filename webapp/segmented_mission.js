@@ -18,9 +18,10 @@
  */
 
 // =============================================================================
-// SEGMENT CLASS - Immutable data structure for one solved segment
+// SM_Segment CLASS - Immutable data structure for one solved segment
+// (Prefixed with SM_ to avoid conflict with isr.js Segment class)
 // =============================================================================
-class Segment {
+class SM_Segment {
   constructor(data) {
     this.index = data.index ?? 0;
     this.solution = data.solution ?? { routes: {}, sequences: {} };
@@ -38,9 +39,10 @@ class Segment {
 }
 
 // =============================================================================
-// MISSION REPLAY - Manages multi-segment mission playback
+// SM_MissionReplay - Manages multi-segment mission playback
+// (Prefixed with SM_ to avoid conflict with isr.js MissionReplay class)
 // =============================================================================
-class MissionReplay {
+class SM_MissionReplay {
   constructor() {
     this._segments = [];
     this._currentSegmentIndex = 0;
@@ -52,7 +54,7 @@ class MissionReplay {
   }
 
   addSegment(data) {
-    const segment = new Segment({
+    const segment = new SM_Segment({
       ...data,
       index: this._segments.length
     });
@@ -62,7 +64,7 @@ class MissionReplay {
 
   replaceSegment(index, data) {
     if (index < 0 || index >= this._segments.length) return null;
-    const segment = new Segment({ ...data, index });
+    const segment = new SM_Segment({ ...data, index });
     this._segments[index] = segment;
     return segment;
   }
