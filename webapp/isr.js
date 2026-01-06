@@ -7080,21 +7080,55 @@ function startAnimation(droneIds) {
           }
         });
       } else {
-        // LEGACY: For non-segmented imports, use newSegment's routes directly
-        console.log(`🔄 SEGMENT SWITCH (Legacy): newSegment.solution.routes keys:`, Object.keys(newSegment.solution.routes || {}));
-        Object.entries(newSegment.solution.routes || {}).forEach(([did, routeData]) => {
-          const traj = routeData.trajectory || [];
-          console.log(`🔄 D${did} from segment: trajectory=${traj.length} pts, route=[${(routeData.route || []).join(",")}]`);
-          // IMPORTANT: Skip empty trajectories - this preserves the frozen trajectory
-          // for drones that were disabled/lost at a previous checkpoint
-          if (traj.length === 0) {
-            console.log(`🔄 D${did}: skipping empty trajectory (drone may be lost/disabled)`);
-            return;
-          }
+        // LEGACY/FRESH SEGMENTATION: Build cumulative trajectories from all segments
+        // (same logic as segmented import - concatenate all segments up to newSegment.index)
+        console.log(`🔄 SEGMENT SWITCH (Legacy): Building cumulative trajectory for segments 0 to ${newSegment.index}`);
+
+        const cumulativeRoutes = {};
+        for (let segIdx = 0; segIdx <= newSegment.index; segIdx++) {
+          const seg = missionReplay.getSegment(segIdx);
+          if (!seg || !seg.solution || !seg.solution.routes) continue;
+
+          Object.entries(seg.solution.routes).forEach(([did, routeData]) => {
+            const traj = routeData.trajectory || [];
+            const route = routeData.route || [];
+            if (traj.length === 0) return;
+
+            if (!cumulativeRoutes[did]) {
+              // First segment for this drone
+              cumulativeRoutes[did] = {
+                trajectory: [...traj],
+                route: [...route],
+              };
+              console.log(`🔄 D${did} seg${segIdx}: initial ${traj.length} pts`);
+            } else {
+              // Concatenate with previous segments
+              const existingTraj = cumulativeRoutes[did].trajectory;
+              const existingRoute = cumulativeRoutes[did].route;
+              const lastPoint = existingTraj[existingTraj.length - 1];
+              const firstPoint = traj[0];
+
+              // Check for duplicate at junction
+              const isDuplicate = lastPoint && firstPoint &&
+                Math.abs(lastPoint[0] - firstPoint[0]) < 0.001 &&
+                Math.abs(lastPoint[1] - firstPoint[1]) < 0.001;
+
+              cumulativeRoutes[did].trajectory = isDuplicate
+                ? existingTraj.concat(traj.slice(1))
+                : existingTraj.concat(traj);
+              cumulativeRoutes[did].route = existingRoute.concat(route);
+
+              console.log(`🔄 D${did} seg${segIdx}: added ${traj.length} pts, cumulative now ${cumulativeRoutes[did].trajectory.length} pts`);
+            }
+          });
+        }
+
+        // Update state.routes with cumulative trajectories
+        Object.entries(cumulativeRoutes).forEach(([did, routeData]) => {
           if (state.routes[did]) {
             const oldLen = state.routes[did].trajectory?.length || 0;
-            state.routes[did].trajectory = JSON.parse(JSON.stringify(traj));
-            state.routes[did].route = JSON.parse(JSON.stringify(routeData.route || []));
+            state.routes[did].trajectory = routeData.trajectory;
+            state.routes[did].route = routeData.route;
             const newLen = state.routes[did].trajectory.length;
             appendDebugLine(`🔄 D${did}: trajectory ${oldLen}→${newLen} pts`);
 
