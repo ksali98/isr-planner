@@ -179,7 +179,8 @@ class Segment {
     cutPosition = null,      // [x, y] position where segment was cut (legacy, drone 1)
     cutPositions = null,     // { [droneId]: [x, y] } per-drone cut positions for marker display
     lostDrones = null,       // Array of drone IDs that were lost at this checkpoint
-    visitedTargets = null    // Array of target IDs visited up to this segment
+    visitedTargets = null,   // Array of target IDs visited up to this segment
+    drone_configs = null     // Per-segment drone configs (saved at Accept time)
   }) {
     this.index = index;
     this.solution = Object.freeze(JSON.parse(JSON.stringify(solution)));
@@ -209,6 +210,8 @@ class Segment {
     this.lostDrones = lostDrones ? Object.freeze([...lostDrones]) : null;
     // Visited targets up to this segment
     this.visitedTargets = visitedTargets ? Object.freeze([...visitedTargets]) : null;
+    // Per-segment drone configs (saved at Accept time for correct export)
+    this.drone_configs = drone_configs ? Object.freeze(JSON.parse(JSON.stringify(drone_configs))) : null;
     Object.freeze(this);
   }
 
@@ -564,6 +567,14 @@ class SegmentedImportManager {
     return 0;
   }
 
+  /** Get drone_configs for a specific segment (from the imported JSON) */
+  getDroneConfigsForSegment(segmentIndex) {
+    if (!this._segmentDroneConfigs || segmentIndex < 0 || segmentIndex >= this._segmentDroneConfigs.length) {
+      return null;
+    }
+    return JSON.parse(JSON.stringify(this._segmentDroneConfigs[segmentIndex]));
+  }
+
   /** Get total number of segments */
   getTotalSegments() {
     return this._segmentCuts.length + 1;
@@ -757,6 +768,15 @@ class SegmentedImportManager {
       drone_configs: JSON.parse(JSON.stringify(droneConfigs)),
     };
     console.log(`[SegmentedImportManager] Loaded drone_configs:`, droneConfigs);
+
+    // Store per-segment drone_configs for retrieval during Accept
+    this._segmentDroneConfigs = [];
+    segments.forEach((seg, idx) => {
+      const segConfigs = seg.drone_configs || seg.env?.drone_configs || {};
+      this._segmentDroneConfigs.push(JSON.parse(JSON.stringify(segConfigs)));
+      const enabled = Object.entries(segConfigs).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(',');
+      console.log(`[SegmentedImportManager] Segment ${idx} drone_configs: ${enabled || 'none'} enabled`);
+    });
 
     // Check if segment 0 has segmentInfo with segmentCuts (hybrid format)
     const seg0SegmentInfo = segments[0]?.env?.segmentInfo;
@@ -1327,13 +1347,17 @@ function acceptSolution() {
 
   if (isSegmentInfoWorkflow) {
     // Old SegmentInfo workflow
+    // Use drone_configs from SOLVE time (saved in draftSolution), NOT current UI state
+    const segInfoDroneConfigs = missionState.draftSolution?.droneConfigs || state.droneConfigs;
     missionReplay.replaceSegment(currentIdx, {
       solution: solutionToStore,
       env: envSnapshot,
       cutDistance: existingSegment.cutDistance,
       cutPositions: existingSegment.cutPositions,
       isCheckpointReplan: existingSegment.isCheckpointReplan,
+      drone_configs: JSON.parse(JSON.stringify(segInfoDroneConfigs)),  // Save SOLVE-time config
     });
+    console.log(`[ACCEPT] Replaced segment ${currentIdx} with drone_configs: enabled=[${Object.entries(segInfoDroneConfigs).filter(([,c])=>c.enabled).map(([d])=>`D${d}`).join(',')}]`);
     segment = missionReplay.getSegment(currentIdx);
     if (nextSegment) {
       missionReplay.setCurrentSegmentIndex(currentIdx + 1);
@@ -1341,6 +1365,8 @@ function acceptSolution() {
     }
   } else {
     // Normal workflow: ADD new segment
+    // Use drone_configs from SOLVE time (saved in draftSolution), NOT current UI state
+    const segmentDroneConfigs = missionState.draftSolution?.droneConfigs || state.droneConfigs;
     segment = missionReplay.addSegment({
       solution: solutionToStore,
       env: envSnapshot,
@@ -1352,7 +1378,9 @@ function acceptSolution() {
       lostDrones: state.pendingLostDrones.length > 0
         ? [...state.pendingLostDrones]
         : null,
+      drone_configs: JSON.parse(JSON.stringify(segmentDroneConfigs)),  // Save SOLVE-time config
     });
+    console.log(`[ACCEPT] Added segment ${segment.index} with drone_configs: enabled=[${Object.entries(segmentDroneConfigs).filter(([,c])=>c.enabled).map(([d])=>`D${d}`).join(',')}]`);
     missionReplay.setCurrentSegmentIndex(segment.index);
   }
 
@@ -1548,15 +1576,42 @@ function acceptSolutionWithManager() {
   }
 
   // 1. Update MissionReplay segment with the solution (using optimized routes)
+  // IMPORTANT: Use drone_configs from SOLVE time (saved in draftSolution), NOT current UI state
+  // This ensures we save what was actually solved, not what the UI shows after user changes
   const currentSeg = missionReplay.getSegment(currentSegIdx);
+  const solveTimeDroneConfigs = missionState.draftSolution?.droneConfigs || state.droneConfigs;
+
+  // Save the FULL original solution before it gets truncated later
+  // This is used by Reset and animation segment switches to show complete trajectories
+  if (!missionState.fullSolutionsPerSegment) {
+    missionState.fullSolutionsPerSegment = {};
+  }
+  missionState.fullSolutionsPerSegment[currentSegIdx] = JSON.parse(JSON.stringify(solutionToStore));
+  console.log(`[ACCEPT] Saved fullSolutionsPerSegment[${currentSegIdx}] for animation`);
+
+  // Keep seg0FullSolution for backward compatibility with Reset
+  if (currentSegIdx === 0) {
+    missionState.seg0FullSolution = JSON.parse(JSON.stringify(solutionToStore));
+    // Log trajectory lengths at save time for debugging
+    Object.entries(missionState.seg0FullSolution.routes || {}).forEach(([did, rd]) => {
+      const len = rd.trajectory?.length || 0;
+      console.log(`[ACCEPT] seg0FullSolution D${did}: ${len} pts`);
+    });
+    console.log(`[ACCEPT] Saved seg0FullSolution for Reset`);
+  }
+
   if (currentSeg) {
     missionReplay.replaceSegment(currentSegIdx, {
       solution: solutionToStore,
       env: segmentedImport.getFullEnv(),
       cutDistance: currentSeg.cutDistance,
       cutPositions: currentSeg.cutPositions,
+      lostDrones: currentSeg.lostDrones,
+      visitedTargets: currentSeg.visitedTargets,
       isCheckpointReplan: currentSeg.isCheckpointReplan,
+      drone_configs: JSON.parse(JSON.stringify(solveTimeDroneConfigs)),
     });
+    console.log(`[ACCEPT] Saved drone_configs for segment ${currentSegIdx}: enabled=[${Object.entries(solveTimeDroneConfigs).filter(([,c])=>c.enabled).map(([d])=>`D${d}`).join(',')}]`);
   }
 
   // 2. Add to committed segments for backward compatibility
@@ -1588,6 +1643,25 @@ function acceptSolutionWithManager() {
     state.pendingCutPositions = {};
 
     console.log(`[ACCEPT] Segment ${newSegIdx}: cutDistance=${cutDistance}`);
+
+    // Derive lostDrones: drones that started segment N but won't start segment N+1
+    // Compare cutPositions of segment newSegIdx (C{newSegIdx}) vs segment newSegIdx+1 (C{newSegIdx+1})
+    // If a drone is in C{newSegIdx} but not in C{newSegIdx+1}, it's lost at C{newSegIdx}
+    const savedLostDrones = [];
+    const thisCutPositions = segmentedImport.getCutPositionForSegment(newSegIdx);
+    const nextCutPositions = segmentedImport.getCutPositionForSegment(newSegIdx + 1);
+    if (thisCutPositions && nextCutPositions) {
+      // Drones in this cut but not in next cut are "lost" at this cut
+      Object.keys(thisCutPositions).forEach(did => {
+        if (!nextCutPositions[did]) {
+          savedLostDrones.push(did);
+        }
+      });
+    } else if (thisCutPositions && !nextCutPositions) {
+      // This is the last cut - no drones lost at this marker
+      // (drones finish at their end airports, not "lost")
+    }
+    console.log(`[ACCEPT] Derived lostDrones at C${newSegIdx}: [${savedLostDrones.join(",")}]`);
 
     // For segmented import: Use state.routes (which has the ACTUAL displayed trajectory: frozen + merged)
     // instead of rebuilding from MissionReplay (which has RAW solver outputs before truncation)
@@ -1623,22 +1697,36 @@ function acceptSolutionWithManager() {
       }
     }
 
-    // Calculate marker position for each drone
+    // For visited targets calculation, we need the routes regardless of cutPositions source
     // For newSegIdx > 1: use state.routes (actual displayed trajectory)
     // For newSegIdx === 1: use concatenatedRoutes (built from MissionReplay)
     const routesToUse = newSegIdx === 1 ? concatenatedRoutes : state.routes;
-    Object.entries(routesToUse || {}).forEach(([did, routeData]) => {
-      const traj = routeData.trajectory || [];
 
-      if (traj.length < 2 || cutDistance <= 0) return;
+    // Get cut positions from the JSON (original mission data) instead of recalculating
+    // This prevents marker overlay issues when the new trajectory differs from the original
+    const jsonCutPositions = segmentedImport.getCutPositionForSegment(newSegIdx);
+    if (jsonCutPositions && Object.keys(jsonCutPositions).length > 0) {
+      Object.entries(jsonCutPositions).forEach(([did, pos]) => {
+        if (pos && pos.length === 2) {
+          state.pendingCutPositions[did] = [...pos];
+          console.log(`[ACCEPT] Cut marker D${did}: using JSON cutPosition [${pos[0].toFixed(2)}, ${pos[1].toFixed(2)}]`);
+        }
+      });
+    } else {
+      // Fallback: calculate from trajectory if JSON doesn't have cutPositions
+      Object.entries(routesToUse || {}).forEach(([did, routeData]) => {
+        const traj = routeData.trajectory || [];
 
-      // Calculate marker position by splitting CONCATENATED trajectory at cumulative cutDistance
-      const result = split_polyline_at_distance(traj, cutDistance);
-      if (result.splitPoint && result.splitPoint.length === 2) {
-        state.pendingCutPositions[did] = result.splitPoint;
-        console.log(`[ACCEPT] Cut marker D${did}: concatenated traj=${traj.length}pts, dist=${cutDistance.toFixed(1)} -> [${result.splitPoint[0].toFixed(2)}, ${result.splitPoint[1].toFixed(2)}]`);
-      }
-    });
+        if (traj.length < 2 || cutDistance <= 0) return;
+
+        // Calculate marker position by splitting CONCATENATED trajectory at cumulative cutDistance
+        const result = split_polyline_at_distance(traj, cutDistance);
+        if (result.splitPoint && result.splitPoint.length === 2) {
+          state.pendingCutPositions[did] = result.splitPoint;
+          console.log(`[ACCEPT] Cut marker D${did}: calculated from trajectory (${traj.length}pts, dist=${cutDistance.toFixed(1)}) -> [${result.splitPoint[0].toFixed(2)}, ${result.splitPoint[1].toFixed(2)}]`);
+        }
+      });
+    }
 
     // Calculate visited targets from the ACTUAL optimized trajectory, not the JSON
     // This is critical: after Swap Closer, targets may have been swapped between drones,
@@ -1680,6 +1768,12 @@ function acceptSolutionWithManager() {
       });
       console.log(`[ACCEPT] Saved to segment ${newSegIdx}: cutPositions=`, state.pendingCutPositions, `visitedTargets=[${state.visitedTargets.join(",")}], lostDrones=`, savedLostDrones);
     }
+
+    // CRITICAL: Clear pendingCutPositions after saving to missionReplay
+    // This prevents double-drawing: missionReplay loop draws with correct lostDrones,
+    // while pendingCutPositions block would incorrectly use current droneConfigs state
+    state.pendingCutPositions = null;
+
     // More segments to solve
     // PRESERVE existing frozen trajectory and DON'T recalculate it
     // The frozen trajectory is IMMUTABLE once placed
@@ -1687,23 +1781,48 @@ function acceptSolutionWithManager() {
 
     // For each drone, keep the existing frozen trajectory (already in state.routes)
     // Do NOT rebuild from MissionReplay - that would use NEW solver trajectories
-    const droneIds = newSegIdx === 1
+    // ALSO include drones from previous segments that may now be disabled
+    const activeDroneIds = newSegIdx === 1
       ? Object.keys(concatenatedRoutes || {})
       : Object.keys(state.routes || {});
 
+    // Collect drone IDs from previous MissionReplay segments (these may have been disabled)
+    const previousDroneIds = new Set();
+    for (let i = 0; i < newSegIdx; i++) {
+      const seg = missionReplay.getSegment(i);
+      if (seg?.solution?.routes) {
+        Object.keys(seg.solution.routes).forEach(did => previousDroneIds.add(did));
+      }
+    }
+
+    // Combine: active drones + previously active drones (now disabled)
+    const droneIds = [...new Set([...activeDroneIds, ...previousDroneIds])];
+
     droneIds.forEach((droneId) => {
+      // Get the JSON cut position for this drone (if available)
+      const jsonCutPos = jsonCutPositions ? jsonCutPositions[droneId] : null;
+
       if (newSegIdx > 1 && state.routes[droneId] && state.routes[droneId].trajectory) {
         // state.routes has the MERGED trajectory (frozen + new segment)
-        // We need to truncate it at the current cutDistance to get the NEW frozen part
+        // We need to truncate it at the cut marker position
         const mergedTraj = state.routes[droneId].trajectory || [];
 
-        if (mergedTraj.length > 0 && cutDistance > 0) {
+        if (mergedTraj.length > 0 && jsonCutPos) {
+          // Truncate at the JSON cut position by finding closest point on trajectory
+          const truncated = truncateTrajectoryAtPosition(mergedTraj, jsonCutPos);
+          frozenRoutes[droneId] = {
+            ...state.routes[droneId],
+            trajectory: truncated,
+          };
+          console.log(`[ACCEPT] Frozen D${droneId}: ${mergedTraj.length}pts -> ${truncated.length}pts (truncated at JSON cutPos)`);
+        } else if (mergedTraj.length > 0 && cutDistance > 0) {
+          // Fallback to cutDistance if no JSON position
           const result = split_polyline_at_distance(mergedTraj, cutDistance);
           frozenRoutes[droneId] = {
             ...state.routes[droneId],
             trajectory: result.prefixPoints,
           };
-          console.log(`[ACCEPT] Frozen D${droneId}: ${mergedTraj.length}pts -> ${result.prefixPoints.length}pts (truncated at C${newSegIdx} marker from merged, dist=${cutDistance.toFixed(1)})`);
+          console.log(`[ACCEPT] Frozen D${droneId}: ${mergedTraj.length}pts -> ${result.prefixPoints.length}pts (truncated at cutDist=${cutDistance.toFixed(1)})`);
         } else if (mergedTraj.length > 0) {
           // Final segment - keep full
           frozenRoutes[droneId] = JSON.parse(JSON.stringify(state.routes[droneId]));
@@ -1723,13 +1842,22 @@ function acceptSolutionWithManager() {
           }
         }
 
-        if (fullTraj.length > 0 && cutDistance > 0) {
+        if (fullTraj.length > 0 && jsonCutPos) {
+          // Truncate at the JSON cut position
+          const truncated = truncateTrajectoryAtPosition(fullTraj, jsonCutPos);
+          frozenRoutes[droneId] = {
+            ...(lastRouteData || {}),
+            trajectory: truncated,
+          };
+          console.log(`[ACCEPT] Initial freeze D${droneId}: ${fullTraj.length}pts -> ${truncated.length}pts (truncated at JSON cutPos)`);
+        } else if (fullTraj.length > 0 && cutDistance > 0) {
+          // Fallback to cutDistance
           const result = split_polyline_at_distance(fullTraj, cutDistance);
           frozenRoutes[droneId] = {
             ...(lastRouteData || {}),
             trajectory: result.prefixPoints,
           };
-          console.log(`[ACCEPT] Initial freeze D${droneId}: ${fullTraj.length}pts -> ${result.prefixPoints.length}pts (truncated at C${newSegIdx} marker, dist=${cutDistance.toFixed(1)})`);
+          console.log(`[ACCEPT] Initial freeze D${droneId}: ${fullTraj.length}pts -> ${result.prefixPoints.length}pts (truncated at cutDist=${cutDistance.toFixed(1)})`);
         } else if (fullTraj.length > 0) {
           // No cutDistance - keep full trajectory
           frozenRoutes[droneId] = {
@@ -1738,6 +1866,60 @@ function acceptSolutionWithManager() {
           };
           console.log(`[ACCEPT] Initial freeze D${droneId}: ${fullTraj.length}pts (final segment, no truncation)`);
         }
+      }
+    });
+
+    // UNCONDITIONAL FINAL PASS: Ensure ALL trajectories from MissionReplay are preserved
+    // This catches any drone that wasn't handled above (disabled, edge cases, etc.)
+    //
+    // BUG FIX: Previously, for each segment i, we only built trajectory up to segment i.
+    // This caused dead drone trajectories to disappear because their cumulative trajectory
+    // wasn't being built correctly. Now we collect ALL unique droneIds from ALL segments
+    // and build each drone's cumulative trajectory from ALL segments where it appears.
+
+    const allDroneIdsInReplay = new Set();
+    for (let i = 0; i < newSegIdx; i++) {
+      const seg = missionReplay.getSegment(i);
+      if (seg?.solution?.routes) {
+        Object.keys(seg.solution.routes).forEach(did => allDroneIdsInReplay.add(did));
+      }
+    }
+
+    allDroneIdsInReplay.forEach(droneId => {
+      // If this drone already has a frozen route, skip
+      if (frozenRoutes[droneId]?.trajectory?.length > 0) return;
+
+      // Build cumulative trajectory from ALL segments where this drone appears
+      const cumulativeTraj = [];
+      let lastRouteData = null;
+
+      for (let j = 0; j < newSegIdx; j++) {
+        const s = missionReplay.getSegment(j);
+        const routeData = s?.solution?.routes?.[droneId];
+        const t = routeData?.trajectory || [];
+
+        if (t.length > 0) {
+          lastRouteData = routeData;  // Keep track of the last route data for this drone
+          if (cumulativeTraj.length === 0) {
+            cumulativeTraj.push(...t);
+          } else {
+            // Skip first point if duplicate
+            const lastPt = cumulativeTraj[cumulativeTraj.length - 1];
+            const firstPt = t[0];
+            const startIdx = (lastPt && firstPt &&
+              Math.abs(lastPt[0] - firstPt[0]) < 0.001 &&
+              Math.abs(lastPt[1] - firstPt[1]) < 0.001) ? 1 : 0;
+            cumulativeTraj.push(...t.slice(startIdx));
+          }
+        }
+      }
+
+      if (cumulativeTraj.length > 0 && lastRouteData) {
+        frozenRoutes[droneId] = {
+          ...lastRouteData,
+          trajectory: cumulativeTraj,
+        };
+        console.log(`[ACCEPT] FINAL PASS preserved D${droneId}: ${cumulativeTraj.length}pts (from MissionReplay)`);
       }
     });
 
@@ -1809,11 +1991,29 @@ function acceptSolutionWithManager() {
 
     state.routes = frozenRoutes;
     console.log(`[ACCEPT] Frozen routes from ${newSegIdx} segments:`, Object.keys(frozenRoutes));
+    // Debug: Log trajectory lengths for all frozen routes
+    Object.entries(frozenRoutes).forEach(([did, routeData]) => {
+      const trajLen = routeData?.trajectory?.length || 0;
+      console.log(`[ACCEPT] frozenRoutes[${did}]: ${trajLen}pts`);
+    });
 
     // Make frozen trajectories visible
     Object.keys(frozenRoutes).forEach(did => {
       state.trajectoryVisible[did] = true;
+      console.log(`[ACCEPT] Set trajectoryVisible[${did}] = true`);
     });
+
+    // RECALCULATE visited targets from the CUMULATIVE frozen trajectory
+    // This is done AFTER building frozenRoutes so we have the complete trajectory
+    // The earlier calculation (at line ~1715) used the solve result, not the cumulative frozen
+    const recalculatedVisited = calculateVisitedTargetsFromRoutes(frozenRoutes, cutDistance);
+    if (recalculatedVisited.length > 0) {
+      state.visitedTargets = recalculatedVisited;
+      console.log(`[ACCEPT] RECALCULATED visited targets from frozen routes: [${state.visitedTargets.join(", ")}]`);
+    } else {
+      // Fall back to the earlier calculation if recalculation fails
+      console.log(`[ACCEPT] No recalculated visited targets, keeping: [${state.visitedTargets.join(", ")}]`);
+    }
 
     // Set up env for drawing - targets up to current segment (progressive reveal)
     const displayEnv = segmentedImport.getEnvForDisplay();
@@ -1821,11 +2021,47 @@ function acceptSolutionWithManager() {
     console.log(`[ACCEPT] state.visitedTargets=`, state.visitedTargets);
 
     state.env = displayEnv;
-    state.droneConfigs = JSON.parse(JSON.stringify(displayEnv.drone_configs || {}));
+
+    // SIMPLE: Get drone_configs directly from the JSON for this segment
+    // The JSON stores per-segment drone_configs which specify exactly which drones are enabled
+    const segmentConfigs = segmentedImport.getDroneConfigsForSegment(newSegIdx);
+
+    console.log(`[ACCEPT-DERIVE] newSegIdx=${newSegIdx}`);
+    console.log(`[ACCEPT-DERIVE] segmentConfigs from JSON:`,
+      segmentConfigs ? Object.entries(segmentConfigs).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(',') : 'null');
+
+    let derivedConfigs;
+    if (segmentConfigs && Object.keys(segmentConfigs).length > 0) {
+      // Use the JSON's per-segment drone_configs directly
+      derivedConfigs = JSON.parse(JSON.stringify(segmentConfigs));
+
+      // Update start_airport for drones that have cutPositions
+      const thisSegCutPositions = segmentedImport.getCutPositionForSegment(newSegIdx);
+      if (thisSegCutPositions) {
+        Object.keys(thisSegCutPositions).forEach(did => {
+          if (derivedConfigs[did]) {
+            derivedConfigs[did].start_airport = `D${did}_START`;
+          }
+        });
+      }
+
+      const enabledDrones = Object.entries(derivedConfigs).filter(([,c]) => c.enabled).map(([d]) => d);
+      console.log(`[ACCEPT] Using JSON drone_configs for segment ${newSegIdx}: enabled=[${enabledDrones.join(',')}]`);
+    } else {
+      // Fallback to displayEnv drone_configs
+      derivedConfigs = JSON.parse(JSON.stringify(displayEnv.drone_configs || {}));
+      console.log(`[ACCEPT] No segment drone_configs in JSON, using displayEnv.drone_configs`);
+    }
+
+    state.droneConfigs = derivedConfigs;
     state.env.drone_configs = state.droneConfigs;
     missionState.acceptedEnv = JSON.parse(JSON.stringify(displayEnv));
 
+    console.log(`[ACCEPT-DERIVE] AFTER derivation, state.droneConfigs enabled:`,
+      Object.entries(state.droneConfigs).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(','));
+
     console.log(`[ACCEPT] state.env.targets after assignment=`, state.env?.targets?.map(t => t.id));
+    console.log(`[ACCEPT] state.droneConfigs enabled:`, Object.entries(state.droneConfigs).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(','));
 
     initDroneConfigsFromEnv();
     updateSamWrappingClientSide();
@@ -2100,47 +2336,109 @@ function resetMission() {
   // =====================================================
   missionReplay.resetToStart();
 
+  // Debug: Log segment cutDistances
+  console.log(`[resetMission] MissionReplay segments:`);
+  for (let i = 0; i < missionReplay.getSegmentCount(); i++) {
+    const seg = missionReplay.getSegment(i);
+    console.log(`  Segment ${i}: cutDistance=${seg?.cutDistance}, hasCheckpoint=${seg?.hasCheckpointBoundary?.()}`);
+  }
+
   // =====================================================
   // NEW PATH: For SegmentedImportManager workflow
   // =====================================================
   if (segmentedImport.isActive()) {
-    console.log("[resetMission] SegmentedImportManager workflow - resetting to segment 0 state");
-
-    // Reset to segment 0 (just the first segment's truncated trajectory with C1 marker)
-    const seg0 = missionReplay.getSegment(0);
-    if (seg0 && seg0.solution && seg0.solution.routes) {
-      state.routes = JSON.parse(JSON.stringify(seg0.solution.routes));
+    // Reset to segment 0 - try seg0FullSolution first (full trajectory), then fallback
+    if (missionState.seg0FullSolution?.routes) {
+      state.routes = JSON.parse(JSON.stringify(missionState.seg0FullSolution.routes));
       Object.keys(state.routes).forEach(did => {
         state.trajectoryVisible[did] = true;
       });
-      console.log("[resetMission] Loaded segment 0 routes");
+      console.log("[resetMission] Loaded seg-0 from seg0FullSolution (full trajectory)");
     } else {
-      state.routes = {};
-      console.log("[resetMission] No segment 0 solution found");
+      const seg0 = missionReplay.getSegment(0);
+      if (seg0?.solution?.routes) {
+        state.routes = JSON.parse(JSON.stringify(seg0.solution.routes));
+        Object.keys(state.routes).forEach(did => {
+          state.trajectoryVisible[did] = true;
+        });
+        console.log("[resetMission] Loaded seg-0 from missionReplay (fallback)");
+      } else {
+        state.routes = {};
+        console.log("[resetMission] No segment 0 solution found");
+      }
     }
 
-    // Get visited targets: prefer saved from segment (calculated from actual trajectory), fall back to JSON
+    // Store drone loss info for animation to use when extending trajectories
+    // Check missionReplay, segmentedImport, AND segmentManager for lostDrones
+    const droneLostAtSegment = {};
+    const segCount = missionReplay.getSegmentCount();
+    console.log(`[resetMission] segCount=${segCount}, segmentedImport.isActive=${segmentedImport.isActive()}, segmentManager.isActive=${typeof segmentManager !== 'undefined' && segmentManager?.isActive?.()}`);
+
+    // Also check segmentManager if available
+    const smActive = typeof segmentManager !== 'undefined' && segmentManager?.isActive?.();
+    const smSegCount = smActive ? segmentManager.getSegmentCount?.() : 0;
+    const maxSegCount = Math.max(segCount, smSegCount || 0);
+    console.log(`[resetMission] Using maxSegCount=${maxSegCount} (missionReplay=${segCount}, segmentManager=${smSegCount})`);
+
+    for (let segIdx = 1; segIdx < maxSegCount; segIdx++) {
+      // Check missionReplay first
+      let lostDrones = missionReplay.getSegment(segIdx)?.lostDrones || [];
+      // Fallback to segmentedImport
+      if (lostDrones.length === 0 && segmentedImport.isActive()) {
+        const importSeg = segmentedImport.getSegment?.(segIdx);
+        lostDrones = importSeg?.lostDrones || [];
+      }
+      // Fallback to segmentManager
+      if (lostDrones.length === 0 && smActive) {
+        const smSeg = segmentManager.getSegment?.(segIdx);
+        lostDrones = smSeg?.lostDrones || [];
+        if (lostDrones.length > 0) {
+          console.log(`[resetMission] Seg ${segIdx}: got lostDrones from segmentManager: [${lostDrones.join(',')}]`);
+        }
+      }
+      if (lostDrones.length > 0) {
+        console.log(`[resetMission] Segment ${segIdx} lostDrones: [${lostDrones.join(',')}]`);
+        lostDrones.forEach(did => {
+          if (droneLostAtSegment[did] === undefined) {
+            droneLostAtSegment[did] = segIdx;
+          }
+        });
+      }
+    }
+    // Store for animation segment switch code to use
+    missionState.droneLostAtSegment = droneLostAtSegment;
+    console.log("[resetMission] Drone loss map:", JSON.stringify(droneLostAtSegment));
+
+    // NOTE: Trajectory truncation for lost drones happens during ANIMATION, not at Reset
+    // At Reset, we show seg-0 trajectories. Animation will extend them and truncate lost drones.
+    // Log final state
+    console.log(`[resetMission] Final trajectory state (seg-0 only, animation will extend):`);
+    Object.keys(state.routes).forEach(did => {
+      const r = state.routes[did];
+      const isLost = droneLostAtSegment[did] !== undefined;
+      console.log(`[resetMission]   D${did}: ${r.trajectory?.length || 0} pts, visible=${state.trajectoryVisible[did]}, lost=${isLost ? `at seg ${droneLostAtSegment[did]}` : 'no'}`);
+    });
+
+    // On Reset: Clear visited targets - checkmarks will appear during animation as targets are passed
+    state.visitedTargets = [];
+    console.log(`[resetMission] Cleared visitedTargets - checkmarks will show during animation`);
+
+    // Set pending cut positions for C1 marker (so it's visible after Reset)
     const seg1 = missionReplay.getSegment(1);
-    if (seg1 && seg1.visitedTargets && seg1.visitedTargets.length > 0) {
-      // Use visited targets that were calculated from ACTUAL optimized trajectory during Accept
-      state.visitedTargets = [...seg1.visitedTargets];
-      console.log(`[resetMission] Visited targets from segment: ${state.visitedTargets.join(", ")}`);
-    } else {
-      // Fall back to JSON's visited targets
-      state.visitedTargets = segmentedImport.getVisitedTargetsForSegment(1);
-      console.log(`[resetMission] Visited targets from JSON: ${state.visitedTargets.join(", ")}`);
-    }
-
-    // Set pending cut positions for C1 marker (reuse seg1 from above)
-    if (seg1 && seg1.cutPositions) {
+    if (seg1 && seg1.cutPositions && Object.keys(seg1.cutPositions).length > 0) {
       state.pendingCutPositions = JSON.parse(JSON.stringify(seg1.cutPositions));
       console.log("[resetMission] Set C1 marker positions:", state.pendingCutPositions);
     } else {
       state.pendingCutPositions = null;
+      console.log("[resetMission] No C1 marker positions found");
     }
 
     // Reset segmented import manager to segment 0
     segmentedImport._currentSegmentIndex = 0;
+
+    // Keep missionReplay at segment 0 for animation (so it checks C1 boundary at segment 1)
+    missionReplay.setCurrentSegmentIndex(0);
+    console.log("[resetMission] Set missionReplay index to 0 for animation");
 
     // Set env to display targets for segment 0
     state.env = segmentedImport.getEnvForDisplay();
@@ -2590,6 +2888,64 @@ function calculateVisitedTargetsFromCutPosition(segment, cutPositions, env) {
 // points: array of [x,y]
 // dist: distance along polyline in same units as coords
 // ----------------------------------------------------
+
+/**
+ * Truncate a trajectory at a given target position.
+ * Finds the closest point on the trajectory to the target and returns
+ * all points up to and including that point (plus the target itself).
+ * @param {Array} trajectory - Array of [x, y] points
+ * @param {Array} targetPos - [x, y] target position to truncate at
+ * @returns {Array} - Truncated trajectory ending at targetPos
+ */
+function truncateTrajectoryAtPosition(trajectory, targetPos) {
+  if (!trajectory || trajectory.length === 0 || !targetPos || targetPos.length !== 2) {
+    return trajectory || [];
+  }
+
+  // Find the segment where the target position lies (closest approach)
+  let bestDist = Infinity;
+  let bestIdx = -1;
+
+  for (let i = 0; i < trajectory.length - 1; i++) {
+    const p1 = trajectory[i];
+    const p2 = trajectory[i + 1];
+
+    // Calculate closest point on segment p1-p2 to targetPos
+    const dx = p2[0] - p1[0];
+    const dy = p2[1] - p1[1];
+    const segLenSq = dx * dx + dy * dy;
+
+    let t = 0;
+    if (segLenSq > 0) {
+      t = ((targetPos[0] - p1[0]) * dx + (targetPos[1] - p1[1]) * dy) / segLenSq;
+      t = Math.max(0, Math.min(1, t));
+    }
+
+    const closestX = p1[0] + t * dx;
+    const closestY = p1[1] + t * dy;
+    const distSq = (targetPos[0] - closestX) ** 2 + (targetPos[1] - closestY) ** 2;
+
+    if (distSq < bestDist) {
+      bestDist = distSq;
+      bestIdx = i;
+    }
+  }
+
+  if (bestIdx === -1) {
+    // Couldn't find a good segment, return full trajectory
+    return trajectory;
+  }
+
+  // Build truncated trajectory: all points up to bestIdx, plus the target position
+  const truncated = trajectory.slice(0, bestIdx + 1);
+
+  // If t > 0, add the interpolated point (which should be close to targetPos)
+  // For simplicity, just add the target position itself to ensure trajectory ends exactly there
+  truncated.push([...targetPos]);
+
+  return truncated;
+}
+
 function split_polyline_at_distance(points, dist) {
   // Defensive defaults
   const n = Array.isArray(points) ? points.length : 0;
@@ -3055,13 +3411,19 @@ function drawEnvironment() {
 
   // Debug: Log trajectory info once per draw cycle (throttled)
   if (_drawEnvFrameCount % 120 === 1) {
+    const routeKeys = Object.keys(state.routes || {});
+    const visibleKeys = Object.keys(state.trajectoryVisible || {}).filter(k => state.trajectoryVisible[k]);
+    console.log(`[drawEnv] state.routes has drones: [${routeKeys.join(',')}], trajectoryVisible: [${visibleKeys.join(',')}]`);
     Object.entries(state.routes || {}).forEach(([did, info]) => {
       const trajLen = info.trajectory ? info.trajectory.length : 0;
       const hasFullTraj = info._fullTrajectory ? info._fullTrajectory.length : 0;
+      const isVisible = state.trajectoryVisible[did] ? 'YES' : 'NO';
       if (trajLen > 0) {
         const firstPt = `(${info.trajectory[0][0].toFixed(1)},${info.trajectory[0][1].toFixed(1)})`;
         const lastPt = `(${info.trajectory[trajLen-1][0].toFixed(1)},${info.trajectory[trajLen-1][1].toFixed(1)})`;
-        console.log(`[drawEnv] D${did}: trajectory=${trajLen}pts ${firstPt}→${lastPt}, _fullTrajectory=${hasFullTraj}pts`);
+        console.log(`[drawEnv] D${did}: trajectory=${trajLen}pts ${firstPt}→${lastPt}, visible=${isVisible}`);
+      } else {
+        console.log(`[drawEnv] D${did}: NO TRAJECTORY, visible=${isVisible}`);
       }
     });
   }
@@ -3107,8 +3469,9 @@ function drawEnvironment() {
                           (state.animation.drones && Object.keys(state.animation.drones).length > 0);
   if (shouldDrawDrones && state.animation.drones) {
     Object.entries(state.animation.drones).forEach(([did, droneState]) => {
-      // Draw if animating OR frozen at checkpoint OR drone has a valid position
-      if (!droneState.animating && !state.checkpoint?.active && droneState.distanceTraveled === undefined) return;
+      // Draw if animating OR frozen at checkpoint OR drone has a valid position (including lost drones)
+      const isLostDrone = droneState._lostAtCutDistance !== undefined;
+      if (!droneState.animating && !state.checkpoint?.active && !isLostDrone && droneState.distanceTraveled === undefined) return;
       if (!state.trajectoryVisible[did]) return;
 
       const routeInfo = state.routes[did];
@@ -3121,8 +3484,13 @@ function drawEnvironment() {
 
       let droneX, droneY;
 
+      // If drone is lost (stopped at cut marker), draw at end of its truncated trajectory
+      if (isLostDrone && trajectory.length > 0) {
+        const lastPt = trajectory[trajectory.length - 1];
+        droneX = lastPt[0];
+        droneY = lastPt[1];
       // If frozen at checkpoint, draw drone at the splitPoint (end of prefix)
-      if (state.checkpoint?.active && state.checkpoint.segments[did]?.splitPoint) {
+      } else if (state.checkpoint?.active && state.checkpoint.segments[did]?.splitPoint) {
         const sp = state.checkpoint.segments[did].splitPoint;
         droneX = sp[0];
         droneY = sp[1];
@@ -3211,11 +3579,16 @@ function drawEnvironment() {
     });
   }
 
-  // Draw cut markers from missionReplay segments
-  // Helper: check if position is at an airport (don't draw cut markers at airports)
+  // ===========================================================================
+  // UNIFIED CUT MARKER DRAWING
+  // Single source of truth: missionReplay segments
+  // Each segment N (for N >= 1) stores cutPositions for cut C(N)
+  // lostDrones in segment N = drones that were disabled at cut C(N)
+  // ===========================================================================
+
   const isAtAirport = (x, y) => {
     const airports = state.env?.airports || [];
-    const threshold = 5.0; // Distance threshold to consider "at" airport
+    const threshold = 1.0;
     return airports.some(a => {
       const dx = a.x - x;
       const dy = a.y - y;
@@ -3223,85 +3596,40 @@ function drawEnvironment() {
     });
   };
 
-  // Draw cut markers
-  // For segmented import: use state.pendingCutPositions ONLY (set by Accept)
-  // For fresh segmentation: use missionReplay cutPositions + pendingCutPositions
-  console.log(`[drawEnv] VERSION: 2024-12-30-targetfix-v3`);
+  // Collect all markers to draw (deduplicated by position)
+  const markersToDrawMap = new Map(); // key: "x,y" -> { label, isLost, did }
+
+  // Draw markers from missionReplay segments (segments 1+ have cutPositions for C1, C2, etc.)
+  // Only draw markers up to the current segment we're working on
+  const totalSegs = missionReplay.getSegmentCount();
   const currentSegIdx = missionReplay.getCurrentSegmentIndex();
+  for (let segIdx = 1; segIdx < totalSegs; segIdx++) {
+    // Don't draw markers beyond the current segment (e.g., after Reset)
+    if (segIdx > currentSegIdx) continue;
 
-  if (segmentedImport.isActive()) {
-    // SEGMENTED IMPORT: Draw ALL markers from MissionReplay segments + current pending marker
-    const currentSegIdx = segmentedImport.getCurrentSegmentIndex();
+    const seg = missionReplay.getSegment(segIdx);
+    if (!seg?.cutPositions) continue;
 
-    // Draw markers from all segments that have cutPositions (segments 1+)
-    console.log(`[drawEnv-IMPORT] currentSegIdx=${currentSegIdx}, checking segments 1 to ${currentSegIdx + 1}`);
-    for (let segIdx = 1; segIdx <= currentSegIdx + 1; segIdx++) {
-      const seg = missionReplay.getSegment(segIdx);
-      console.log(`[drawEnv-IMPORT] segIdx=${segIdx}, seg.cutPositions=`, seg?.cutPositions);
-      if (seg && seg.cutPositions && Object.keys(seg.cutPositions).length > 0) {
-        console.log(`[drawEnv-IMPORT] Drawing marker C${segIdx} at:`, seg.cutPositions);
-        const lostDrones = seg.lostDrones || [];
-        Object.entries(seg.cutPositions).forEach(([did, pos]) => {
-          if (!pos || pos.length !== 2) return;
-          if (isAtAirport(pos[0], pos[1])) return;
-          const [mx, my] = w2c(pos[0], pos[1]);
-          const isLost = lostDrones.includes(did);
-          drawCutMarker(ctx, mx, my, `C${segIdx}`, isLost);
-        });
-      }
-    }
+    // Only draw if previous segment has a solution (trajectory exists up to this cut)
+    const prevSeg = missionReplay.getSegment(segIdx - 1);
+    const prevHasSolution = prevSeg && Object.keys(prevSeg.solution?.routes || {}).length > 0;
+    if (!prevHasSolution) continue;
 
-    // Also draw the current pending marker (if we just pressed Accept but haven't solved yet)
-    if (state.pendingCutPositions && Object.keys(state.pendingCutPositions).length > 0) {
-      const nextSegIdx = currentSegIdx;
-      Object.entries(state.pendingCutPositions).forEach(([did, pos]) => {
-        if (!pos || pos.length !== 2) return;
-        if (isAtAirport(pos[0], pos[1])) return;
-        const [mx, my] = w2c(pos[0], pos[1]);
-        // Check drone's CURRENT enabled state for pending markers
-        const cfg = state.droneConfigs[did];
-        const isLost = cfg && cfg.enabled === false;
-        drawCutMarker(ctx, mx, my, `C${nextSegIdx}`, isLost);
-      });
-    }
-  } else {
-    // FRESH SEGMENTATION: Use missionReplay cutPositions
-    const maxSegToShow = currentSegIdx + 2;
-    console.log(`[drawEnv] currentSegIdx=${currentSegIdx}, checking cut markers for segments 1 to ${maxSegToShow - 1}`);
-
-    for (let segIdx = 1; segIdx < maxSegToShow; segIdx++) {
-      const seg = missionReplay.getSegment(segIdx);
-      const prevSeg = missionReplay.getSegment(segIdx - 1);
-      const prevHasSolution = prevSeg && Object.keys(prevSeg.solution?.routes || {}).length > 0;
-
-      console.log(`[drawEnv] segIdx=${segIdx}, prevHasSolution=${prevHasSolution}`);
-
-      if (seg && seg.cutPositions && prevHasSolution) {
-        const lostDrones = seg.lostDrones || [];
-        Object.entries(seg.cutPositions).forEach(([did, pos]) => {
-          if (!pos || pos.length !== 2) return;
-          if (isAtAirport(pos[0], pos[1])) return;
-          const [mx, my] = w2c(pos[0], pos[1]);
-          const isLost = lostDrones.includes(did);
-          drawCutMarker(ctx, mx, my, `C${segIdx}`, isLost);
-        });
-      }
-    }
-
-    // Draw pending cut marker (fresh segmentation - after pressing C but before Accept)
-    if (state.pendingCutPositions && Object.keys(state.pendingCutPositions).length > 0) {
-      const nextSegIdx = missionReplay.getSegmentCount();
-      Object.entries(state.pendingCutPositions).forEach(([did, pos]) => {
-        if (!pos || pos.length !== 2) return;
-        if (isAtAirport(pos[0], pos[1])) return;
-        const [mx, my] = w2c(pos[0], pos[1]);
-        // Check drone's CURRENT enabled state for pending markers
-        const cfg = state.droneConfigs[did];
-        const isLost = cfg && cfg.enabled === false;
-        drawCutMarker(ctx, mx, my, `C${nextSegIdx}`, isLost);
-      });
-    }
+    const lostDrones = seg.lostDrones || [];
+    Object.entries(seg.cutPositions).forEach(([did, pos]) => {
+      if (!pos || pos.length !== 2) return;
+      if (isAtAirport(pos[0], pos[1])) return;
+      const key = `${pos[0].toFixed(4)},${pos[1].toFixed(4)}`;
+      const isLost = lostDrones.includes(did);
+      markersToDrawMap.set(key, { pos, label: `C${segIdx}`, isLost, did });
+    });
   }
+
+  // Draw all collected markers (no duplicates)
+  markersToDrawMap.forEach(({ pos, label, isLost }) => {
+    const [mx, my] = w2c(pos[0], pos[1]);
+    drawCutMarker(ctx, mx, my, label, isLost);
+  });
 
   // Target Type Legend (top-right corner)
   const legendTypes = [
@@ -3475,23 +3803,39 @@ async function exportEnvironment() {
       // MISSION export - export segments with env, cut distances, cut positions (NO solutions)
       segmentCount = segments.length;
 
-      // IMPORTANT: Use current state.droneConfigs, not the stale configs in segment envs
-      // This ensures the exported file has the user's current drone configurations
-      const currentDroneConfigs = JSON.parse(JSON.stringify(state.droneConfigs || {}));
+      // DEBUG: Log all segment drone_configs before export
+      console.log(`[EXPORT] ===== SEGMENT DRONE_CONFIGS DEBUG =====`);
+      segments.forEach((s, i) => {
+        const hasDroneConfigs = !!s.drone_configs;
+        const enabled = s.drone_configs
+          ? Object.entries(s.drone_configs).filter(([,c])=>c.enabled).map(([d])=>`D${d}`).join(',')
+          : 'MISSING';
+        console.log(`[EXPORT] Segment ${i}: drone_configs=${hasDroneConfigs ? 'YES' : 'NO'}, enabled=[${enabled}]`);
+      });
+      console.log(`[EXPORT] =========================================`);
+
+      // Use segment 0's drone_configs as the top-level default
+      const seg0Configs = segments[0]?.drone_configs || state.droneConfigs || {};
 
       exportObj = {
         schema: "isr_env_v1",
         is_segmented: true,
         segment_count: segmentCount,
-        drone_configs: currentDroneConfigs,  // Top-level drone configs for import
-        segments: segments.map(s => ({
-          index: s.index,
-          env: s.env,
-          cutDistance: s.cutDistance || null,
-          cutPositions: s.cutPositions || null,  // Save exact cut positions for marker display
-          drone_configs: currentDroneConfigs,  // Use current configs, not stale s.env ones
-          // NO frozenSolution - solutions come from solver, not JSON
-        })),
+        drone_configs: JSON.parse(JSON.stringify(seg0Configs)),  // Top-level uses segment 0's config
+        segments: segments.map(s => {
+          // IMPORTANT: Each segment gets its OWN drone_configs that was saved when it was accepted
+          const segDroneConfigs = s.drone_configs || state.droneConfigs || {};
+          const enabled = Object.entries(segDroneConfigs).filter(([,c])=>c.enabled).map(([d])=>`D${d}`).join(',');
+          console.log(`[EXPORT] Segment ${s.index}: exporting drone_configs enabled=[${enabled}]`);
+          return {
+            index: s.index,
+            env: s.env,
+            cutDistance: s.cutDistance || null,
+            cutPositions: s.cutPositions || null,  // Save exact cut positions for marker display
+            drone_configs: JSON.parse(JSON.stringify(segDroneConfigs)),  // Per-segment config
+            // NO frozenSolution - solutions come from solver, not JSON
+          };
+        }),
       };
       appendDebugLine(`   ${segmentCount} segments with cut distances and positions (no solutions)`);
     } else {
@@ -3860,6 +4204,11 @@ function initDroneConfigsFromEnv() {
   // Check if drone_configs are saved in the environment
   const savedConfigs = (state.env && state.env.drone_configs) || {};
 
+  console.log(`[initDroneConfigsFromEnv] BEFORE: state.droneConfigs enabled:`,
+    Object.entries(state.droneConfigs || {}).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(','));
+  console.log(`[initDroneConfigsFromEnv] savedConfigs (from env) enabled:`,
+    Object.entries(savedConfigs).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(','));
+
   function populateStartSelect(selectId) {
     const sel = $(selectId);
     if (!sel) return;
@@ -3931,6 +4280,9 @@ function initDroneConfigsFromEnv() {
       }
     });
   }
+
+  console.log(`[initDroneConfigsFromEnv] AFTER: state.droneConfigs enabled:`,
+    Object.entries(state.droneConfigs || {}).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(','));
 }
 
 function attachConfigListeners() {
@@ -4350,7 +4702,25 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   const displayEnv = segmentedImport.getEnvForDisplay();  // Only segment 0's targets
   const fullEnv = segmentedImport.getFullEnv();           // All targets for snapshot
   state.env = displayEnv;
-  state.droneConfigs = JSON.parse(JSON.stringify(displayEnv.drone_configs || {}));
+
+  // Derive segment 0's droneConfigs from C1 cutPositions (which drones actually flew segment 0)
+  // The JSON's per-segment drone_configs may be buggy (often shows wrong enabled drones)
+  const baseConfigs = JSON.parse(JSON.stringify(displayEnv.drone_configs || {}));
+  const c1Positions = segmentedImport.getCutPositionForSegment(1);  // C1 = end of segment 0
+
+  if (c1Positions && Object.keys(c1Positions).length > 0) {
+    // Disable all, then enable only drones that have C1 positions
+    Object.keys(baseConfigs).forEach(did => {
+      if (baseConfigs[did]) baseConfigs[did].enabled = false;
+    });
+    Object.keys(c1Positions).forEach(did => {
+      if (baseConfigs[did]) baseConfigs[did].enabled = true;
+    });
+    console.log(`[loadSegmentedMissionFromJson] Segment 0: derived from C1 cutPositions: [${Object.keys(c1Positions).join(',')}]`);
+  } else {
+    console.log(`[loadSegmentedMissionFromJson] Segment 0: no C1 cutPositions, using JSON drone_configs`);
+  }
+  state.droneConfigs = baseConfigs;
   state.env.drone_configs = state.droneConfigs;
 
   // Store initial snapshot (ALL targets - never overwrite this)
@@ -4372,14 +4742,36 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   const totalSegments = segmentedImport.getTotalSegments();
   appendDebugLine(`📊 Creating ${totalSegments} segments`);
 
+  // First, collect all segment drone_configs so we can derive lostDrones
+  const segmentDroneConfigs = [];
+  for (let i = 0; i < totalSegments; i++) {
+    const configs = segmentedImport.getDroneConfigsForSegment(i) || {};
+    segmentDroneConfigs.push(configs);
+  }
+
   for (let i = 0; i < totalSegments; i++) {
     const cutDistance = segmentedImport.getCutDistanceForSegment(i);
     // Don't load cutPositions on import - they're calculated fresh when you Accept
     // const cutPositions = segmentedImport.getCutPositionForSegment(i);
 
+    // Derive lostDrones: drones enabled in segment i-1 but disabled in segment i
+    let lostDrones = [];
+    if (i > 0) {
+      const prevConfigs = segmentDroneConfigs[i - 1];
+      const currConfigs = segmentDroneConfigs[i];
+      Object.entries(prevConfigs).forEach(([did, cfg]) => {
+        if (cfg.enabled && !currConfigs[did]?.enabled) {
+          lostDrones.push(did);
+        }
+      });
+      if (lostDrones.length > 0) {
+        console.log(`[loadSegmentedMissionFromJson] Segment ${i}: derived lostDrones=[${lostDrones.join(',')}]`);
+      }
+    }
+
     // Log segment info
     const visited = segmentedImport.getVisitedTargetsForSegment(i);
-    appendDebugLine(`   Segment ${i}: cutDist=${cutDistance.toFixed(1)}, visited=[${visited.join(",")}]`);
+    appendDebugLine(`   Segment ${i}: cutDist=${cutDistance.toFixed(1)}, visited=[${visited.join(",")}], lostDrones=[${lostDrones.join(",")}]`);
 
     missionReplay.addSegment({
       solution: { routes: {}, sequences: {} },
@@ -4387,6 +4779,7 @@ function loadSegmentedMissionFromJson(data, filename = "") {
       cutDistance: i === 0 ? null : cutDistance,
       cutPositions: null,  // Don't copy cutPositions on import - they're set when you Accept
       isCheckpointReplan: i > 0,
+      lostDrones: lostDrones,  // Drones that were lost at this checkpoint
     });
   }
 
@@ -5979,6 +6372,7 @@ async function runPlanner() {
     // Store as draft solution (two-phase commit)
     // IMPORTANT: Deep copy routes to prevent modifications to state.routes from affecting the draft
     // Also save checkpoint state so it can be restored if the draft is discarded
+    // CRITICAL: Save drone_configs at Solve time so Accept uses the actual config used for solving
     missionState.draftSolution = {
       sequences: JSON.parse(JSON.stringify(data.sequences || {})),
       routes: JSON.parse(JSON.stringify(data.routes || {})),
@@ -5991,7 +6385,10 @@ async function runPlanner() {
       cutDistance: isCheckpointReplan ? state.pendingCutDistance : null,
       // Save cut positions so they can be restored on discard
       pendingCutPositions: state.pendingCutPositions ? JSON.parse(JSON.stringify(state.pendingCutPositions)) : null,
+      // Save drone_configs at Solve time - this is what should be saved at Accept, not the UI state at Accept time
+      droneConfigs: JSON.parse(JSON.stringify(state.droneConfigs || {})),
     };
+    console.log(`[SOLVE] Saved droneConfigs with draft: enabled=[${Object.entries(state.droneConfigs || {}).filter(([,c])=>c.enabled).map(([d])=>`D${d}`).join(',')}]`);
 
     // Apply the draft solution visually (but not committed yet)
     applyDraftSolutionToUI(missionState.draftSolution);
@@ -6522,8 +6919,15 @@ function startAnimation(droneIds) {
 
   // NEW: Single mission distance tracker (same for all drones since they fly at same speed)
   // Get starting distance from MissionReplay (0 for segment 0, cutDistance for checkpoint replans)
-  state.animation.missionDistance = missionReplay.getStartingDistance();
-  appendDebugLine(`🎬 Mission starting at distance: ${state.animation.missionDistance.toFixed(1)}`);
+  // Exception: After Reset, we force start at 0 even though missionReplay index is 1 (for marker drawing)
+  if (state.animation.forceStartDistanceZero) {
+    state.animation.missionDistance = 0;
+    state.animation.forceStartDistanceZero = false; // Clear the flag
+    appendDebugLine(`🎬 Mission starting at distance: 0 (forced after Reset)`);
+  } else {
+    state.animation.missionDistance = missionReplay.getStartingDistance();
+    appendDebugLine(`🎬 Mission starting at distance: ${state.animation.missionDistance.toFixed(1)}`);
+  }
 
   // Enable debug stop at splice point if this is a checkpoint replan
   const isCheckpointReplan = state.animation.missionDistance > 0;
@@ -6652,6 +7056,51 @@ function startAnimation(droneIds) {
 
     // NEW: Advance single mission distance (same for all drones)
     state.animation.missionDistance += speedUnitsPerSec * dt;
+
+    // LOST DRONES CHECK: Find the cut distance where each drone is lost and stop them there
+    // This must happen BEFORE we sync distanceTraveled, so drones stop at their cut markers
+    if (segmentedImport.isActive()) {
+      const currentMissionDist = state.animation.missionDistance;
+
+      Object.entries(state.animation.drones).forEach(([did, droneState]) => {
+        if (!droneState.animating) return;
+        if (droneState._lostAtCutDistance !== undefined) return; // Already handled
+
+        // Check each segment to find where this drone is lost
+        const segCount = missionReplay.getSegmentCount();
+        for (let segIdx = 1; segIdx < segCount; segIdx++) {
+          const seg = missionReplay.getSegment(segIdx);
+          if (!seg || !seg.lostDrones) continue;
+
+          // Is this drone lost at this segment?
+          if (seg.lostDrones.includes(did)) {
+            const cutDistance = seg.cutDistance;
+            if (cutDistance && currentMissionDist >= cutDistance) {
+              // Drone should stop at this cut distance
+              droneState._lostAtCutDistance = cutDistance;
+              droneState.distanceTraveled = cutDistance;
+              droneState.animating = false;
+              console.log(`🛑 D${did} STOPPED at cut distance ${cutDistance.toFixed(1)} (lost at segment ${segIdx})`);
+
+              // TRUNCATE TRAJECTORY: Remove trajectory points past the cut distance
+              const routeInfo = state.routes[did];
+              if (routeInfo && routeInfo.trajectory && routeInfo.trajectory.length > 0) {
+                const fullTraj = routeInfo.trajectory;
+                // split_polyline_at_distance returns { prefixPoints, suffixPoints, ... }
+                const splitResult = split_polyline_at_distance(fullTraj, cutDistance);
+                const truncated = splitResult?.prefixPoints;
+                if (truncated && truncated.length > 0) {
+                  const oldLen = fullTraj.length;
+                  routeInfo.trajectory = truncated;
+                  console.log(`🛑 D${did} TRAJECTORY TRUNCATED: ${oldLen}→${truncated.length} pts at cutDistance=${cutDistance.toFixed(1)}`);
+                }
+              }
+              break;
+            }
+          }
+        }
+      });
+    }
 
     Object.entries(state.animation.drones).forEach(([did, droneState]) => {
       if (!droneState.animating) return;
@@ -6843,62 +7292,59 @@ function startAnimation(droneIds) {
         }
       }
 
-      // SEGMENTED IMPORT: Build CUMULATIVE trajectory from all segments 0 to newSegment.index
-      // Each segment in MissionReplay stores only its PORTION (e.g., C1->C2)
-      // We need to concatenate them to get the full trajectory (A1->C1->C2)
+      // SEGMENTED IMPORT: Extend trajectories for ACTIVE drones only
+      // Check lostDrones to identify which drones should stop animating
       if (segmentedImport.isActive()) {
-        console.log(`🔄 SEGMENT SWITCH (SegmentedImport): Building cumulative trajectory for segments 0 to ${newSegment.index}`);
+        console.log(`🔄 SEGMENT SWITCH (SegmentedImport): Building trajectory for segment ${newSegment.index}`);
 
-        // Build cumulative routes from all segments
-        const cumulativeRoutes = {};
-        for (let segIdx = 0; segIdx <= newSegment.index; segIdx++) {
-          const seg = missionReplay.getSegment(segIdx);
-          if (!seg || !seg.solution || !seg.solution.routes) continue;
+        // Collect all lost drones from previous segments
+        // Try multiple sources: segmentedImport, missionReplay, newSegment
+        const allLostDrones = new Set();
+        for (let i = 1; i <= newSegment.index; i++) {
+          // First try segmentedImport (SegmentManager)
+          const segFromImport = segmentedImport.getSegment?.(i);
+          if (segFromImport?.lostDrones) {
+            segFromImport.lostDrones.forEach(did => allLostDrones.add(did));
+          }
+          // Fallback to missionReplay
+          const segFromReplay = missionReplay.getSegment(i);
+          if (segFromReplay?.lostDrones) {
+            segFromReplay.lostDrones.forEach(did => allLostDrones.add(did));
+          }
+        }
+        console.log(`🔄 Lost drones (segments 1-${newSegment.index}): [${[...allLostDrones].join(",")}]`);
 
-          Object.entries(seg.solution.routes).forEach(([did, routeData]) => {
+        // Use the FULL solution saved at Accept time for this segment
+        const fullSolution = missionState.fullSolutionsPerSegment?.[newSegment.index];
+
+        if (fullSolution?.routes) {
+          Object.entries(fullSolution.routes).forEach(([did, routeData]) => {
+            // CRITICAL: Skip drones that were lost in previous segments
+            if (allLostDrones.has(did)) {
+              console.log(`🔄 D${did}: SKIPPED (lost drone - keeping at cut marker)`);
+              // Ensure the lost drone stays stopped
+              const droneState = state.animation.drones[did];
+              if (droneState) {
+                droneState.animating = false;
+              }
+              return;
+            }
+
+            // Skip if drone doesn't exist in state.routes
+            if (!state.routes[did]) {
+              console.log(`🔄 D${did}: SKIPPED (not in state.routes)`);
+              return;
+            }
+
             const traj = routeData.trajectory || [];
-            const route = routeData.route || [];
             if (traj.length === 0) return;
 
-            if (!cumulativeRoutes[did]) {
-              // First segment for this drone
-              cumulativeRoutes[did] = {
-                trajectory: [...traj],
-                route: [...route],
-              };
-              console.log(`🔄 D${did} seg${segIdx}: initial ${traj.length} pts`);
-            } else {
-              // Concatenate with previous segments
-              const existingTraj = cumulativeRoutes[did].trajectory;
-              const existingRoute = cumulativeRoutes[did].route;
-              const lastPoint = existingTraj[existingTraj.length - 1];
-              const firstPoint = traj[0];
-
-              // Check for duplicate at junction
-              const isDuplicate = lastPoint && firstPoint &&
-                Math.abs(lastPoint[0] - firstPoint[0]) < 0.001 &&
-                Math.abs(lastPoint[1] - firstPoint[1]) < 0.001;
-
-              cumulativeRoutes[did].trajectory = isDuplicate
-                ? existingTraj.concat(traj.slice(1))
-                : existingTraj.concat(traj);
-              cumulativeRoutes[did].route = existingRoute.concat(route);
-
-              console.log(`🔄 D${did} seg${segIdx}: added ${traj.length} pts, cumulative now ${cumulativeRoutes[did].trajectory.length} pts`);
-            }
-          });
-        }
-
-        // Update state.routes with cumulative trajectories
-        Object.entries(cumulativeRoutes).forEach(([did, routeData]) => {
-          if (state.routes[did]) {
             const oldLen = state.routes[did].trajectory?.length || 0;
-            state.routes[did].trajectory = routeData.trajectory;
-            state.routes[did].route = routeData.route;
-            const newLen = state.routes[did].trajectory.length;
-            appendDebugLine(`🔄 D${did}: cumulative trajectory ${oldLen}→${newLen} pts (segments 0-${newSegment.index})`);
+            state.routes[did].trajectory = [...traj];
+            state.routes[did].route = [...(routeData.route || [])];
+            console.log(`🔄 D${did}: trajectory ${oldLen}→${traj.length} pts`);
 
-            // Update drone's cumulative distances and total distance for the new trajectory
+            // Update cumulative distances for the new trajectory
             const droneState = state.animation.drones[did];
             if (droneState) {
               const trajectory = state.routes[did].trajectory;
@@ -6912,20 +7358,15 @@ function startAnimation(droneIds) {
               }
               droneState.cumulativeDistances = cumulativeDistances;
               droneState.totalDistance = totalDistance;
-              // Keep distanceTraveled as-is (we're continuing from C point)
 
               // Re-enable animation if there's more to fly
-              if (droneState.distanceTraveled < totalDistance) {
-                if (!droneState.animating) {
-                  appendDebugLine(`🔄 D${did}: Re-enabling animation (was finished, now has more trajectory)`);
-                }
+              if (droneState.distanceTraveled < totalDistance && !droneState.animating) {
                 droneState.animating = true;
+                appendDebugLine(`🔄 D${did}: Re-enabling animation`);
               }
-
-              appendDebugLine(`🔄 D${did}: totalDistance now ${totalDistance.toFixed(1)}, distanceTraveled=${droneState.distanceTraveled.toFixed(1)}, animating=${droneState.animating}`);
             }
-          }
-        });
+          });
+        }
       } else {
         // LEGACY: For non-segmented imports, use newSegment's routes directly
         console.log(`🔄 SEGMENT SWITCH (Legacy): newSegment.solution.routes keys:`, Object.keys(newSegment.solution.routes || {}));
@@ -7037,16 +7478,22 @@ function startAnimation(droneIds) {
         });
       });
 
-      // Pause for 1000ms at the C point to make the transition visible
+      // AUTO-CONTINUE through checkpoints with 1 second pause
+      console.log(`📍 Checkpoint C${newSegment.index} - pausing 1 second then continuing`);
       drawEnvironment();
-      updateStatsFromAnimation();  // Update stats at segment switch
+      updateStatsFromAnimation();
+
+      // Pause animation for 1 second, then auto-resume
+      state.animation.active = false;
       setTimeout(() => {
-        if (state.animation.active) {
-          console.log(`🔄 Resuming animation after segment switch pause`);
+        if (missionState.mode === MissionMode.ANIMATING ||
+            missionState.mode === MissionMode.READY_TO_ANIMATE) {
+          state.animation.active = true;
           state.animation.animationId = requestAnimationFrame(animate);
+          console.log(`▶️ Resuming animation after checkpoint C${newSegment.index}`);
         }
       }, 1000);
-      return;  // Exit this frame, resume after timeout
+      return;  // Exit current frame, setTimeout will resume
     }
 
     drawEnvironment();
