@@ -105,20 +105,71 @@ def parse_allocation_modifications(user_message: str) -> List[Dict[str, Any]]:
 
 @dataclass
 class CoordinatorDecision:
-    """Output of the Coordinator pre-pass."""
-    intent: str
+    """
+    Output of the Coordinator pre-pass.
+
+    Canonical decision structure (frozen contract):
+    - intent: plan | replan | reallocate | optimize | explain | what_if | debug
+    - policy: solver/allocation control flags
+    - constraints: moves, required/forbidden targets, fixed endpoints
+    - explanation_only: if True, skip solver entirely
+    - warnings/errors: validation results
+    - trace_events: structured events for Agents Monitor tab
+
+    Do NOT add new top-level keys. Extend under constraints or policy.
+    """
+    # Core decision
+    intent: str  # plan | replan | reallocate | optimize | explain | what_if | debug
     confidence: float
     rules_hit: List[str]
+
+    # Policy controls what downstream agents do
     policy: Dict[str, Any]
-    guardrails: Dict[str, Any]
-    drone_contracts: Dict[str, Dict[str, Any]]  # Per-drone start/home/endpoint contracts
-    synthetic_starts: Dict[str, Dict[str, float]]  # Authoritative synthetic start coordinates
-    trace: Dict[str, Any]
+    # Expected keys:
+    #   allow_solver: bool
+    #   force_allocation: bool
+    #   allocation_strategy: str | None  ("greedy"|"balanced"|"efficient"|"geographic"|"exclusive")
+    #   post_opt: { crossing_removal, trajectory_swap, insert_unvisited }
+
+    # Constraints extracted from user message
+    constraints: Dict[str, Any] = field(default_factory=dict)
+    # Expected keys:
+    #   moves: List[{target, from_drone?, to_drone}]
+    #   required_targets: List[str]
+    #   forbidden_targets: List[str]
+    #   fixed_endpoints: Dict[str, str]  # drone_id -> airport_id
+
+    # Explanation-only mode (skip solver)
+    explanation_only: bool = False
+
+    # Validation results
+    warnings: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+
+    # Structured trace events for Agents Monitor tab
+    trace_events: List[Dict[str, Any]] = field(default_factory=list)
+
+    # --- Legacy/internal fields (kept for backward compatibility) ---
+    guardrails: Dict[str, Any] = field(default_factory=dict)
+    drone_contracts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    synthetic_starts: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    trace: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_valid(self) -> bool:
         return len(self.errors) == 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Export as canonical decision dict (for API/logging)."""
+        return {
+            "intent": self.intent,
+            "policy": self.policy,
+            "constraints": self.constraints,
+            "explanation_only": self.explanation_only,
+            "warnings": self.warnings,
+            "errors": self.errors,
+            "trace_events": self.trace_events,
+        }
 
 
 class CoordinatorV4:
@@ -147,6 +198,29 @@ class CoordinatorV4:
 
     def __init__(self, debug: bool = False):
         self.debug = debug
+
+    def _te(
+        self,
+        trace_events: List[Dict[str, Any]],
+        stage: str,
+        event: str,
+        **details
+    ) -> None:
+        """
+        Append a structured trace event.
+
+        Args:
+            trace_events: The list to append to
+            stage: Pipeline stage (input, intent, constraints, policy, validate, final)
+            event: Event name (e.g., "received", "intent_classified", "policy_selected")
+            **details: Additional key-value pairs for the event
+        """
+        trace_events.append({
+            "agent": "CoordinatorV4",
+            "stage": stage,
+            "event": event,
+            "details": details or {},
+        })
 
     def classify_intent(
         self,
@@ -449,79 +523,174 @@ class CoordinatorV4:
         Main entry point: classify intent, validate, select policy.
 
         Returns:
-            CoordinatorDecision with all fields populated
+            CoordinatorDecision with canonical structure (frozen contract).
         """
-        # 1. Classify intent
+        # Initialize trace_events list and warnings
+        trace_events: List[Dict[str, Any]] = []
+        warnings: List[str] = []
+
+        # ===================================================================
+        # EVENT 1: Input Snapshot (sanitized)
+        # ===================================================================
+        enabled_drone_ids = [
+            d for d, cfg in (drone_configs or {}).items()
+            if isinstance(cfg, dict) and cfg.get("enabled")
+        ]
+        self._te(trace_events, "input", "received",
+                 message=user_message[:400],
+                 num_targets=len(environment.get("targets", [])),
+                 num_sams=len(environment.get("sams", [])),
+                 drones_enabled=enabled_drone_ids)
+
+        # ===================================================================
+        # EVENT 2: Intent Classification
+        # ===================================================================
         intent, confidence, rules_hit = self.classify_intent(
             user_message, drone_configs
         )
+        self._te(trace_events, "intent", "intent_classified",
+                 intent=intent,
+                 confidence=confidence,
+                 rules_hit=rules_hit)
 
-        # 2. Validate environment and matrix
+        # ===================================================================
+        # EVENT 3: Constraint Extraction
+        # ===================================================================
+        # Extract moves from user message (e.g., "move T5 from D2 to D1")
+        moves = parse_allocation_modifications(user_message) if user_message else []
+
+        # Build constraints dict (canonical structure)
+        constraints: Dict[str, Any] = {
+            "moves": moves,
+            "required_targets": [],   # TODO: parse from user message
+            "forbidden_targets": [],  # TODO: parse from user message
+            "fixed_endpoints": {},    # Populated from drone_contracts below
+        }
+        self._te(trace_events, "constraints", "moves_extracted",
+                 moves=moves,
+                 num_moves=len(moves))
+
+        # ===================================================================
+        # EVENT 4: Policy Selection
+        # ===================================================================
+        # Get raw policy and drone contracts from select_policy
+        raw_policy, drone_contracts = self.select_policy(
+            intent, drone_configs, environment, preferences, ui_state, user_message
+        )
+
+        # Build canonical policy structure
+        policy: Dict[str, Any] = {
+            "allow_solver": not raw_policy.get("skip_solver", False),
+            "force_allocation": raw_policy.get("force_algorithmic_allocation", True),
+            "allocation_strategy": raw_policy.get("allocation_strategy"),
+            "post_opt": raw_policy.get("post_opt", {
+                "crossing_removal": True,
+                "trajectory_swap": True,
+                "insert_unvisited": True,
+            }),
+            # Keep legacy keys for backward compatibility
+            "solver_mode": raw_policy.get("solver_mode"),
+            "skip_allocation": raw_policy.get("skip_allocation", False),
+            "skip_solver": raw_policy.get("skip_solver", False),
+            "use_existing_allocation": raw_policy.get("use_existing_allocation", False),
+            "allocation_modifications": raw_policy.get("allocation_modifications", []),
+            "drone_contracts": drone_contracts,
+        }
+
+        # Populate fixed_endpoints from drone_contracts
+        for did, contract in drone_contracts.items():
+            if contract.get("end_airport"):
+                constraints["fixed_endpoints"][did] = contract["end_airport"]
+
+        self._te(trace_events, "policy", "policy_selected",
+                 allow_solver=policy["allow_solver"],
+                 force_allocation=policy["force_allocation"],
+                 allocation_strategy=policy["allocation_strategy"],
+                 post_opt=policy["post_opt"])
+
+        # ===================================================================
+        # EVENT 5: Validation
+        # ===================================================================
         guardrails, errors = self.validate_environment(
             environment, drone_configs, sam_matrix
         )
 
-        # 3. Select policy and build drone contracts
-        policy, drone_contracts = self.select_policy(
-            intent, drone_configs, environment, preferences, ui_state, user_message
-        )
+        # Add any guardrail issues as warnings
+        if not guardrails.get("env_valid", True):
+            warnings.append("Environment validation failed")
+        if not guardrails.get("matrix_valid", True):
+            warnings.append("SAM matrix validation failed")
 
-        # 4. Build trace for reproducibility
+        self._te(trace_events, "validate", "validated",
+                 env_valid=guardrails.get("env_valid", False),
+                 matrix_valid=guardrails.get("matrix_valid", False),
+                 warnings=warnings,
+                 errors=errors)
+
+        # If errors, block solver
+        explanation_only = raw_policy.get("explain_only", False)
+        if errors:
+            policy["allow_solver"] = False
+            explanation_only = True
+            self._te(trace_events, "policy", "solver_blocked_due_to_errors",
+                     errors=errors)
+
+        # ===================================================================
+        # EVENT 6: Final Summary
+        # ===================================================================
+        synthetic_starts = guardrails.get("synthetic_starts", {})
+        guardrails["synthetic_start_ids"] = list(synthetic_starts.keys())
+
+        self._te(trace_events, "final", "decision_ready",
+                 intent=intent,
+                 allow_solver=policy["allow_solver"],
+                 force_allocation=policy["force_allocation"],
+                 allocation_strategy=policy["allocation_strategy"],
+                 num_moves=len(moves),
+                 num_errors=len(errors),
+                 num_warnings=len(warnings))
+
+        # Build legacy trace for backward compatibility
         trace = {
             "coordinator": {
-                "version": "v4.2",
+                "version": "v4.3",
                 "intent": intent,
                 "confidence": confidence,
                 "rules_hit": rules_hit,
-                "policy_summary": {
-                    "allocation_strategy": policy["allocation_strategy"],
-                    "solver_mode": policy["solver_mode"],
-                    "force_algorithmic_allocation": policy["force_algorithmic_allocation"],
-                    "explain_only": policy["explain_only"],
-                    "use_existing_allocation": policy.get("use_existing_allocation", False),
-                    "allocation_modifications": policy.get("allocation_modifications", []),
-                },
+                "policy": policy,
+                "constraints": constraints,
                 "guardrails_summary": {
-                    "env_valid": guardrails["env_valid"],
-                    "matrix_valid": guardrails["matrix_valid"],
-                    "synthetic_starts_valid": guardrails["synthetic_starts_valid"],
-                    "synthetic_starts": list(guardrails.get("synthetic_starts", {}).keys()),
-                },
-                "drone_contracts_summary": {
-                    did: {
-                        "start_id": c["start_id"],
-                        "is_synthetic": c["is_synthetic_start"],
-                    }
-                    for did, c in drone_contracts.items()
+                    "env_valid": guardrails.get("env_valid", False),
+                    "matrix_valid": guardrails.get("matrix_valid", False),
+                    "synthetic_starts": list(synthetic_starts.keys()),
                 },
             }
         }
-
-        # 5. Extract synthetic_starts as authoritative coordinate data
-        #    (separate from guardrails which are for validation outcomes only)
-        synthetic_starts = guardrails.get("synthetic_starts", {})
-
-        # Store only IDs in guardrails (not full coordinate data)
-        guardrails["synthetic_start_ids"] = list(synthetic_starts.keys())
 
         if self.debug:
             print(f"[Coordinator] Intent: {intent} (confidence: {confidence:.2f})")
             print(f"[Coordinator] Rules hit: {rules_hit}")
             print(f"[Coordinator] Policy: {policy}")
+            print(f"[Coordinator] Constraints: {constraints}")
             print(f"[Coordinator] Drone contracts: {drone_contracts}")
-            print(f"[Coordinator] Synthetic starts: {list(synthetic_starts.keys())}")
             print(f"[Coordinator] Errors: {errors}")
+            print(f"[Coordinator] Warnings: {warnings}")
 
         return CoordinatorDecision(
             intent=intent,
             confidence=confidence,
             rules_hit=rules_hit,
             policy=policy,
+            constraints=constraints,
+            explanation_only=explanation_only,
+            warnings=warnings,
+            errors=errors,
+            trace_events=trace_events,
+            # Legacy fields
             guardrails=guardrails,
             drone_contracts=drone_contracts,
-            synthetic_starts=synthetic_starts,  # Authoritative coordinate data
+            synthetic_starts=synthetic_starts,
             trace=trace,
-            errors=errors,
         )
 
 

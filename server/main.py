@@ -1,10 +1,11 @@
 import os
 import json
+import hashlib
 import math
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Set
 from uuid import uuid4
 
 # Load environment variables from .env file
@@ -66,8 +67,6 @@ import time
 
 _current_env = None
 
-
-
 # Import polygon wrapping for visualization (same as delivery planner)
 # Add paths for both local dev and Docker deployment
 project_root = Path(__file__).parent.parent.parent.parent
@@ -81,6 +80,7 @@ class SolveRequest(BaseModel):
     env: Dict[str, Any]
     drone_configs: Dict[str, Any]
     allocation_strategy: str = "efficient"
+    mission_id: Optional[str] = None  # optional continuity handle
 
 
 class SolveResponse(BaseModel):
@@ -90,6 +90,10 @@ class SolveResponse(BaseModel):
     wrapped_polygons: Optional[List[List[List[float]]]] = None
     allocations: Optional[Dict[str, List[str]]] = None
     distance_matrix: Optional[Dict[str, Any]] = None
+    mission_id: Optional[str] = None
+    env_hash: Optional[str] = None
+    continuity: Optional[bool] = None
+    errors: Optional[List[str]] = None
 
 
 class AgentChatRequest(BaseModel):
@@ -101,16 +105,38 @@ class AgentChatRequest(BaseModel):
     existing_solution: Optional[Dict[str, Any]] = None  # Previous routes/allocation from frontend
 
 
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel
+
+class AgentTraceEvent(BaseModel):
+    t: str                                    # event type, e.g. "coordinator.intent", "allocator.result"
+    msg: str                                  # short human readable
+    data: Optional[Dict[str, Any]] = None     # structured payload
+    ts_ms: Optional[int] = None               # optional timestamp
+
 class AgentChatResponse(BaseModel):
     reply: str
-    route: Optional[List[str]] = None  # Extracted route waypoints (legacy D1)
-    routes: Optional[Dict[str, List[str]]] = None  # Multi-drone routes {"1": ["A1","T3","A1"], ...}
-    trajectories: Optional[Dict[str, List[List[float]]]] = None  # SAM-avoiding trajectories for drawing
-    points: Optional[int] = None       # Total points
-    fuel: Optional[float] = None       # Total fuel used
-    allocations: Optional[Dict[str, List[str]]] = None  # Target allocations per drone {"1": ["T1","T2"], ...}
-    allocation_strategy: Optional[str] = None  # Strategy used by allocator (efficient/greedy/balanced/etc.)
-    mission_id: Optional[str] = None   # Identifier of the mission whose solution this refers to
+    # Coordinator contract (typed decision envelope)
+    intent: Optional[str] = None
+    actions: Optional[List[Dict[str, Any]]] = None
+    policy: Optional[Dict[str, Any]] = None
+    constraints: Optional[Dict[str, Any]] = None
+    valid: Optional[bool] = None
+    warnings: Optional[List[str]] = None
+    errors: Optional[List[str]] = None
+
+    route: Optional[List[str]] = None
+    routes: Optional[Dict[str, List[str]]] = None
+    trajectories: Optional[Dict[str, List[List[float]]]] = None
+    points: Optional[int] = None
+    fuel: Optional[float] = None
+    allocations: Optional[Dict[str, List[str]]] = None
+    allocation_strategy: Optional[str] = None
+    mission_id: Optional[str] = None
+
+    # Trace fields for Agents Monitor tab
+    trace: Optional[Dict[str, Any]] = None
+    trace_events: Optional[List[AgentTraceEvent]] = None
 
 
 class ApplySequenceRequest(BaseModel):
@@ -252,6 +278,129 @@ _export_counter: int = 1  # Running number for export filenames
 
 MissionRecord = Dict[str, Any]
 MISSION_STORE: Dict[str, MissionRecord] = {}
+
+
+# ----------------------------------------------------------------------------
+# Env / Result Guards (Step 3): stable hashing + continuity checks
+# ----------------------------------------------------------------------------
+
+def _stable_hash(obj: Any) -> str:
+    """Deterministic short hash for JSON-serializable objects."""
+    s = json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:16]
+
+
+def compute_env_hash(env: Dict[str, Any]) -> str:
+    """Hash only the environment components that affect solving/feasibility."""
+    # Keep this conservative: include geometry + identifiers.
+    payload = {
+        "airports": env.get("airports", []),
+        "targets": env.get("targets", []),
+        "sams": env.get("sams", []),
+        # Optional fields seen in your UI/editor. Include if present.
+        "polygons": env.get("polygons", env.get("obstacles", [])),
+        "boundary": env.get("boundary", None),
+        "synthetic_starts": env.get("synthetic_starts", {}),
+    }
+    return _stable_hash(payload)
+
+
+def compute_cfg_hash(drone_configs: Optional[Dict[str, Any]]) -> str:
+    return _stable_hash(drone_configs or {})
+
+
+def _known_waypoint_ids(env: Dict[str, Any]) -> set:
+    ids = set()
+    for a in env.get("airports", []):
+        aid = a.get("id") or a.get("label")
+        if aid:
+            ids.add(str(aid))
+    for t in env.get("targets", []):
+        tid = t.get("id") or t.get("label")
+        if tid:
+            ids.add(str(tid))
+    # Synthetic starts can behave like airports/waypoints
+    for sid in (env.get("synthetic_starts") or {}).keys():
+        ids.add(str(sid))
+    return ids
+
+
+def verify_solution_basic(env: Dict[str, Any], routes: Dict[str, Any], drone_configs: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Lightweight, fast validation to prevent returning self-inconsistent results."""
+    errors: List[str] = []
+    known_ids = _known_waypoint_ids(env)
+
+    if not env.get("airports"):
+        errors.append("env.airports missing/empty")
+    if not env.get("targets"):
+        # Targets can be empty in some edge cases, but treat as warning-level error here.
+        errors.append("env.targets missing/empty")
+
+    if not isinstance(routes, dict):
+        errors.append("routes is not a dict")
+        return errors
+
+    for drone_id, r in routes.items():
+        if not isinstance(r, dict):
+            errors.append(f"route[{drone_id}] is not an object")
+            continue
+
+        # Skip validation for disabled drones - empty routes are expected
+        if drone_configs:
+            cfg = drone_configs.get(drone_id) or drone_configs.get(str(drone_id))
+            if cfg and not cfg.get("enabled", True):
+                continue
+
+        seq = r.get("route") or r.get("waypoints") or r.get("sequence")
+        if isinstance(seq, str):
+            seq = [s.strip() for s in seq.split(",") if s.strip()]
+        if not isinstance(seq, list) or not seq:
+            errors.append(f"route[{drone_id}].route missing/empty")
+            continue
+
+        # Waypoint ID validity
+        for wid in seq:
+            if str(wid) not in known_ids:
+                errors.append(f"route[{drone_id}] contains unknown waypoint id: {wid}")
+                break
+
+        # Fuel check if distance and budget are provided
+        dist = r.get("distance")
+        budget = r.get("fuel_budget")
+        if isinstance(dist, (int, float)) and isinstance(budget, (int, float)):
+            if dist > budget + 1e-6:
+                errors.append(f"route[{drone_id}] exceeds fuel budget: {dist:.2f} > {budget:.2f}")
+
+    return errors
+
+
+def enforce_mission_continuity(
+    mission_id: Optional[str],
+    env: Dict[str, Any],
+    drone_configs: Optional[Dict[str, Any]],
+) -> Tuple[Optional[str], bool, str, str, Optional[str]]:
+    """Return (mission_id, continuity, env_hash, cfg_hash, mismatch_reason)."""
+    env_hash = compute_env_hash(env)
+    cfg_hash = compute_cfg_hash(drone_configs)
+
+    if not mission_id:
+        return None, False, env_hash, cfg_hash, None
+
+    rec = MISSION_STORE.get(mission_id)
+    if not rec:
+        return None, False, env_hash, cfg_hash, "mission_id not found"
+
+    stored_env_hash = rec.get("env_hash")
+    stored_cfg_hash = rec.get("cfg_hash")
+    if stored_env_hash and stored_env_hash != env_hash:
+        return None, False, env_hash, cfg_hash, "env_hash mismatch"
+    if stored_cfg_hash and stored_cfg_hash != cfg_hash:
+        # Config mismatch is less severe than env mismatch; treat as new run.
+        return None, False, env_hash, cfg_hash, "cfg_hash mismatch"
+
+    return mission_id, True, env_hash, cfg_hash, None
+
+
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -863,6 +1012,21 @@ def solve(req: SolveRequest):
     env = req.env
     drone_configs = req.drone_configs
 
+    # Step 3 guards: mission continuity + env hash
+    mission_id, continuity, env_hash, cfg_hash, mismatch_reason = enforce_mission_continuity(
+        req.mission_id, env, drone_configs
+    )
+    if mismatch_reason:
+        # Treat as new solve; do not attempt to "continue" a mismatched mission_id
+        print(f"[solve] mission continuity broken ({mismatch_reason}); starting new solve", flush=True)
+        mission_id = f"m_{uuid4().hex}"
+        continuity = False
+    elif not mission_id:
+        mission_id = f"m_{uuid4().hex}"
+        continuity = False
+
+
+
     global _current_run_id, _current_env_version_id, _current_plan_id
 
     # Ensure run exists (minimal)
@@ -954,11 +1118,43 @@ def solve(req: SolveRequest):
             print("❌ create_plan raised:", repr(e), flush=True)
             raise
 
+    # Step 3 guards: verify output matches env/constraints (basic)
+    errors = verify_solution_basic(env, routes, drone_configs)
+    if errors:
+        # Do not mutate mission store on invalid solve
+        return SolveResponse(
+            success=False,
+            routes=routes or {},
+            sequences=sequences or {},
+            wrapped_polygons=wrapped_polygons,
+            mission_id=mission_id,
+            env_hash=env_hash,
+            continuity=continuity,
+            errors=errors,
+        )
+
+    # Persist mission snapshot for continuity (used by chat-v4 and future endpoints)
+    MISSION_STORE[mission_id] = {
+        "env": env,
+        "drone_configs": drone_configs,
+        "env_hash": env_hash,
+        "cfg_hash": cfg_hash,
+        "routes": routes,
+        "allocation": None,
+        "total_points": sum(r.get("points", 0) for r in routes.values()) if isinstance(routes, dict) else 0,
+        "total_fuel": sum(r.get("distance", 0) for r in routes.values()) if isinstance(routes, dict) else 0.0,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
     return SolveResponse(
         success=True,
         routes=routes,
         sequences=sequences,
         wrapped_polygons=wrapped_polygons,
+        mission_id=mission_id,
+        env_hash=env_hash,
+        continuity=continuity,
+        errors=None,
     )
 
 class SolveWithAllocationRequest(BaseModel):
@@ -969,6 +1165,7 @@ class SolveWithAllocationRequest(BaseModel):
     post_optimize: bool = True
     visited_targets: List[str] = []  # Targets already visited (for checkpoint replanning)
     is_checkpoint_replan: bool = False  # Whether this is a checkpoint replan
+    mission_id: Optional[str] = None  # optional continuity handle
 
 
 class PrepareMatrixRequest(BaseModel):
@@ -1010,6 +1207,31 @@ def solve_with_allocation(req: SolveWithAllocationRequest):
 
     This is the recommended endpoint for multi-drone missions.
     """
+    env = req.env
+    drone_configs = req.drone_configs
+
+    # Step 3 guards: mission continuity + env hash
+    mission_id, continuity, env_hash, cfg_hash, mismatch_reason = enforce_mission_continuity(
+        req.mission_id, env, drone_configs
+    )
+    if mismatch_reason:
+        print(f"[solve_with_allocation] mission continuity broken ({mismatch_reason}); starting new solve", flush=True)
+        mission_id = f"m_{uuid4().hex}"
+        continuity = False
+    elif not mission_id:
+        mission_id = f"m_{uuid4().hex}"
+        continuity = False
+
+    # Required fields guard (fail fast)
+    missing = []
+    if not env.get("airports"): missing.append("env.airports")
+    if "targets" not in env: missing.append("env.targets")
+    if not drone_configs: missing.append("drone_configs")
+    if missing:
+        return SolveResponse(success=False, routes={}, sequences={}, wrapped_polygons=None, allocations=None, distance_matrix=None,
+                             mission_id=mission_id, env_hash=env_hash, continuity=continuity,
+                             errors=["Missing required fields: " + ", ".join(missing)])
+
     # Create mission run for Supabase logging
     run_id = create_mission_run(
         system_version="solve_with_allocation",
@@ -1111,6 +1333,35 @@ def solve_with_allocation(req: SolveWithAllocationRequest):
             "allocations": allocations,
         })
 
+    # Step 3 guards: verify output matches env/constraints (basic)
+    errors = verify_solution_basic(env_to_solve, routes, drone_configs)
+    if errors:
+        return SolveResponse(
+            success=False,
+            routes=routes or {},
+            sequences=sequences or {},
+            wrapped_polygons=wrapped_polygons,
+            allocations=allocations,
+            distance_matrix=distance_matrix,
+            mission_id=mission_id,
+            env_hash=env_hash,
+            continuity=continuity,
+            errors=errors,
+        )
+
+    # Persist mission snapshot for continuity
+    MISSION_STORE[mission_id] = {
+        "env": env,
+        "drone_configs": drone_configs,
+        "env_hash": env_hash,
+        "cfg_hash": cfg_hash,
+        "routes": routes,
+        "allocation": allocations,
+        "total_points": sum(r.get("points", 0) for r in routes.values()) if isinstance(routes, dict) else 0,
+        "total_fuel": sum(r.get("distance", 0) for r in routes.values()) if isinstance(routes, dict) else 0.0,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
     return SolveResponse(
         success=True,
         routes=routes,
@@ -1118,6 +1369,10 @@ def solve_with_allocation(req: SolveWithAllocationRequest):
         wrapped_polygons=wrapped_polygons,
         allocations=allocations,
         distance_matrix=distance_matrix,
+        mission_id=mission_id,
+        env_hash=env_hash,
+        continuity=continuity,
+        errors=None,
     )
 
 
@@ -1314,6 +1569,13 @@ async def agent_chat(req: AgentChatRequest):
 
         return AgentChatResponse(
             reply=result.get("response", "(No agent reply)"),
+            intent=result.get("intent"),
+            actions=result.get("actions"),
+            policy=result.get("policy"),
+            constraints=result.get("constraints"),
+            valid=result.get("valid", True),
+            warnings=result.get("warnings"),
+            errors=result.get("errors"),
             route=result.get("route"),
             routes=result.get("routes"),  # Multi-drone routes
             trajectories=result.get("trajectories"),  # SAM-avoiding trajectories
@@ -1335,7 +1597,130 @@ async def agent_chat(req: AgentChatRequest):
             allocations=None,
             allocation_strategy=None,
         )
-    
+
+
+# ===========================================================================
+# Trace Events Builder for Agents Monitor Tab
+# ===========================================================================
+
+def _mk_event(t: str, msg: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Create a single trace event dict."""
+    return {"t": t, "msg": msg, "data": data or None}
+
+
+def _build_trace_events(
+    trace: Dict[str, Any],
+    allocations: Dict[str, Any],
+    allocation_strategy: str,
+    routes_for_ui: Dict[str, List[str]],
+    trajectories: Dict[str, Any],
+    total_points: int,
+    total_fuel: float,
+    coordinator_trace_events: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Build an ordered list of trace events for the Agents Monitor UI tab.
+    This converts the raw trace object into a normalized, renderable timeline.
+
+    If coordinator_trace_events is provided, those are used directly instead of
+    extracting from the trace object.
+    """
+    ev: List[Dict[str, Any]] = []
+
+    # If we have structured coordinator trace events, transform and use them
+    if coordinator_trace_events:
+        for cte in coordinator_trace_events:
+            # Transform Coordinator format {agent, stage, event, details}
+            # to AgentTraceEvent format {t, msg, data}
+            agent = cte.get("agent", "Coordinator")
+            stage = cte.get("stage", "unknown")
+            event = cte.get("event", "")
+            details = cte.get("details", {})
+
+            # Build t (type) from agent.stage or just stage
+            t = f"{agent.lower()}.{stage}" if agent else stage
+
+            # Build msg (human readable) from event and key details
+            msg_parts = [event.replace("_", " ").title()]
+            if stage == "intent" and "intent" in details:
+                msg_parts.append(f"→ {details['intent']}")
+            elif stage == "policy" and "allocation_strategy" in details:
+                msg_parts.append(f"→ {details['allocation_strategy']} allocation")
+            elif stage == "validate":
+                if details.get("errors"):
+                    msg_parts.append(f"({len(details['errors'])} errors)")
+                elif details.get("warnings"):
+                    msg_parts.append(f"({len(details['warnings'])} warnings)")
+            elif stage == "final":
+                msg_parts.append(f"(intent={details.get('intent', '?')})")
+
+            msg = " ".join(msg_parts)
+            ev.append(_mk_event(t, msg, details))
+    else:
+        # Fall back to extracting from trace object (legacy path)
+        coord = trace.get("coordinator", {}) if isinstance(trace, dict) else {}
+        intent = coord.get("intent") or coord.get("intent_type") or "unknown"
+        ev.append(_mk_event(
+            "coordinator.intent",
+            f"Coordinator intent: {intent}",
+            {"intent": intent, "coordinator": coord}
+        ))
+
+        # Policy / flags
+        policy = trace.get("policy_rules") or trace.get("policy") or {}
+        if isinstance(policy, dict) and policy:
+            ev.append(_mk_event(
+                "coordinator.policy",
+                "Coordinator policy selected",
+                policy
+            ))
+
+    # Allocation result
+    alloc_count = sum(len(v) for v in allocations.values()) if isinstance(allocations, dict) else 0
+    ev.append(_mk_event(
+        "allocator.result",
+        f"Allocation ({allocation_strategy}): {alloc_count} targets assigned",
+        {"strategy": allocation_strategy, "allocations": allocations}
+    ))
+
+    # Solver summary (routes)
+    route_summary = {
+        did: {"n": len(r), "start": r[0] if r else None, "end": r[-1] if r else None}
+        for did, r in (routes_for_ui or {}).items()
+    }
+    ev.append(_mk_event(
+        "solver.routes",
+        f"Routes produced for {len(route_summary)} drones",
+        {"routes_summary": route_summary, "routes": routes_for_ui}
+    ))
+
+    # Trajectories summary - count of [x,y] coordinate points per drone
+    traj_summary = {
+        did: (len(traj) if isinstance(traj, list) else 0)
+        for did, traj in (trajectories or {}).items()
+    }
+    total_coords = sum(traj_summary.values())
+    ev.append(_mk_event(
+        "planner.trajectories",
+        f"SAM-aware trajectories: {total_coords} total coords",
+        {"coords_per_drone": traj_summary}
+    ))
+
+    # Metrics totals
+    ev.append(_mk_event(
+        "metrics.totals",
+        f"Totals: points={total_points}, fuel={total_fuel:.1f}",
+        {"points": total_points, "fuel": total_fuel}
+    ))
+
+    # Any embedded stepwise trace (optional future expansion)
+    steps = trace.get("steps") if isinstance(trace, dict) else None
+    if isinstance(steps, list) and steps:
+        ev.append(_mk_event("trace.steps", f"{len(steps)} step records", {"steps": steps}))
+
+    return ev
+
+
 @app.post("/api/agents/chat-v4", response_model=AgentChatResponse)
 async def agent_chat_v4(req: AgentChatRequest):
     """
@@ -1366,17 +1751,31 @@ async def agent_chat_v4(req: AgentChatRequest):
         # Priority 2: Load from mission store by mission_id
         elif mission_id and mission_id in MISSION_STORE:
             mission = MISSION_STORE[mission_id]
-            # Use incoming env if provided, fallback to stored env
-            if not req.env:
-                env = mission.get("env", env)
-            if not req.drone_configs:
-                drone_configs = mission.get("drone_configs", drone_configs)
 
-            existing_solution = {
-                "routes": mission.get("routes") or {},
-                "allocation": mission.get("allocation") or {},
-            }
-            print(f"[v4] Loaded existing mission {mission_id} from store", flush=True)
+            # Step 3 guards: ensure the incoming env/configs match the stored mission snapshot
+            incoming_env_hash = compute_env_hash(env)
+            incoming_cfg_hash = compute_cfg_hash(req.drone_configs or drone_configs)
+            stored_env_hash = mission.get("env_hash")
+            stored_cfg_hash = mission.get("cfg_hash")
+
+            if stored_env_hash and stored_env_hash != incoming_env_hash:
+                print(f"[v4] mission_id={mission_id} env_hash mismatch; ignoring stored solution and treating as new mission", flush=True)
+                mission_id = None
+            elif stored_cfg_hash and stored_cfg_hash != incoming_cfg_hash:
+                print(f"[v4] mission_id={mission_id} cfg_hash mismatch; ignoring stored solution and treating as new mission", flush=True)
+                mission_id = None
+            else:
+                # Use incoming env if provided, fallback to stored env
+                if not req.env:
+                    env = mission.get("env", env)
+                if not req.drone_configs:
+                    drone_configs = mission.get("drone_configs", drone_configs)
+
+                existing_solution = {
+                    "routes": mission.get("routes") or {},
+                    "allocation": mission.get("allocation") or {},
+                }
+                print(f"[v4] Loaded existing mission {mission_id} from store", flush=True)
         elif mission_id:
             print(f"[v4] mission_id={mission_id} not found; treating as new mission", flush=True)
             mission_id = None
@@ -1528,6 +1927,8 @@ async def agent_chat_v4(req: AgentChatRequest):
             MISSION_STORE[mission_id] = {
                 "env": env,
                 "drone_configs": drone_configs,
+                "env_hash": compute_env_hash(env),
+                "cfg_hash": compute_cfg_hash(drone_configs),
                 "routes": raw_routes,
                 "allocation": allocations,
                 "total_points": total_points,
@@ -1536,7 +1937,24 @@ async def agent_chat_v4(req: AgentChatRequest):
             }
 
         # -------------------------------
-        # 9. Build and return response
+        # 9. Build trace_events for Agents Monitor tab
+        # -------------------------------
+        trace = trace or {}
+        # Get structured coordinator trace_events if available
+        coordinator_trace_events = result.get("coordinator_trace_events", [])
+        trace_events = _build_trace_events(
+            trace=trace,
+            allocations=allocations,
+            allocation_strategy=allocation_strategy,
+            routes_for_ui=routes_for_ui,
+            trajectories=trajectories,
+            total_points=total_points,
+            total_fuel=total_fuel,
+            coordinator_trace_events=coordinator_trace_events,
+        )
+
+        # -------------------------------
+        # 10. Build and return response
         # -------------------------------
         return AgentChatResponse(
             reply=result.get("response", "(No v4 agent reply)"),
@@ -1548,6 +1966,8 @@ async def agent_chat_v4(req: AgentChatRequest):
             allocations=allocations,
             allocation_strategy=allocation_strategy,
             mission_id=mission_id,
+            trace=trace,
+            trace_events=trace_events,
         )
 
     except Exception as e:
@@ -1563,6 +1983,8 @@ async def agent_chat_v4(req: AgentChatRequest):
             allocations=None,
             allocation_strategy=None,
             mission_id=None,
+            trace={"error": str(e)},
+            trace_events=[{"t": "error", "msg": "Agent error", "data": {"error": str(e)}}],
         )
 
 

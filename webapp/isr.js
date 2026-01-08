@@ -104,6 +104,9 @@ const state = {
 
   // Legacy single cut position (backward compatibility)
   pendingCutPosition: null,
+
+  // Agent trace runs for Agents Trace tab
+  agentTraceRuns: [],  // Array of { ts, user_message, mission_id, trace_events }
 };
 
 // ----------------------------------------------------
@@ -1163,6 +1166,60 @@ function updateButtonStates() {
   if (discardBtn) {
     discardBtn.disabled = !perms.canDiscardDraft;
     discardBtn.style.display = perms.hasDraftSolution ? "inline-block" : "none";
+  }
+
+  // Keep the Agent panel visually consistent with Mission Control permissions.
+  updateAgentUiState(perms);
+}
+
+/**
+ * Keep the Agent panel state-aware (disable input/send) based on the same mission
+ * state machine used by Mission Control.
+ */
+function updateAgentUiState(perms = null) {
+  const p = perms || (typeof getUiPermissions === "function" ? getUiPermissions() : null);
+
+  const inputEl = $("agent-input");
+  const btnSend = $("btn-send-agent");
+  const statusEl = $("agent-status");
+
+  if (!inputEl || !btnSend) return;
+
+  // Default: enabled
+  let disable = false;
+  let msg = "";
+  let cls = "";
+
+  if (p && p.isAnimating) {
+    disable = true;
+    msg = "Agent Solve disabled during animation. Pause or stop the animation first.";
+    cls = "agent-status-warn";
+  } else if (p && p.isEditing) {
+    disable = true;
+    msg = "Agent Solve disabled during Edit mode. Accept or cancel edits first.";
+    cls = "agent-status-warn";
+  } else if (p && !p.canSolve) {
+    disable = true;
+    msg = "Agent Solve disabled while paused/replaying/checkpoint-locked or when a solution is already accepted.";
+    cls = "agent-status-warn";
+  }
+
+  inputEl.disabled = disable;
+  btnSend.disabled = disable;
+
+  // Optional: make the disabled state obvious in the placeholder
+  if (disable) {
+    inputEl.placeholder = "Agent disabled by mission state. Use Mission Control to Pause/Stop/Reset or enter Checkpoint replanning.";
+  } else {
+    inputEl.placeholder = "Type your question and press Enter...";
+    cls = "agent-status-ok";
+    msg = "Agent ready.";
+  }
+
+  if (statusEl) {
+    statusEl.classList.remove("agent-status-warn", "agent-status-ok");
+    if (cls) statusEl.classList.add(cls);
+    statusEl.textContent = msg;
   }
 }
 
@@ -6289,12 +6346,15 @@ async function runPlanner() {
   }
 
   try {
+    console.log("[runPlanner] Sending fetch request...");
     const resp = await fetch("/api/solve_with_allocation", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: bodyStr,
       signal: state.solveAbortController.signal,
     });
+
+    console.log("[runPlanner] Fetch completed, status:", resp.status);
 
     // Check if response is OK before parsing
     if (!resp.ok) {
@@ -6305,11 +6365,13 @@ async function runPlanner() {
     }
 
     const data = await resp.json();
+    console.log("[runPlanner] Response parsed, success:", data?.success, "errors:", data?.errors);
 
     $("debug-output").textContent = JSON.stringify(data, null, 2);
 
     if (!data || data.success === false) {
-      appendDebugLine("❌ Planner reported an error.");
+      appendDebugLine(`❌ Planner reported an error: ${JSON.stringify(data?.errors || [])}`);
+      console.log("[runPlanner] Planner failed, errors:", data?.errors);
       return;
     }
 
@@ -8343,6 +8405,9 @@ function attachAgentHandlers() {
   // Memory management handlers
   attachMemoryHandlers();
 
+  // Trace tab handlers
+  attachTraceHandlers();
+
   // Load memories on init
   loadAgentMemories();
 }
@@ -8390,6 +8455,18 @@ function attachMemoryHandlers() {
         e.preventDefault();
         addAgentMemory();
       }
+    });
+  }
+}
+
+function attachTraceHandlers() {
+  const btnClearTrace = $("btn-clear-trace");
+  if (btnClearTrace) {
+    btnClearTrace.addEventListener("click", () => {
+      if (!confirm("Clear all trace logs?")) return;
+      state.agentTraceRuns = [];
+      renderAgentsTraceTab();
+      appendDebugLine("Cleared agent trace logs");
     });
   }
 }
@@ -8487,16 +8564,22 @@ async function sendAgentMessage() {
     return;
   }
 
-  // UI-permission guard: allow agent chat in most modes except animation
-  // Agent can answer questions, re-optimize, or explain even after a solution exists
+  // UI-permission guard: the Agent panel must follow the same mission state machine
+  // as Mission Control to avoid stale env/solution mismatches.
   const perms = (typeof getUiPermissions === "function") ? getUiPermissions() : null;
   if (perms && perms.isAnimating) {
-    appendDebugLine("⚠️ Agent disabled during animation. Pause or stop animation first.");
+    appendDebugLine("⚠️ Agent Solve disabled during animation. Pause or stop the animation first.");
+    updateAgentUiState(perms);
     return;
   }
-  // Block during editing mode to avoid conflicts
   if (perms && perms.isEditing) {
-    appendDebugLine("⚠️ Agent disabled during Edit mode. Accept or cancel edits first.");
+    appendDebugLine("⚠️ Agent Solve disabled during Edit mode. Accept or cancel edits first.");
+    updateAgentUiState(perms);
+    return;
+  }
+  if (perms && !perms.canSolve) {
+    appendDebugLine("⚠️ Agent Solve disabled in the current mission state (paused/replaying/checkpoint-locked or solution already accepted).");
+    updateAgentUiState(perms);
     return;
   }
 
@@ -8557,6 +8640,18 @@ async function sendAgentMessage() {
       appendDebugLine("Current mission_id: " + state.missionId);
     }
 
+    // Store trace events for the Agents Trace tab
+    if (data.trace_events && Array.isArray(data.trace_events)) {
+      state.agentTraceRuns.push({
+        ts: Date.now(),
+        user_message: message,
+        mission_id: data.mission_id || null,
+        trace_events: data.trace_events,
+        trace: data.trace || null,
+      });
+      renderAgentsTraceTab();
+    }
+
     // Debug: log the response to see what we're getting
     console.log("Agent response:", data);
     appendDebugLine("Agent response keys: " + Object.keys(data).join(", "));
@@ -8574,6 +8669,15 @@ async function sendAgentMessage() {
 
       // 2) Append badges (controlled HTML)
       let badgesHtml = "";
+      if (data.intent) {
+        badgesHtml += ` <span class="agent-intent-badge">Intent: ${escapeHtml(String(data.intent))}</span>`;
+      }
+
+      if (Array.isArray(data.actions) && data.actions.length > 0) {
+        const actionNames = data.actions.map(a => a?.type).filter(Boolean).join(", ");
+        if (actionNames) badgesHtml += ` <span class="agent-actions-badge">Actions: ${escapeHtml(actionNames)}</span>`;
+      }
+
       if (data.routes && Object.keys(data.routes).length > 0) {
         for (const [did, route] of Object.entries(data.routes)) {
           if (Array.isArray(route) && route.length > 0) {
@@ -8654,6 +8758,51 @@ function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
   return div.innerHTML;
+}
+
+/**
+ * Render the Agents Trace tab with all captured trace runs.
+ */
+function renderAgentsTraceTab() {
+  const container = $("agents-trace-content");
+  if (!container) return;
+
+  if (!state.agentTraceRuns || state.agentTraceRuns.length === 0) {
+    container.innerHTML = '<div class="trace-empty">No agent runs yet. Send a message in the Agents tab.</div>';
+    return;
+  }
+
+  let html = '';
+
+  // Show runs in reverse order (newest first)
+  for (let i = state.agentTraceRuns.length - 1; i >= 0; i--) {
+    const run = state.agentTraceRuns[i];
+    const time = new Date(run.ts).toLocaleTimeString();
+
+    html += `<div class="trace-run">`;
+    html += `<div class="trace-run-header">`;
+    html += `<span class="trace-time">${escapeHtml(time)}</span>`;
+    html += `<span class="trace-message">${escapeHtml(run.user_message.substring(0, 50))}${run.user_message.length > 50 ? '...' : ''}</span>`;
+    if (run.mission_id) {
+      html += `<span class="trace-mission-id">ID: ${escapeHtml(run.mission_id.substring(0, 8))}...</span>`;
+    }
+    html += `</div>`;
+
+    html += `<div class="trace-events">`;
+    for (const evt of run.trace_events) {
+      const levelClass = evt.t === 'error' ? 'trace-error' : evt.t.includes('warn') ? 'trace-warn' : 'trace-info';
+      html += `<div class="trace-event ${levelClass}">`;
+      html += `<span class="trace-type">${escapeHtml(evt.t)}</span>`;
+      html += `<span class="trace-msg">${escapeHtml(evt.msg)}</span>`;
+      if (evt.data) {
+        html += `<details class="trace-data-details"><summary>data</summary><pre class="trace-data">${escapeHtml(JSON.stringify(evt.data, null, 2))}</pre></details>`;
+      }
+      html += `</div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  container.innerHTML = html;
 }
 
 function applyAgentRoutes(routes, trajectories, totalPoints, totalFuel) {
