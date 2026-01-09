@@ -7389,6 +7389,8 @@ function startAnimation(droneIds) {
               if (droneState) {
                 droneState.animating = false;
               }
+              // CRITICAL FIX: Preserve trajectory visibility for frozen lost drones
+              state.trajectoryVisible[did] = true;
               return;
             }
 
