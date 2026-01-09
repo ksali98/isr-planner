@@ -489,11 +489,12 @@ def compute_mission_metrics(
     visited_targets = set()
 
     for did, route_info in (routes or {}).items():
-        # v4 routes normally look like: {"route": [...], "distance": float, "points": int}
+        # v4 routes normally look like: {"route": [...], "distance": float, "total_points": int}
         if isinstance(route_info, dict):
             route = route_info.get("route") or []
             distance = float(route_info.get("distance", 0.0))
-            points = int(route_info.get("points", 0))
+            # Check both "total_points" (v4 standard) and "points" (legacy)
+            points = int(route_info.get("total_points", route_info.get("points", 0)))
         else:
             # Fallback if some legacy format leaks through
             route = route_info or []
@@ -2210,8 +2211,28 @@ def run_multi_agent_v4(
     # ---------------------------------------------------------------
     # 8) Return unified V4 result with Decision Trace v1 fields
     # ---------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # 8a) Coordinator contract fields for the UI (intent/actions/policy)
+    # ---------------------------------------------------------------
+    actions: List[Dict[str, Any]] = []
+    if coordinator_decision.explanation_only:
+        actions.append({"type": "EXPLAIN"})
+    else:
+        actions.append({"type": "ALLOCATE", "strategy": coordinator_decision.policy.get("allocation_strategy", "unknown") if isinstance(coordinator_decision.policy, dict) else "unknown"})
+        actions.append({"type": "SOLVE", "solver": solver_type, "mode": coordinator_decision.policy.get("solver_mode", "default") if isinstance(coordinator_decision.policy, dict) else "default"})
+        actions.append({"type": "TRAJECTORY", "samAware": True})
+        # Post-optimizer actions are conditional; we mark configured intent here
+        actions.append({"type": "POST_OPT"})
+        actions.append({"type": "VERIFY"})
+
     return {
         "response": response_text,
+        "intent": coordinator_decision.intent,
+        "actions": actions,
+        "policy": coordinator_decision.policy,
+        "constraints": coordinator_decision.constraints,
+        "warnings": coordinator_decision.warnings,
+        "errors": coordinator_decision.errors,
         "routes": routes,
         "total_points": mission_metrics.get("total_points", total_points),
         "total_fuel": mission_metrics.get("total_fuel", total_fuel),
@@ -2230,4 +2251,6 @@ def run_multi_agent_v4(
         "valid": is_valid,
         "trace": trace,
         "optimizer_steps": [],  # TODO: populate from post_optimizer if used
+        # Structured trace_events from Coordinator (for Agents Monitor tab)
+        "coordinator_trace_events": coordinator_decision.trace_events,
     }

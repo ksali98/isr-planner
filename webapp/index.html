@@ -117,6 +117,7 @@
           <button class="tab-btn active" data-tab="env">Env</button>
           <button class="tab-btn" data-tab="debug">Debug</button>
           <button class="tab-btn" data-tab="agents">Agents</button>
+          <button class="tab-btn" data-tab="agents-trace">Trace</button>
         </div>
 
         <!-- Tab content container -->
@@ -470,6 +471,7 @@
               <textarea id="agent-input" class="agent-input" placeholder="Type your question and press Enter..." rows="2"></textarea>
               <button id="btn-send-agent" class="primary-btn">Send</button>
             </div>
+            <div id="agent-status" class="agent-status" aria-live="polite"></div>
             <!-- Chat history (scrollable, below input) -->
             <div id="agent-chat-history" class="agent-chat-history">
               <div class="agent-message system-message">
@@ -499,12 +501,22 @@
             </div>
           </div>
           </section>
+
+          <!-- AGENTS TRACE TAB -->
+          <section class="tab-pane" id="tab-agents-trace">
+            <div class="card-header">
+              <span>Agent Trace Log</span>
+              <button id="btn-clear-trace" class="small-btn danger-btn">Clear</button>
+            </div>
+            <div id="agents-trace-content" class="trace-container">
+              <div class="trace-empty">No agent runs yet. Send a message in the Agents tab.</div>
+            </div>
+          </section>
         </div>
       </aside>
     </main>
   </div>
 
-  <script src="/static/segmented_mission.js?v=20260106-1130"></script>
-  <script src="/static/isr.js?v=20260106-1130"></script>
+  <script src="/static/isr.js?v=20260108-trace-tab"></script>
 </body>
 </html>

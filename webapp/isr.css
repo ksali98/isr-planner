@@ -325,6 +325,30 @@ body {
   flex-shrink: 0;
 }
 
+/* Agent panel status / gating explanation */
+.agent-status {
+  min-height: 18px;
+  margin: -0.25rem 0 0.5rem 0;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.4rem;
+  font-size: 0.75rem;
+  line-height: 1.2;
+  color: #9ca3af;
+  background: transparent;
+}
+
+.agent-status.agent-status-warn {
+  color: #fde68a;
+  background: #422006;
+  border: 1px solid #f59e0b;
+}
+
+.agent-status.agent-status-ok {
+  color: #bbf7d0;
+  background: #052e16;
+  border: 1px solid #22c55e;
+}
+
 .agent-chat-history {
   flex: 1;
   overflow-y: auto;
@@ -466,6 +490,28 @@ body {
   font-size: 0.75rem;
   margin-top: 0.5rem;
 }
+
+.agent-intent-badge {
+  display: inline-block;
+  background: #1e3a8a;
+  border: 1px solid #3b82f6;
+  color: #dbeafe;
+  padding: 0.15rem 0.4rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  margin-right: 0.25rem;
+}
+
+.agent-actions-badge {
+  display: inline-block;
+  background: #7c2d12;
+  border: 1px solid #fb923c;
+  color: #ffedd5;
+  padding: 0.15rem 0.4rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+}
+
 
 /* Agent Memory Section */
 .agent-memory-section {
@@ -1245,3 +1291,118 @@ body {
   }
 }
 
+/* ===========================================
+   Agents Trace Tab Styles
+   =========================================== */
+
+.trace-container {
+  padding: 0.5rem;
+  max-height: calc(100vh - 200px);
+  overflow-y: auto;
+  font-size: 0.75rem;
+}
+
+.trace-empty {
+  color: #6b7280;
+  padding: 2rem;
+  text-align: center;
+  font-style: italic;
+}
+
+.trace-run {
+  border: 1px solid #374151;
+  border-radius: 4px;
+  margin-bottom: 0.75rem;
+  background: #1f2937;
+}
+
+.trace-run-header {
+  background: #111827;
+  padding: 0.5rem 0.75rem;
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  border-bottom: 1px solid #374151;
+  flex-wrap: wrap;
+}
+
+.trace-time {
+  color: #9ca3af;
+  font-size: 0.7rem;
+}
+
+.trace-message {
+  color: #e5e7eb;
+  font-weight: 500;
+  flex: 1;
+}
+
+.trace-mission-id {
+  color: #6b7280;
+  font-size: 0.65rem;
+  font-family: monospace;
+}
+
+.trace-events {
+  padding: 0.5rem;
+}
+
+.trace-event {
+  padding: 0.4rem 0.6rem;
+  margin: 0.25rem 0;
+  border-left: 3px solid #4b5563;
+  background: #111827;
+  border-radius: 0 4px 4px 0;
+}
+
+.trace-event.trace-info {
+  border-left-color: #3b82f6;
+}
+
+.trace-event.trace-warn {
+  border-left-color: #f59e0b;
+}
+
+.trace-event.trace-error {
+  border-left-color: #ef4444;
+  background: #1c1917;
+}
+
+.trace-type {
+  color: #60a5fa;
+  font-family: monospace;
+  font-size: 0.7rem;
+  margin-right: 0.5rem;
+}
+
+.trace-msg {
+  color: #d1d5db;
+}
+
+.trace-data-details {
+  margin-top: 0.4rem;
+}
+
+.trace-data-details summary {
+  color: #9ca3af;
+  cursor: pointer;
+  font-size: 0.65rem;
+  user-select: none;
+}
+
+.trace-data-details summary:hover {
+  color: #e5e7eb;
+}
+
+.trace-data {
+  background: #0a0a0a;
+  padding: 0.5rem;
+  margin-top: 0.25rem;
+  font-size: 0.65rem;
+  max-height: 200px;
+  overflow: auto;
+  border-radius: 4px;
+  color: #a1a1aa;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
