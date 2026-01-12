@@ -919,7 +919,8 @@ class TrajectorySwapOptimizer:
         drone_configs: Dict[str, Dict[str, Any]],
         priority_constraints: Optional[str] = None,
         auto_iterate: bool = True,
-        max_iterations: int = 50
+        max_iterations: int = 50,
+        auto_regen: bool = False
     ) -> Dict[str, Any]:
         """
         Reassign targets to drones with closer trajectories using SAM-avoiding trajectory segments.
@@ -952,7 +953,7 @@ class TrajectorySwapOptimizer:
         """
         if auto_iterate:
             return self._optimize_auto(
-                solution, env, drone_configs, priority_constraints, max_iterations
+                solution, env, drone_configs, priority_constraints, max_iterations, auto_regen
             )
         else:
             return self._optimize_single(
@@ -965,7 +966,8 @@ class TrajectorySwapOptimizer:
         env: Dict[str, Any],
         drone_configs: Dict[str, Dict[str, Any]],
         priority_constraints: Optional[str] = None,
-        max_iterations: int = 50
+        max_iterations: int = 50,
+        auto_regen: bool = False
     ) -> Dict[str, Any]:
         """
         Auto-iterate Swap Closer until convergence or cycle detection.
@@ -1048,6 +1050,46 @@ class TrajectorySwapOptimizer:
                 "routes": result.get("routes", {}),
                 "sequences": result.get("sequences", {})
             }
+
+            # Optionally regenerate SAM-aware trajectories for the updated routes
+            # so the next iteration can compute SSD/OSD using fresh trajectory
+            # vertices. This is controlled by the `auto_regen` flag to preserve
+            # the previous client-click workflow by default.
+            if auto_regen:
+                try:
+                    # Build waypoint positions lookup from env
+                    waypoint_positions = {}
+                    for a in env.get("airports", []):
+                        waypoint_positions[str(a["id"])] = [float(a["x"]), float(a["y"])]
+                    for t in env.get("targets", []):
+                        waypoint_positions[str(t["id"])] = [float(t["x"]), float(t["y"])]
+
+                    # Import planner locally to keep top-level imports safe
+                    try:
+                        from server.solver.trajectory_planner import ISRTrajectoryPlanner
+                    except Exception:
+                        # try alternate import path for some environments
+                        from trajectory_planner import ISRTrajectoryPlanner
+
+                    planner = ISRTrajectoryPlanner(env.get("sams", []))
+
+                    for did, rd in current_solution.get("routes", {}).items():
+                        route = rd.get("route", []) or []
+                        # Generate SAM-aware trajectory (returns list of [x,y])
+                        try:
+                            traj = planner.generate_trajectory(route, waypoint_positions, did)
+                        except Exception as e:
+                            print(f"   ⚠️ Trajectory planner failed for D{did}: {e}", flush=True)
+                            traj = [tuple(waypoint_positions.get(wp, [0, 0])) for wp in route]
+
+                        # Store trajectory and recompute route distance
+                        rd["trajectory"] = traj
+                        rd["distance"] = self._calculate_route_distance(route)
+
+                    print("   ✅ Regenerated trajectories for next iteration", flush=True)
+                except Exception as e:
+                    # Non-fatal: log and continue without trajectories
+                    print(f"   ⚠️ Trajectory regeneration skipped due to error: {e}", flush=True)
 
         else:
             # Max iterations reached
@@ -1617,7 +1659,8 @@ def trajectory_swap_optimize(
     distance_matrix: Optional[Dict[str, Any]] = None,
     priority_constraints: Optional[str] = None,
     auto_iterate: bool = True,
-    max_iterations: int = 50
+    max_iterations: int = 50,
+    auto_regen: bool = False
 ) -> Dict[str, Any]:
     """
     Reassign targets to drones whose trajectories pass closer to them.
@@ -1646,8 +1689,13 @@ def trajectory_swap_optimize(
         _trajectory_optimizer.set_distance_matrix(distance_matrix)
 
     return _trajectory_optimizer.optimize(
-        solution, env, drone_configs, priority_constraints,
-        auto_iterate=auto_iterate, max_iterations=max_iterations
+        solution,
+        env,
+        drone_configs,
+        priority_constraints,
+        auto_iterate=auto_iterate,
+        max_iterations=max_iterations,
+        auto_regen=auto_regen,
     )
 
 

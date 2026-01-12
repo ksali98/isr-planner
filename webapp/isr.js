@@ -5513,6 +5513,7 @@ function attachOptimizationHandlers() {
           console.log("Distance matrix labels:", state.distanceMatrix.labels);
         }
 
+        const autoRegen = $("chk-auto-regen") ? $("chk-auto-regen").checked : false;
         const resp = await fetch("/api/trajectory_swap_optimize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -5523,7 +5524,9 @@ function attachOptimizationHandlers() {
             },
             env: unfrozenEnv, // Only unfrozen targets
             drone_configs: droneConfigs,
-            visited_targets: actualFrozenTargets // Tell backend which targets are frozen
+            visited_targets: actualFrozenTargets, // Tell backend which targets are frozen
+            auto_iterate: !!autoRegen,
+            auto_regen: !!autoRegen
           })
         });
         const data = await resp.json();
@@ -5629,6 +5632,171 @@ function attachOptimizationHandlers() {
       } finally {
         btnSwap.disabled = false;
         btnSwap.textContent = "Swap Closer";
+      }
+    });
+  }
+
+  // "Swap Until No More" - client-side loop that repeatedly calls the
+  // single-pass swap endpoint until no swaps are returned. This preserves
+  // per-swap visibility while automating the repeat-click process.
+  const btnSwapUntil = $("btn-optimize-swap-until");
+  if (btnSwapUntil) {
+    btnSwapUntil.addEventListener("click", async () => {
+      console.log("Swap Until No More clicked", state.routes);
+      if (!state.routes || Object.keys(state.routes).length === 0) {
+        appendDebugLine("No routes to optimize. Run planner first.");
+        return;
+      }
+
+      // Disable both swap buttons while running
+      btnSwapUntil.disabled = true;
+      if (btnSwap) btnSwap.disabled = true;
+      const originalText = btnSwapUntil.textContent;
+      btnSwapUntil.textContent = "Running...";
+
+      try {
+        const droneConfigs = state.droneConfigs;
+        const unfrozenEnv = getUnfrozenEnv();
+        const segmentedFrozen = segmentedImport.isActive() && segmentedImport.getCurrentSegmentIndex() > 0;
+        const checkpointFrozen = (state.visitedTargets && state.visitedTargets.length > 0);
+        const hasFrozen = segmentedFrozen || checkpointFrozen;
+        const actualFrozenTargets = segmentedFrozen ? getActualFrozenTargets() : (state.visitedTargets || []);
+
+        const autoRegen = $("chk-auto-regen") ? $("chk-auto-regen").checked : false;
+
+        // If user requested auto-regeneration cascade, do a single server-side call
+        // which will auto-iterate/regenerate and return the full sequence. Otherwise
+        // run the client-side loop that applies a single-pass repeatedly.
+        if (autoRegen) {
+          appendDebugLine("Swap optimization: requesting server-side cascade (auto_regen)");
+          const resp = await fetch("/api/trajectory_swap_optimize", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              solution: { routes: state.routes, distance_matrix: state.distanceMatrix },
+              env: unfrozenEnv,
+              drone_configs: droneConfigs,
+              visited_targets: actualFrozenTargets,
+              auto_iterate: true,
+              auto_regen: true
+            })
+          });
+          const data = await resp.json();
+          if (!data || !data.success) {
+            appendDebugLine("Swap optimization error during server-side cascade: " + (data && data.error ? data.error : "Unknown error"));
+          } else {
+            const swaps = data.swaps_made || [];
+            appendDebugLine(`Server-side cascade applied ${swaps.length} swaps, iterations=${data.iterations || 1}`);
+
+            // Merge returned routes (preserve frozen prefixes)
+            let savedFrozenTrajectories = null;
+            if (hasFrozen) {
+              const frozenCounts = getFrozenTrajectoryCounts();
+              savedFrozenTrajectories = {};
+              Object.entries(state.routes || {}).forEach(([did, routeData]) => {
+                const frozenCount = frozenCounts[did] || 0;
+                if (frozenCount > 0 && routeData.trajectory && routeData.trajectory.length >= frozenCount) {
+                  savedFrozenTrajectories[did] = routeData.trajectory.slice(0, frozenCount);
+                }
+              });
+            }
+
+            state.routes = JSON.parse(JSON.stringify(data.routes));
+            if (savedFrozenTrajectories) {
+              Object.entries(savedFrozenTrajectories).forEach(([did, frozenTraj]) => {
+                if (state.routes[did]) state.routes[did].trajectory = frozenTraj;
+              });
+            }
+            state.sequences = JSON.parse(JSON.stringify(data.sequences || {}));
+
+            await regenerateTrajectories();
+            updateStatsFromRoutes();
+            drawEnvironment();
+            missionReplay.updateCurrentSegmentSolution(state.routes, state.sequences);
+          }
+        } else {
+          let totalSwaps = 0;
+          const maxLoops = 200; // safety cap to avoid accidental infinite loops
+          let loop = 0;
+
+          while (loop < maxLoops) {
+            loop += 1;
+            appendDebugLine(`Swap loop iteration ${loop}...`);
+
+            const resp = await fetch("/api/trajectory_swap_optimize", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                solution: { routes: state.routes, distance_matrix: state.distanceMatrix },
+                env: unfrozenEnv,
+                drone_configs: droneConfigs,
+                visited_targets: actualFrozenTargets
+              })
+            });
+            const data = await resp.json();
+
+            if (!data || !data.success) {
+              appendDebugLine("Swap optimization error during loop: " + (data && data.error ? data.error : "Unknown error"));
+              break;
+            }
+
+            const swaps = data.swaps_made || [];
+            if (swaps.length === 0) {
+              appendDebugLine(`No more swaps found after ${loop - 1} iterations. Stopping.`);
+              break;
+            }
+
+            // Apply the returned routes and sequences (preserves frozen handling similar to single-click)
+            let savedFrozenTrajectories = null;
+            if (hasFrozen) {
+              const frozenCounts = getFrozenTrajectoryCounts();
+              savedFrozenTrajectories = {};
+              Object.entries(state.routes || {}).forEach(([did, routeData]) => {
+                const frozenCount = frozenCounts[did] || 0;
+                if (frozenCount > 0 && routeData.trajectory && routeData.trajectory.length >= frozenCount) {
+                  savedFrozenTrajectories[did] = routeData.trajectory.slice(0, frozenCount);
+                }
+              });
+            }
+
+            // Use returned routes (deep clone)
+            state.routes = JSON.parse(JSON.stringify(data.routes));
+            if (savedFrozenTrajectories) {
+              Object.entries(savedFrozenTrajectories).forEach(([did, frozenTraj]) => {
+                if (state.routes[did]) state.routes[did].trajectory = frozenTraj;
+              });
+            }
+            state.sequences = JSON.parse(JSON.stringify(data.sequences || {}));
+
+            // Show the swaps from this iteration
+            appendDebugLine(`  Iter ${loop}: ${swaps.length} swap(s)`);
+            swaps.slice(0, 20).forEach(swap => {
+              appendDebugLine(`    ${swap.target}: D${swap.from_drone} -> D${swap.to_drone} (savings=${(swap.savings||swap.savings||0).toFixed? (swap.savings||0).toFixed(1) : swap.savings})`);
+            });
+            if (swaps.length > 20) appendDebugLine(`    ... and ${swaps.length - 20} more`);
+
+            totalSwaps += swaps.length;
+
+            // Regenerate trajectories and update UI after each iteration so user can observe progress
+            await regenerateTrajectories();
+            updateStatsFromRoutes();
+            drawEnvironment();
+
+            // Also update mission replay committed solution so Reset preserves progress
+            missionReplay.updateCurrentSegmentSolution(state.routes, state.sequences);
+
+            // small yield to keep UI responsive
+            await new Promise(r => setTimeout(r, 50));
+          }
+
+          appendDebugLine(`Swap Until finished: total swaps applied = ${totalSwaps}, iterations = ${loop}`);
+        }
+      } catch (err) {
+        appendDebugLine("Swap Until error: " + err.message);
+      } finally {
+        btnSwapUntil.disabled = false;
+        if (btnSwap) btnSwap.disabled = false;
+        btnSwapUntil.textContent = originalText;
       }
     });
   }

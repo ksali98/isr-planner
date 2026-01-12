@@ -2056,6 +2056,10 @@ class TrajectorySwapRequest(BaseModel):
     env: Dict[str, Any]
     drone_configs: Dict[str, Any]
     visited_targets: List[str] = []  # Frozen targets that should NOT be swapped
+    # If True, the optimizer will auto-iterate until convergence (server-side)
+    auto_iterate: bool = False
+    # If True, the optimizer will regenerate SAM-aware trajectories between passes
+    auto_regen: bool = False
 
 
 @app.post("/api/trajectory_swap_optimize")
@@ -2085,11 +2089,18 @@ async def api_trajectory_swap_optimize(req: TrajectorySwapRequest):
             print("   WARNING: No distance matrix available!")
 
     try:
+        # Allow client to request server-side auto-iteration / regeneration.
+        # By default we keep single-pass behavior so the UI can click until no swaps.
+        # By default run the full server-side cascade (auto-iterate + regen).
+        # This makes the optimizer apply cascading swaps automatically unless
+        # the client explicitly opts out by sending false for these flags.
         result = trajectory_swap_optimize(
             solution=req.solution,
             env=req.env,
             drone_configs=req.drone_configs,
             distance_matrix=distance_matrix,
+            auto_iterate=bool(getattr(req, 'auto_iterate', True)),
+            auto_regen=bool(getattr(req, 'auto_regen', True)),
         )
 
         # Log swaps made
