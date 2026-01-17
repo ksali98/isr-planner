@@ -521,9 +521,15 @@ class PostOptimizer:
                     continue
 
                 # Check if we're trying to insert after the end airport
+                # For an "empty" route [A1, A1] (len=2), route_idx=2 is invalid
+                # but we should insert at position 1 (before final airport)
                 if route_idx >= len(route):
-                    skip_reasons[did] = f"route_idx {route_idx} >= route length {len(route)}"
-                    continue
+                    # Clamp to insert before the final waypoint (the return airport)
+                    if len(route) >= 2:
+                        route_idx = len(route) - 1  # Insert before the last waypoint
+                    else:
+                        skip_reasons[did] = f"route_idx {route_idx} >= route length {len(route)}"
+                        continue
 
                 # Calculate insertion cost using proper SAM-avoiding distances
                 if route_idx == 0:
@@ -1455,6 +1461,7 @@ class TrajectorySwapOptimizer:
                             best_insertion_cost = insertion_cost
                             best_drone = other_drone
                             best_route_segment = j + 1  # Insert after seg_start
+                            print(f"            📍 Route len={len(other_route)}, segment j={j}, insert_pos={best_route_segment}")
 
                 # If found a better segment, add to candidates (don't execute yet)
                 if best_drone and best_osd < ssd:
@@ -1485,12 +1492,57 @@ class TrajectorySwapOptimizer:
                 from_drone = best_swap['from_drone']
                 to_drone = best_swap['to_drone']
                 to_segment = best_swap['to_segment']
+                from_idx = best_swap['from_idx']
 
-                # Remove from current route
-                optimized_routes[from_drone]["route"].remove(wp_id)
+                # For same-drone swaps, we need to adjust the insertion index
+                # because removing the target shifts subsequent indices
+                if from_drone == to_drone:
+                    # Remove from current position first
+                    optimized_routes[from_drone]["route"].remove(wp_id)
 
-                # Insert into new route
-                optimized_routes[to_drone]["route"].insert(to_segment, wp_id)
+                    # Adjust insertion index: if we removed from before the insertion point,
+                    # the insertion point shifts down by 1
+                    adjusted_to_segment = to_segment
+                    if from_idx < to_segment:
+                        adjusted_to_segment = to_segment - 1
+
+                    # CRITICAL: Ensure we don't insert after the ending airport
+                    route = optimized_routes[to_drone]["route"]
+                    max_insert_pos = len(route) - 1  # Can't insert at or after last element (airport)
+                    if adjusted_to_segment > max_insert_pos:
+                        adjusted_to_segment = max_insert_pos
+                        print(f"            ⚠️ Clamped insertion to {adjusted_to_segment} to stay before ending airport")
+
+                    optimized_routes[to_drone]["route"].insert(adjusted_to_segment, wp_id)
+                    print(f"            📍 Same-drone move: from idx {from_idx} to idx {adjusted_to_segment}")
+                else:
+                    # Different drone swap - straightforward
+                    optimized_routes[from_drone]["route"].remove(wp_id)
+
+                    # Ensure we don't insert after the ending airport
+                    route = optimized_routes[to_drone]["route"]
+                    max_insert_pos = len(route)  # After removal from other drone, len is current
+                    # But we want to insert BEFORE the last element (ending airport)
+                    if to_segment >= len(route):
+                        to_segment = len(route) - 1
+                        print(f"            ⚠️ Clamped insertion to {to_segment} to stay before ending airport")
+
+                    optimized_routes[to_drone]["route"].insert(to_segment, wp_id)
+
+                # Validate route structure after swap
+                for check_drone in [from_drone, to_drone]:
+                    check_route = optimized_routes[check_drone]["route"]
+                    if len(check_route) >= 2:
+                        # Route must start with airport
+                        if not str(check_route[0]).startswith('A'):
+                            print(f"            ❌ ERROR: D{check_drone} route doesn't start with airport: {check_route}")
+                        # Route must end with airport
+                        if not str(check_route[-1]).startswith('A'):
+                            print(f"            ❌ ERROR: D{check_drone} route doesn't end with airport: {check_route}")
+                        # No airports in the middle (except for cyclic routes where start==end)
+                        for idx, wp in enumerate(check_route[1:-1], start=1):
+                            if str(wp).startswith('A') and wp != check_route[0]:
+                                print(f"            ❌ ERROR: D{check_drone} has airport {wp} in middle at idx {idx}: {check_route}")
 
                 # Record the swap
                 all_swaps.append({

@@ -414,10 +414,10 @@
           <div class="optimization-controls" style="margin-top: 0.5rem; padding: 0.4rem; background: #111827; border-radius: 0.5rem;">
             <div class="control-label" style="font-size: 0.7rem; color: #9ca3af; margin-bottom: 0.3rem;">Post-Optimization:</div>
             <div style="display: flex; gap: 0.5rem;">
-              <button id="btn-optimize-insert" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Insert unvisited targets into routes with leftover fuel">Insert Missed</button>
-              <button id="btn-optimize-swap" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Swap targets to drones with closer trajectories">Swap Closer</button>
-              <button id="btn-optimize-swap-until" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Run Swap Closer repeatedly until no further swaps are found">Swap Until No More</button>
-              <button id="btn-optimize-cross" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Remove self-crossings from trajectories using 2-opt">Cross Remove</button>
+              <button id="btn-optimize-insert" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Insert unvisited targets into routes with leftover fuel">Insert</button>
+              <button id="btn-optimize-swap" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Swap targets to drones with closer trajectories (single pass)">S-Swap</button>
+              <button id="btn-optimize-swap-until" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Run Swap Closer repeatedly until no further swaps are found">M-Swap</button>
+              <button id="btn-optimize-cross" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Remove self-crossings from trajectories using 2-opt">No Cross</button>
             </div>
             <div style="margin-top:0.4rem; display:flex; align-items:center; gap:0.6rem; font-size:12px; color:#cbd5e1;">
               <input type="checkbox" id="chk-auto-regen" />
