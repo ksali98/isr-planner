@@ -920,7 +920,8 @@ class TrajectorySwapOptimizer:
         priority_constraints: Optional[str] = None,
         auto_iterate: bool = True,
         max_iterations: int = 50,
-        auto_regen: bool = False
+        auto_regen: bool = False,
+        debug: bool = False
     ) -> Dict[str, Any]:
         """
         Reassign targets to drones with closer trajectories using SAM-avoiding trajectory segments.
@@ -953,11 +954,11 @@ class TrajectorySwapOptimizer:
         """
         if auto_iterate:
             return self._optimize_auto(
-                solution, env, drone_configs, priority_constraints, max_iterations, auto_regen
+                solution, env, drone_configs, priority_constraints, max_iterations, auto_regen, debug
             )
         else:
             return self._optimize_single(
-                solution, env, drone_configs, priority_constraints
+                solution, env, drone_configs, priority_constraints, debug
             )
 
     def _optimize_auto(
@@ -968,7 +969,7 @@ class TrajectorySwapOptimizer:
         priority_constraints: Optional[str] = None,
         max_iterations: int = 50,
         auto_regen: bool = False
-    ) -> Dict[str, Any]:
+    , debug: bool = False) -> Dict[str, Any]:
         """
         Auto-iterate Swap Closer until convergence or cycle detection.
         Returns the solution with the lowest total distance encountered.
@@ -1024,7 +1025,7 @@ class TrajectorySwapOptimizer:
 
             # Run single swap iteration
             result = self._optimize_single(
-                current_solution, env, drone_configs, priority_constraints
+                current_solution, env, drone_configs, priority_constraints, debug
             )
 
             swaps_made = result.get("swaps_made", [])
@@ -1153,7 +1154,8 @@ class TrajectorySwapOptimizer:
         solution: Dict[str, Any],
         env: Dict[str, Any],
         drone_configs: Dict[str, Dict[str, Any]],
-        priority_constraints: Optional[str] = None
+        priority_constraints: Optional[str] = None,
+        debug: bool = False
     ) -> Dict[str, Any]:
         """
         Perform a SINGLE swap iteration (the original behavior).
@@ -1224,6 +1226,9 @@ class TrajectorySwapOptimizer:
 
             # Collect ALL possible swap candidates in this pass
             swap_candidates = []
+
+            # Optional diagnostics per target when debug=True
+            target_diagnostics: Dict[str, Any] = {}
 
             # Collect all targets to check in this pass
             targets_to_check = []
@@ -1298,26 +1303,32 @@ class TrajectorySwapOptimizer:
                     prev_pos = trajectory[traj_idx - 1]
                     next_pos = trajectory[traj_idx + 1]
 
-                # Calculate SSD: Self Segment Distance using trajectory vertices
-                ssd = self._point_to_line_distance(target_pos, prev_pos, next_pos)
+                # Calculate removal delta: how much distance would be saved by removing this target
+                remove_delta = self._removal_delta(wp_id, optimized_routes[current_drone], waypoint_positions)
+
+                # Initialize diagnostics entry for this target
+                if debug:
+                    target_diagnostics[str(wp_id)] = {
+                        "remove_delta": remove_delta,
+                        "candidates": []
+                    }
 
                 # Get route waypoint IDs for logging
                 prev_wp = route[current_idx - 1] if current_idx > 0 else "?"
                 next_wp = route[current_idx + 1] if current_idx < len(route) - 1 else "?"
 
-                print(f"    🎯 {wp_id}: SSD={ssd:.2f} (trajectory vertices around {prev_wp}→{wp_id}→{next_wp})")
-
-                # CRITICAL: NO SSD NO MOVEMENT
-                if ssd == 0.0:
-                    print(f"       ⏭️  SKIP: SSD=0, no movement allowed")
+                if remove_delta is None or remove_delta <= 0.0:
+                    print(f"    🎯 {wp_id}: remove_delta=None or <=0 (skip) ({prev_wp}→{wp_id}→{next_wp})")
                     continue
 
-                # Search for segments within circle of radius SSD
+                print(f"    🎯 {wp_id}: remove_delta={remove_delta:.2f} (route neighbors {prev_wp}→{wp_id}→{next_wp})")
+
+                # Search for segments where inserting this target yields the best delta (insertion cost)
                 best_drone = None
                 best_route_segment = None
+                best_insert_delta = float('inf')
                 best_osd = float('inf')
-                best_insertion_cost = float('inf')
-                best_net_savings = -float('inf')  # Track maximum gain (SSD - OSD)
+                best_net_savings = -float('inf')  # Track maximum gain (remove_delta - insert_delta)
 
                 # Check all trajectory segments in all drones
                 for other_drone, other_route_data in optimized_routes.items():
@@ -1398,16 +1409,16 @@ class TrajectorySwapOptimizer:
                             traj_seg_start = other_trajectory[ti]
                             traj_seg_end = other_trajectory[ti + 1]
 
-                            # Quick bounding box check
-                            min_x = min(traj_seg_start[0], traj_seg_end[0]) - ssd
-                            max_x = max(traj_seg_start[0], traj_seg_end[0]) + ssd
-                            min_y = min(traj_seg_start[1], traj_seg_end[1]) - ssd
-                            max_y = max(traj_seg_start[1], traj_seg_end[1]) + ssd
+                            # Quick bounding box check (use remove_delta as radius)
+                            min_x = min(traj_seg_start[0], traj_seg_end[0]) - remove_delta
+                            max_x = max(traj_seg_start[0], traj_seg_end[0]) + remove_delta
+                            min_y = min(traj_seg_start[1], traj_seg_end[1]) - remove_delta
+                            max_y = max(traj_seg_start[1], traj_seg_end[1]) + remove_delta
 
                             if not (min_x <= target_pos[0] <= max_x and min_y <= target_pos[1] <= max_y):
                                 continue  # Trajectory segment too far away
 
-                            # Calculate OSD to this trajectory sub-segment
+                            # Calculate OSD to this trajectory sub-segment (geometric check)
                             osd = self._point_to_line_distance(target_pos, traj_seg_start, traj_seg_end)
                             if osd < best_osd_in_segment:
                                 best_osd_in_segment = osd
@@ -1416,49 +1427,62 @@ class TrajectorySwapOptimizer:
                         osd = best_osd_in_segment
 
                         if osd == float('inf'):
-                            continue  # No valid sub-segments found
+                            continue
 
-                        if osd < ssd:
-                            print(f"         📐 D{other_drone} segment {seg_start_id}→{seg_end_id}: OSD={osd:.2f} < SSD={ssd:.2f}")
+                        # Only consider segments that are geometrically closer
+                        if osd >= remove_delta:
+                            continue
 
-                        # CRITICAL: Only move if OSD < SSD (improvement required)
-                        if osd >= ssd:
-                            continue  # Not an improvement
-
-                        # Calculate insertion cost
-                        d_start = self._get_matrix_distance(seg_start_id, str(wp_id))
-                        d_end = self._get_matrix_distance(str(wp_id), seg_end_id)
-                        d_direct = self._get_matrix_distance(seg_start_id, seg_end_id)
+                        # Calculate insertion delta (using distance helper _d)
+                        d_start = self._d(seg_start_id, str(wp_id), waypoint_positions)
+                        d_end = self._d(str(wp_id), seg_end_id, waypoint_positions)
+                        d_direct = self._d(seg_start_id, seg_end_id, waypoint_positions)
+                        if any(math.isinf(x) for x in (d_start, d_end, d_direct)):
+                            continue
                         insertion_cost = d_start + d_end - d_direct
 
-                        # Check fuel budget
+                        # Check fuel budget for target receiver drone
                         if other_drone != current_drone:
                             other_fuel_budget = other_route_data.get("fuel_budget", 0)
                             if other_fuel_budget <= 0:
                                 other_cfg = drone_configs.get(other_drone, {})
                                 other_fuel_budget = other_cfg.get("fuel_budget", 200)
 
-                            other_current_distance = self._calculate_route_distance(other_route)
-                            if other_current_distance + insertion_cost > other_fuel_budget:
+                            other_current_distance = other_route_data.get("distance") or self._calculate_route_distance(other_route)
+                            to_new = other_current_distance + insertion_cost
+                            if to_new > other_fuel_budget:
                                 print(f"            ⛽ FUEL: D{other_drone} {seg_start_id}→{seg_end_id} exceeds budget ({other_current_distance:.1f}+{insertion_cost:.1f} > {other_fuel_budget:.1f})")
                                 continue
 
-                        # Calculate net savings: the gain from moving this target
-                        # Gain = SSD - OSD (how much closer the target becomes)
-                        net_savings = ssd - osd
+                        # Calculate net savings: remove_delta - insertion_cost
+                        net_savings = remove_delta - insertion_cost
 
-                        # Track best option: select target with MAXIMUM gain (SSD - OSD)
+                        # Record candidate diagnostics
+                        if debug:
+                            candidate_info = {
+                                "to_drone": other_drone,
+                                "seg_start": seg_start_id,
+                                "seg_end": seg_end_id,
+                                "to_segment": j + 1,
+                                "osd": osd,
+                                "insert_delta": insertion_cost,
+                                "net_savings": net_savings,
+                                "fuel_ok": True if (other_drone == current_drone or (other_route_data.get("fuel_budget", 0) or drone_configs.get(other_drone, {}).get("fuel_budget", 0)) >= (other_route_data.get("distance") or self._calculate_route_distance(other_route) + insertion_cost)) else False
+                            }
+                            target_diagnostics[str(wp_id)]["candidates"].append(candidate_info)
+
+                        # Track best option: select target with MAXIMUM net savings
                         if net_savings > best_net_savings:
-                            print(f"            🔄 New best: D{other_drone} {seg_start_id}→{seg_end_id}, gain={net_savings:.2f} (SSD={ssd:.2f} - OSD={osd:.2f})")
+                            print(f"            🔄 New best: D{other_drone} {seg_start_id}→{seg_end_id}, gain={net_savings:.2f} (remove={remove_delta:.2f} - insert={insertion_cost:.2f})")
                             best_net_savings = net_savings
                             best_osd = osd
-                            best_insertion_cost = insertion_cost
+                            best_insert_delta = insertion_cost
                             best_drone = other_drone
                             best_route_segment = j + 1  # Insert after seg_start
 
                 # If found a better segment, add to candidates (don't execute yet)
-                if best_drone and best_osd < ssd:
-                    gain = ssd - best_osd
+                if best_drone and best_insert_delta < remove_delta:
+                    gain = remove_delta - best_insert_delta
                     print(f"       📋 Candidate: {wp_id} from D{current_drone} to D{best_drone}, gain={gain:.2f}")
 
                     swap_candidates.append({
@@ -1467,7 +1491,8 @@ class TrajectorySwapOptimizer:
                         "to_drone": best_drone,
                         "from_idx": current_idx,
                         "to_segment": best_route_segment,
-                        "ssd": ssd,
+                        "remove_delta": remove_delta,
+                        "insert_delta": best_insert_delta,
                         "osd": best_osd,
                         "gain": gain,
                         "same_drone": (best_drone == current_drone),
@@ -1497,8 +1522,9 @@ class TrajectorySwapOptimizer:
                     "target": wp_id,
                     "from_drone": from_drone,
                     "to_drone": to_drone,
-                    "ssd": best_swap['ssd'],
-                    "osd": best_swap['osd'],
+                    "remove_delta": best_swap.get('remove_delta'),
+                    "insert_delta": best_swap.get('insert_delta'),
+                    "osd": best_swap.get('osd'),
                     "savings": best_swap['gain'],
                     "same_drone": best_swap['same_drone'],
                     "pass": pass_num + 1
@@ -1519,7 +1545,8 @@ class TrajectorySwapOptimizer:
             },
             "routes": optimized_routes,
             "swaps_made": all_swaps,
-            "passes": num_passes
+            "passes": num_passes,
+            "target_diagnostics": target_diagnostics if debug else {}
         }
 
     def _point_to_line_distance(
@@ -1550,6 +1577,65 @@ class TrajectorySwapOptimizer:
         closest_y = y1 + t * (y2 - y1)
 
         return math.sqrt((px - closest_x) ** 2 + (py - closest_y) ** 2)
+
+    def _d(self, ida: str, idb: str, positions: Dict[str, Tuple[float, float]]) -> float:
+        """
+        Distance metric between two waypoint ids. Prefer the SAM-aware distance matrix
+        if available, otherwise fall back to Euclidean on provided positions.
+        """
+        # Use precomputed matrix if available
+        if self._distance_matrix:
+            labels = self._distance_matrix.get("labels", [])
+            matrix = self._distance_matrix.get("matrix", [])
+            try:
+                idx_a = labels.index(ida)
+                idx_b = labels.index(idb)
+                return float(matrix[idx_a][idx_b])
+            except Exception:
+                pass
+
+        # Fallback to Euclidean using positions dict
+        pa = positions.get(str(ida))
+        pb = positions.get(str(idb))
+        if pa is None or pb is None:
+            return float('inf')
+        return math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+
+    def _removal_delta(self, tid: str, route_data: Dict[str, Any], positions: Dict[str, Tuple[float, float]]) -> Optional[float]:
+        """
+        Compute the delta (distance change) if `tid` is removed from the given route.
+        Returns the extra distance currently incurred by visiting `tid` (positive means
+        removing it reduces route distance). Returns None if removal is invalid/undefined.
+        """
+        route = route_data.get("route", [])
+        if not route:
+            return None
+        try:
+            i = route.index(tid)
+        except ValueError:
+            return None
+        # cannot remove if at ends (shouldn't happen for targets if route has airports)
+        if i <= 0 or i >= len(route) - 1:
+            return None
+
+        prev_id = route[i - 1]
+        next_id = route[i + 1]
+        if str(prev_id) not in positions or str(next_id) not in positions or str(tid) not in positions:
+            return None
+
+        prev_p = positions[str(prev_id)]
+        t_p = positions[str(tid)]
+        next_p = positions[str(next_id)]
+
+        # Use distance metric helper for consistency with insertion cost
+        d_prev_t = self._d(str(prev_id), str(tid), positions)
+        d_t_next = self._d(str(tid), str(next_id), positions)
+        d_prev_next = self._d(str(prev_id), str(next_id), positions)
+
+        if any(math.isinf(x) for x in (d_prev_t, d_t_next, d_prev_next)):
+            return None
+
+        return d_prev_t + d_t_next - d_prev_next
 
     def _get_matrix_distance(self, from_id: str, to_id: str) -> float:
         """
@@ -1661,7 +1747,7 @@ def trajectory_swap_optimize(
     auto_iterate: bool = True,
     max_iterations: int = 50,
     auto_regen: bool = False
-) -> Dict[str, Any]:
+    , debug: bool = False) -> Dict[str, Any]:
     """
     Reassign targets to drones whose trajectories pass closer to them.
 
@@ -1696,6 +1782,7 @@ def trajectory_swap_optimize(
         auto_iterate=auto_iterate,
         max_iterations=max_iterations,
         auto_regen=auto_regen,
+        debug=debug,
     )
 
 

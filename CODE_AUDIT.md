@@ -378,3 +378,29 @@ Priority order for deep dive:
 - Error handling is scattered and inconsistent
 - SAM validation happens too late (after planning, during trajectory generation)
 - Need "fail fast" approach with early validation
+
+---
+
+## Swap Closer: auto_regen (documentation)
+
+Summary:
+
+- The Swap Closer post-optimizer was extended to support "auto-regenerate" between optimization passes. This makes cascade swaps discoverable: after applying a swap, the optimizer can regenerate SAM-aware trajectories for the modified routes so subsequent iterations compute distances against up-to-date trajectories and may find further beneficial swaps.
+
+How to use:
+
+- API: `/api/trajectory_swap_optimize` now accepts two optional boolean fields in the POST body:
+   - `auto_iterate`: if true, the server will iterate the optimizer until convergence.
+   - `auto_regen`: if true, the server will regenerate SAM-aware trajectories between passes.
+
+- UI: The web UI includes a checkbox "Auto-regenerate & cascade (one-click)". When checked, the client sends `auto_iterate=true` and `auto_regen=true` in the request and the server does the full cascade in one call. If unchecked, the UI preserves the click-until-no-swaps workflow:
+   - "Swap Closer" performs a single-pass swap (one best swap) so users can inspect each change.
+   - "Swap Until No More" runs a client-side loop that repeatedly calls the single-pass endpoint and applies each swap incrementally (safety cap of 200 iterations).
+
+Notes & safety:
+
+- Client-side loop: kept as an option to preserve per-swap visibility; it has a 200-iteration safety cap.
+- Server-side cascade: useful for one-click global improvement; may apply many swaps in one request.
+- Frozen trajectory prefixes (checkpoint/segmented workflows) are preserved when applying optimizer results.
+
+If you want this behavior always on, adjust defaults in `server/main.py` (current default is single-pass to preserve the stepwise workflow).

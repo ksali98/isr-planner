@@ -2060,6 +2060,8 @@ class TrajectorySwapRequest(BaseModel):
     auto_iterate: bool = False
     # If True, the optimizer will regenerate SAM-aware trajectories between passes
     auto_regen: bool = False
+    # If True, return per-target diagnostics to help debug swap decisions
+    debug: bool = False
 
 
 @app.post("/api/trajectory_swap_optimize")
@@ -2075,6 +2077,7 @@ async def api_trajectory_swap_optimize(req: TrajectorySwapRequest):
     print("📥 TRAJECTORY SWAP ENDPOINT CALLED")
     print(f"   Received routes: {list(req.solution.get('routes', {}).keys())}")
     print("="*60)
+    print(f"   debug flag: {bool(getattr(req, 'debug', False))}")
 
     # Use distance matrix from solution if available, else fall back to cache
     distance_matrix = req.solution.get('distance_matrix')
@@ -2101,6 +2104,7 @@ async def api_trajectory_swap_optimize(req: TrajectorySwapRequest):
             distance_matrix=distance_matrix,
             auto_iterate=bool(getattr(req, 'auto_iterate', True)),
             auto_regen=bool(getattr(req, 'auto_regen', True)),
+            debug=bool(getattr(req, 'debug', False)),
         )
 
         # Log swaps made
@@ -2110,7 +2114,7 @@ async def api_trajectory_swap_optimize(req: TrajectorySwapRequest):
             print(f"   Total swaps made: {len(swaps)}")
             for swap in swaps:
                 print(f"   {swap['target']}: Drone {swap['from_drone']} → Drone {swap['to_drone']} "
-                      f"(SSD {swap.get('ssd', 0):.1f} → OSD {swap.get('osd', 0):.1f}, "
+                      f"(remove {swap.get('remove_delta', 0):.1f} → insert {swap.get('insert_delta', 0):.1f}, "
                       f"savings {swap.get('savings', 0):.1f})")
         else:
             print("   No beneficial swaps found")
@@ -2127,6 +2131,7 @@ async def api_trajectory_swap_optimize(req: TrajectorySwapRequest):
             "sequences": {d: r.get("sequence", "") for d, r in result.get("routes", {}).items()},
             "swaps_made": swaps,
             "iterations": result.get("iterations", 0),
+            "target_diagnostics": result.get("target_diagnostics", {})
         }
     except Exception as e:
         import traceback
