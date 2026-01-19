@@ -37,7 +37,6 @@ def create_session(metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
         if response.data:
             return response.data[0]["id"]
     except Exception as e:
-        print(f"Error creating session: {e}")
     return None
 
 
@@ -60,7 +59,6 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
         if response.data:
             return response.data[0]
     except Exception as e:
-        print(f"Error getting session: {e}")
     return None
 
 
@@ -87,7 +85,6 @@ def update_session_metadata(session_id: str, metadata: Dict[str, Any]) -> bool:
             client.table("sessions").update({"metadata": merged}).eq("id", session_id).execute()
             return True
     except Exception as e:
-        print(f"Error updating session: {e}")
     return False
 
 
@@ -101,7 +98,6 @@ def delete_session(session_id: str) -> bool:
         client.table("sessions").delete().eq("id", session_id).execute()
         return True
     except Exception as e:
-        print(f"Error deleting session: {e}")
     return False
 
 
@@ -140,7 +136,6 @@ def add_conversation_message(
         if response.data:
             return response.data[0]["id"]
     except Exception as e:
-        print(f"Error adding conversation message: {e}")
     return None
 
 
@@ -184,7 +179,6 @@ def get_conversation_history(
             for row in response.data
         ]
     except Exception as e:
-        print(f"Error getting conversation history: {e}")
     return []
 
 
@@ -219,7 +213,6 @@ def get_recent_messages(session_id: str, count: int = 10) -> List[Dict[str, Any]
             for row in messages
         ]
     except Exception as e:
-        print(f"Error getting recent messages: {e}")
     return []
 
 
@@ -252,7 +245,6 @@ def get_conversation_summary(session_id: str) -> Dict[str, Any]:
             "by_role": role_counts
         }
     except Exception as e:
-        print(f"Error getting conversation summary: {e}")
     return {"available": False, "error": str(e)}
 
 
@@ -279,7 +271,6 @@ def clear_conversation(session_id: str) -> int:
         client.table("conversations").delete().eq("session_id", session_id).execute()
         return count
     except Exception as e:
-        print(f"Error clearing conversation: {e}")
     return 0
 
 
@@ -321,7 +312,6 @@ def save_mission_plan(
         if response.data:
             return response.data[0]["id"]
     except Exception as e:
-        print(f"Error saving mission plan: {e}")
     return None
 
 
@@ -352,7 +342,6 @@ def get_mission_plans(
         response = query.execute()
         return response.data
     except Exception as e:
-        print(f"Error getting mission plans: {e}")
     return []
 
 

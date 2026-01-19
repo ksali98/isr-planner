@@ -403,20 +403,15 @@ class DeliveryPlannerUI:
 
     # Button callbacks (placeholders)
     def load_scenario(self):
-        print("Load scenario clicked")
 
     def solve_delivery(self):
-        print("Solve delivery clicked")
 
     def animate(self):
-        print("Animate clicked")
 
     def reset(self):
-        print("Reset clicked")
         self.draw_initial_map()
 
     def export_solution(self):
-        print("Export solution clicked")
 
 
 def main():

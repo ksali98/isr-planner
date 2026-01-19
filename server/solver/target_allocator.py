@@ -99,14 +99,11 @@ class TargetAllocator:
         unassigned = all_target_ids - assigned_ids
 
         if unassigned:
-            print(f"⚠️ ALLOCATOR: {len(unassigned)} targets NOT assigned: {sorted(unassigned)}", flush=True)
             # Debug: check why each was skipped
             for tid in sorted(unassigned):
                 capable_drones = [did for did, caps in drone_capabilities.items() if tid in caps]
                 if not capable_drones:
-                    print(f"   {tid}: No drone has capability (type restriction)", flush=True)
                 else:
-                    print(f"   {tid}: Capable drones={capable_drones} but not assigned", flush=True)
 
         return result
 
@@ -630,8 +627,6 @@ def allocate_targets(
             original_count = len(targets)
             targets = [t for t in targets if str(t["id"]) not in excluded]
             if len(targets) < original_count:
-                print(f"⚠️ Filtered out {original_count - len(targets)} excluded targets "
-                      f"(inside SAM zones): {excluded}", flush=True)
 
     # Convert strategy string to enum
     try:
@@ -711,7 +706,6 @@ def parse_priority_constraints(constraints_str: str) -> Dict[str, Callable[[int]
         # Match patterns like "priority>=6", "priority>5", "priority<=8", "priority<7", "priority=10"
         match = re.match(r"priority\s*(>=|<=|>|<|=)\s*(\d+)", condition)
         if not match:
-            print(f"⚠️ Could not parse constraint: {condition}", flush=True)
             continue
 
         op = match.group(1)
@@ -734,7 +728,6 @@ def parse_priority_constraints(constraints_str: str) -> Dict[str, Callable[[int]
         # Assign filter to each drone
         for did in drone_ids:
             filters[did] = filter_func
-            print(f"📋 D{did}: priority {op} {threshold}", flush=True)
 
     return filters
 
@@ -795,7 +788,6 @@ def allocate_with_priority_filters(
 
             # Store allowed targets in config for the allocator to use
             modified_cfg["_priority_allowed_targets"] = allowed_targets
-            print(f"🎯 D{did}: {len(allowed_targets)} targets pass priority filter", flush=True)
 
         modified_configs[did] = modified_cfg
 

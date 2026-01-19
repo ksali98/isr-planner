@@ -36,7 +36,6 @@ class NFZDistanceCalculator:
         from .nfz_trajectory_planner import NFZTrajectoryPlanner
         planner = NFZTrajectoryPlanner(self.no_fly_zones)
 
-        print(f"📊 Calculating NFZ-aware distance matrix for {n} waypoints...")
 
         for i in range(n):
             for j in range(n):
@@ -50,20 +49,11 @@ class NFZDistanceCalculator:
                 else:
                     matrix[i][j] = 0.0
 
-        print(f"✅ Distance matrix calculated ({n}x{n})")
 
         # Print distance matrix for debugging
-        print("\n📊 DISTANCE MATRIX:")
-        print("     ", end="")
         for label in labels:
-            print(f"{label:>8}", end="")
-        print()
         for i, row_label in enumerate(labels):
-            print(f"{row_label:>4} ", end="")
             for j in range(n):
-                print(f"{matrix[i][j]:>8.1f}", end="")
-            print()
-        print()
 
         return {
             'matrix': matrix,

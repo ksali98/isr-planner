@@ -54,15 +54,7 @@ class ISRTrajectoryPlanner:
             self.sams.append({"pos": (px, py), "range": radius})
 
         if self.sams:
-            print(
-                f"🎯 ISRTrajectoryPlanner initialized with {len(self.sams)} SAMs (boundary navigation + strict validation)",
-                flush=True,
-            )
             for sam in self.sams:
-                print(
-                    f"   SAM: pos={sam['pos']}, range={sam['range']:.2f}",
-                    flush=True,
-                )
 
     # ---------------------------
     #  Internal helpers
@@ -149,11 +141,6 @@ class ISRTrajectoryPlanner:
 
         # Sanity check on method
         if method.startswith("INVALID") or not path or len(path) < 2:
-            print(
-                f"❌ NO VALID PATH from ({start[0]:.1f},{start[1]:.1f}) "
-                f"to ({end[0]:.1f},{end[1]:.1f}): {method}",
-                flush=True,
-            )
             return [], float("inf")
 
         # boundary_navigation already validates paths against polygons.
@@ -161,12 +148,6 @@ class ISRTrajectoryPlanner:
 
         # Debug: show when SAM avoidance generates a non-direct path
         if len(path) > 2:
-            print(
-                f"🛡️ Boundary navigation OK: "
-                f"({start[0]:.1f},{start[1]:.1f}) → ({end[0]:.1f},{end[1]:.1f}) "
-                f"via {len(path)} waypoints [{method}]",
-                flush=True,
-            )
 
         return path, distance
 
@@ -194,15 +175,9 @@ class ISRTrajectoryPlanner:
 
         drone_label = f"D{drone_id}" if drone_id else "UNKNOWN"
 
-        print(
-            f"\n📍 [{drone_label}] Generating trajectory for route: "
-            f"{' → '.join(route)}",
-            flush=True,
-        )
         for wp_id in route:
             if wp_id in waypoint_positions:
                 x, y = waypoint_positions[wp_id]
-                print(f"   {wp_id}: ({x:.1f}, {y:.1f})", flush=True)
 
         trajectory: List[List[float]] = []
 
@@ -211,40 +186,19 @@ class ISRTrajectoryPlanner:
             to_id = route[i + 1]
 
             if from_id not in waypoint_positions or to_id not in waypoint_positions:
-                print(
-                    f"   ⚠️ [{drone_label}] Skipping segment {from_id}→{to_id}: "
-                    f"missing waypoint coordinates.",
-                    flush=True,
-                )
                 continue
 
             start_xy = tuple(waypoint_positions[from_id])
             end_xy = tuple(waypoint_positions[to_id])
 
-            print(
-                f"   📐 [{drone_label}] Planning segment {from_id}→{to_id}: "
-                f"({start_xy[0]:.1f},{start_xy[1]:.1f}) → ({end_xy[0]:.1f},{end_xy[1]:.1f})",
-                flush=True,
-            )
 
             segment_path, seg_dist = self.plan_path(start_xy, end_xy)
 
             if not segment_path:
                 # Path invalid -> stop trajectory here; do NOT draw illegal motion
-                print(
-                    f"   🚫 [{drone_label}] Segment {from_id}→{to_id} "
-                    f"has NO VALID SAM-SAFE PATH. Trajectory terminated.",
-                    flush=True,
-                )
                 break
 
-            print(
-                f"   ✅ [{drone_label}] Segment {from_id}→{to_id} "
-                f"has {len(segment_path)} waypoints, length ≈ {seg_dist:.1f}",
-                flush=True,
-            )
             for idx, pt in enumerate(segment_path):
-                print(f"      [{idx}] ({pt[0]:.2f}, {pt[1]:.2f})", flush=True)
 
             # Concatenate, avoiding duplicate joint point
             if i == 0:

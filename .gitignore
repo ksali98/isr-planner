@@ -1,5 +1,42 @@
+# Python
 venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.eggs/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.env.local
+*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Project specific
 agent_memory.json
+*.log
+*.tmp
+tmp_*.json
+
+# Test artifacts
+test_output.log
+test_env_*.json
+*_analysis.html
+*_analysis.md
+
+# Backups
+*_backup_*/

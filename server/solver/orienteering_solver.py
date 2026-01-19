@@ -38,10 +38,6 @@ class DeliveryOrienteeringSolver:
                 - distance: Total route distance
                 - addresses_visited: Number of addresses visited
         """
-        print(f"🧠 Solving orienteering problem...")
-        print(f"   Warehouse: {warehouse['id']}")
-        print(f"   Addresses: {len(addresses)}")
-        print(f"   Fuel budget: {fuel_budget}")
 
         # Build environment for solver
         env_data = self._build_solver_environment(
@@ -51,7 +47,6 @@ class DeliveryOrienteeringSolver:
         # Solve with orienteering solver
         solution = self.solver.solve(env_data, fuel_budget)
 
-        print(f"✅ Route found: {len(solution['route'])} stops, distance: {solution['distance']:.1f}")
 
         return {
             'route': solution['route'],

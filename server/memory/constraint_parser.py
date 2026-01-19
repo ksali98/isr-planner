@@ -446,7 +446,6 @@ class ConstraintParser:
 
         except Exception as e:
             # Log but don't fail - fall back to regex
-            print(f"[ConstraintParser] LLM parse failed: {e}")
             return None
 
     def _build_program(

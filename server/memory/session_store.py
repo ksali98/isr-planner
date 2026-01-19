@@ -672,13 +672,10 @@ def get_session_store() -> SessionStore:
         try:
             from server.database.supabase_client import is_supabase_configured
             if is_supabase_configured():
-                print("[session_store] Using SupabaseSessionStore")
                 _store_instance = SupabaseSessionStore()
             else:
-                print("[session_store] Supabase not configured, using InMemorySessionStore")
                 _store_instance = InMemorySessionStore()
         except Exception as e:
-            print(f"[session_store] Error checking Supabase config: {e}, using InMemorySessionStore")
             _store_instance = InMemorySessionStore()
 
         return _store_instance

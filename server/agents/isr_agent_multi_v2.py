@@ -150,11 +150,9 @@ def _compute_distance_matrix(env: Dict[str, Any]) -> tuple:
                 for j, to_id in enumerate(labels):
                     matrix[from_id][to_id] = round(matrix_data[i][j], 2)
 
-            print(f"✅ Using SAM-aware distance matrix ({len(labels)} waypoints)")
             return matrix, paths
 
         except Exception as e:
-            print(f"⚠️ SAM-aware matrix failed: {e}, using Euclidean")
 
     # Fallback: Euclidean
     waypoints = {}
@@ -400,7 +398,6 @@ def allocate_targets_to_drones(strategy: str = "efficient") -> str:
     """
     global _target_allocation
 
-    print(f"\n🎯 ALLOCATE_TARGETS_TO_DRONES CALLED with strategy={strategy}", file=sys.stderr)
     sys.stderr.flush()
 
     env = get_environment()
@@ -432,9 +429,7 @@ def allocate_targets_to_drones(strategy: str = "efficient") -> str:
 
     # Debug: print actual allocation result
     total_targets = sum(len(v) for v in allocation.values())
-    print(f"📊 ALLOCATION RESULT: {total_targets} targets across {len(allocation)} drones", file=sys.stderr)
     for did in sorted(allocation.keys()):
-        print(f"   D{did}: {allocation[did]}", file=sys.stderr)
     sys.stderr.flush()
 
     # Format result
@@ -1655,9 +1650,6 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
     final_state = None
     step_count = 0
 
-    print(f"\n{'='*60}", file=sys.stderr)
-    print(f"🤖 MULTI-AGENT WORKFLOW STARTED", file=sys.stderr)
-    print(f"{'='*60}", file=sys.stderr)
     sys.stderr.flush()
 
     all_steps = []
@@ -1666,16 +1658,11 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
         all_steps.append(step)
         for node_name, node_output in step.items():
             agent = node_output.get("current_agent", "?") if isinstance(node_output, dict) else "?"
-            print(f"[Step {step_count}] Agent: {agent} | Node: {node_name}", file=sys.stderr)
             sys.stderr.flush()
         final_state = step
 
-    print(f"{'='*60}", file=sys.stderr)
-    print(f"🏁 MULTI-AGENT WORKFLOW COMPLETED after {step_count} steps", file=sys.stderr)
-    print(f"{'='*60}\n", file=sys.stderr)
     sys.stderr.flush()
 
-    print(f"🔍 [DEBUG] Starting response extraction from {len(all_steps)} steps", flush=True)
 
     # Extract response - look for ROUTE_D in all messages from all steps
     response_text = ""
@@ -1708,17 +1695,14 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
 
             # Collect ALL messages containing ROUTE_D (don't break on first)
             if "ROUTE_D" in text:
-                print(f"🔍 [DEBUG] Found ROUTE_D in message", flush=True)
                 if response_text:
                     response_text += "\n" + text
                 else:
                     response_text = text
 
-    print(f"🔍 [DEBUG] After message scan: all_messages={len(all_messages)}, response_text={len(response_text)} chars", flush=True)
 
     # If no ROUTE_D found, search backwards for any message with text content
     if not response_text and all_messages:
-        print(f"🔍 [DEBUG] Searching backwards for message with text content...", file=sys.stderr)
         for msg in reversed(all_messages):
             if hasattr(msg, "content"):
                 content = msg.content
@@ -1736,7 +1720,6 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
 
                 if extracted.strip():
                     response_text = extracted
-                    print(f"🔍 [DEBUG] Found text in {type(msg).__name__}: {extracted[:100]}...", file=sys.stderr)
                     break
         sys.stderr.flush()
 
@@ -1744,36 +1727,26 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
     routes = {}
     if response_text:
         # Debug: show actual response_text content to diagnose regex issues
-        print(f"\n📋 ==================== RESPONSE TEXT DEBUG ====================", flush=True)
-        print(f"📋 response_text (first 500 chars):\n{response_text[:500]}", flush=True)
-        print(f"📋 ===============================================================", flush=True)
 
         # Try multiple regex patterns to find routes
         route_matches = re.findall(r'ROUTE_D(\d+):\s*([A-Z0-9,]+)', response_text)
-        print(f"\n📋 Parsing routes from response_text ({len(response_text)} chars)", flush=True)
-        print(f"📋 Pattern 1 (ROUTE_D\\d+:\\s*[A-Z0-9,]+): Found {len(route_matches)} matches: {route_matches}", flush=True)
 
         # If no matches, try alternative patterns
         if not route_matches:
             # Try with more flexible spacing/formatting
             route_matches = re.findall(r'ROUTE_D(\d+)\s*:\s*([A-Z0-9,\s]+?)(?:\n|$)', response_text, re.MULTILINE)
-            print(f"📋 Pattern 2 (multiline): Found {len(route_matches)} matches: {route_matches}", flush=True)
 
         if not route_matches:
             # Try with **bold** markdown formatting
             route_matches = re.findall(r'\*\*ROUTE_D(\d+)\*\*\s*:\s*([A-Z0-9,\s]+?)(?:\n|$)', response_text, re.MULTILINE)
-            print(f"📋 Pattern 3 (bold markdown): Found {len(route_matches)} matches: {route_matches}", flush=True)
 
         if not route_matches:
             # Try finding any line containing ROUTE_D
             route_lines = [line for line in response_text.split('\n') if 'ROUTE_D' in line]
-            print(f"📋 Lines containing ROUTE_D: {route_lines}", flush=True)
     else:
         route_matches = []
-        print(f"\n⚠️ No response_text found to parse routes from", flush=True)
     for drone_id, route_str in route_matches:
         routes[drone_id] = route_str.split(',')
-    print(f"📋 Final parsed routes: {routes}", flush=True)
 
     # Calculate totals
     total_points = 0
@@ -1812,7 +1785,6 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
     allocation = _target_allocation.copy() if _target_allocation else {}
 
     if allocation:
-        print(f"\n📊 Returning allocation: {allocation}", file=sys.stderr)
 
     return {
         "response": response_text,

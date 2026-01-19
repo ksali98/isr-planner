@@ -505,18 +505,32 @@ def build_id_map(env: Dict[str, Any]):
     id_map: Dict[str, Dict[str, Any]] = {}
 
     for a in env.get("airports", []):
+        # Handle both x/y and pos formats
+        if "x" in a and "y" in a:
+            ax, ay = float(a["x"]), float(a["y"])
+        elif "pos" in a:
+            ax, ay = float(a["pos"][0]), float(a["pos"][1])
+        else:
+            continue
         id_map[str(a["id"])] = {
-            "x": float(a["x"]),
-            "y": float(a["y"]),
+            "x": ax,
+            "y": ay,
             "kind": "airport",
             "priority": 0,
             "type": None,
         }
 
     for t in env.get("targets", []):
+        # Handle both x/y and pos formats
+        if "x" in t and "y" in t:
+            tx, ty = float(t["x"]), float(t["y"])
+        elif "pos" in t:
+            tx, ty = float(t["pos"][0]), float(t["pos"][1])
+        else:
+            continue
         id_map[str(t["id"])] = {
-            "x": float(t["x"]),
-            "y": float(t["y"]),
+            "x": tx,
+            "y": ty,
             "kind": "target",
             "priority": int(t.get("priority", 0)),
             "type": str(t.get("type", "a")).lower(),
@@ -740,10 +754,6 @@ def receive_environment(payload: Dict[str, Any]):
     global _current_env, _current_run_id, _current_env_version_id
 
 
-    print("✅ HIT POST /api/environment", flush=True)
-    print("✅ SUPABASE_URL set:", bool(os.environ.get("SUPABASE_URL")), flush=True)
-    print("✅ SUPABASE_KEY set:", bool(os.environ.get("SUPABASE_KEY")), flush=True)
-    print("✅ payload keys:", list(payload.keys()), flush=True)
 
 
     env = payload.get("environment")
@@ -753,7 +763,6 @@ def receive_environment(payload: Dict[str, Any]):
     # ---- Update in-memory + on-disk env (existing behavior) ----
     _current_env = env
     ENV_PATH.write_text(json.dumps(env, indent=2))
-    print("📥 [ISR_WEB] Environment updated", flush=True)
 
     # ---- Supabase: ensure a run exists ----
     # We create ONE run per session (until you explicitly reset/close it).
@@ -778,7 +787,6 @@ def receive_environment(payload: Dict[str, Any]):
             reason=event_type.lower(),   # "env_imported" or "env_edited"
         )
 
-        print(f"✅ create_env_version returned: {_current_env_version_id}", flush=True)
 
         # Log env event with lightweight summary (avoid storing huge payload twice)
         try:
@@ -801,17 +809,13 @@ def receive_environment(payload: Dict[str, Any]):
     # ---- Existing behavior: matrix recompute ----
     sams = env.get("sams", [])
     if sams:
-        print("⏳ Recalculating SAM-aware distance matrix...", flush=True)
         try:
             matrix_data = prepare_distance_matrix(env, buffer=0.0)
             num_waypoints = len(matrix_data.get("labels", []))
             num_paths = len(matrix_data.get("paths", {}))
-            print(f"✅ Matrix ready: {num_waypoints} waypoints, {num_paths} SAM-avoiding paths", flush=True)
         except Exception as e:
-            print(f"⚠️ Matrix calculation failed: {e}", flush=True)
     else:
         clear_cached_matrix()
-        print("✅ No SAMs - using direct distances", flush=True)
 
     return {
         "success": True,
@@ -919,9 +923,7 @@ def export_environment():
             "cache_hit": cached_matrix.get("cache_hit", False),
         }
 
-    print(f"📤 [ISR_WEB] Exporting environment as {filename}", flush=True)
     if "distance_matrix_id" in export_data:
-        print(f"   📎 Matrix ref: {export_data['distance_matrix_id'][:8]}...", flush=True)
 
     # Return JSON response with Content-Disposition header to force filename
     return JSONResponse(
@@ -1018,7 +1020,6 @@ def solve(req: SolveRequest):
     )
     if mismatch_reason:
         # Treat as new solve; do not attempt to "continue" a mismatched mission_id
-        print(f"[solve] mission continuity broken ({mismatch_reason}); starting new solve", flush=True)
         mission_id = f"m_{uuid4().hex}"
         continuity = False
     elif not mission_id:
@@ -1035,7 +1036,6 @@ def solve(req: SolveRequest):
 
     # Snapshot env used for this solve
     if _current_run_id is not None:
-        print("✅ About to create_env_version. run_id =", _current_run_id, flush=True)
         try:
             _current_env_version_id = create_env_version(
                 run_id=_current_run_id,
@@ -1043,9 +1043,7 @@ def solve(req: SolveRequest):
                 source="human",
                 reason="solve",
             )
-            print("✅ create_env_version returned:", _current_env_version_id, flush=True)
         except Exception as e:
-            print("❌ create_env_version raised:", repr(e), flush=True)
             raise
 
     # allocation_strategy = req.allocation_strategy  # TODO: integrate with solve_mission
@@ -1099,7 +1097,6 @@ def solve(req: SolveRequest):
                 "sequence": sequences.get(d, ""),
             }
 
-        print("✅ About to create_plan. env_version_id =", _current_env_version_id, flush=True)
 
         try:
             _current_plan_id = create_plan(
@@ -1112,10 +1109,8 @@ def solve(req: SolveRequest):
                 metrics=metrics,
                 notes="draft from /api/solve",
             )
-            print("✅ create_plan returned:", _current_plan_id, flush=True)
 
         except Exception as e:
-            print("❌ create_plan raised:", repr(e), flush=True)
             raise
 
     # Step 3 guards: verify output matches env/constraints (basic)
@@ -1215,7 +1210,6 @@ def solve_with_allocation(req: SolveWithAllocationRequest):
         req.mission_id, env, drone_configs
     )
     if mismatch_reason:
-        print(f"[solve_with_allocation] mission continuity broken ({mismatch_reason}); starting new solve", flush=True)
         mission_id = f"m_{uuid4().hex}"
         continuity = False
     elif not mission_id:
@@ -1260,17 +1254,24 @@ def solve_with_allocation(req: SolveWithAllocationRequest):
         original_targets = env_to_solve.get("targets", [])
         env_to_solve["targets"] = [t for t in original_targets if t.get("id") not in visited_set]
         label = "CHECKPOINT REPLAN" if req.is_checkpoint_replan else "SOLVE WITH VISITED"
-        print(f"🔄 {label}: Filtered {len(visited_set)} visited targets, {len(env_to_solve['targets'])} remaining", flush=True)
-        print(f"   Visited: {req.visited_targets}", flush=True)
-        print(f"   Synthetic starts: {list(env_to_solve.get('synthetic_starts', {}).keys())}", flush=True)
 
-    result = solve_mission_with_allocation(
-        env=env_to_solve,
-        drone_configs=req.drone_configs,
-        allocation_strategy=req.allocation_strategy,
-        use_sam_aware_distances=req.use_sam_aware_distances,
-        post_optimize=False, # req.post_optimize,
-    )
+    try:
+        result = solve_mission_with_allocation(
+            env=env_to_solve,
+            drone_configs=req.drone_configs,
+            allocation_strategy=req.allocation_strategy,
+            use_sam_aware_distances=req.use_sam_aware_distances,
+            post_optimize=False, # req.post_optimize,
+        )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return SolveResponse(
+            success=False, routes={}, sequences={}, wrapped_polygons=None,
+            allocations=None, distance_matrix=None,
+            mission_id=mission_id, env_hash=env_hash, continuity=continuity,
+            errors=[f"Solver error: {str(e)}"]
+        )
 
     routes: Dict[str, Any] = {}
     sequences: Dict[str, str] = {}
@@ -1314,7 +1315,6 @@ def solve_with_allocation(req: SolveWithAllocationRequest):
                 max_x = max(v[0] for v in poly)
                 min_y = min(v[1] for v in poly)
                 max_y = max(v[1] for v in poly)
-                print(f"📐 Frontend polygon {i}: bounds X=[{min_x:.1f}, {max_x:.1f}], Y=[{min_y:.1f}, {max_y:.1f}]", flush=True)
 
     # Extract allocations from result
     allocations = result.get("allocations", {})
@@ -1539,7 +1539,6 @@ def api_coverage_stats(req: CoverageStatsRequest):
 
 @app.post("/api/agents/chat", response_model=AgentChatResponse)
 async def agent_chat(req: AgentChatRequest):
-    print(">>> /api/agents/chat (v3 endpoint) HIT <<<", flush=True)
     """
     ISR Agent endpoint using Claude with tool-calling.
 
@@ -1730,7 +1729,6 @@ async def agent_chat_v4(req: AgentChatRequest):
     - If mission_id is provided: load existing mission state and allow
       question-only interaction (no recompute unless the request asks for it).
     """
-    print(">>> /api/agents/chat-v4 (v4 endpoint) HIT <<<", flush=True)
     t0 = time.time()
 
     try:
@@ -1747,7 +1745,6 @@ async def agent_chat_v4(req: AgentChatRequest):
         # This enables follow-up requests like "move T5 to D1" to work
         if req.existing_solution:
             existing_solution = req.existing_solution
-            print(f"[v3] Using existing_solution from request: {len(existing_solution.get('routes', {}))} routes", flush=True)
         # Priority 2: Load from mission store by mission_id
         elif mission_id and mission_id in MISSION_STORE:
             mission = MISSION_STORE[mission_id]
@@ -1759,10 +1756,8 @@ async def agent_chat_v4(req: AgentChatRequest):
             stored_cfg_hash = mission.get("cfg_hash")
 
             if stored_env_hash and stored_env_hash != incoming_env_hash:
-                print(f"[v3] mission_id={mission_id} env_hash mismatch; ignoring stored solution and treating as new mission", flush=True)
                 mission_id = None
             elif stored_cfg_hash and stored_cfg_hash != incoming_cfg_hash:
-                print(f"[v3] mission_id={mission_id} cfg_hash mismatch; ignoring stored solution and treating as new mission", flush=True)
                 mission_id = None
             else:
                 # Use incoming env if provided, fallback to stored env
@@ -1775,9 +1770,7 @@ async def agent_chat_v4(req: AgentChatRequest):
                     "routes": mission.get("routes") or {},
                     "allocation": mission.get("allocation") or {},
                 }
-                print(f"[v3] Loaded existing mission {mission_id} from store", flush=True)
         elif mission_id:
-            print(f"[v3] mission_id={mission_id} not found; treating as new mission", flush=True)
             mission_id = None
 
         # -------------------------------
@@ -1793,17 +1786,12 @@ async def agent_chat_v4(req: AgentChatRequest):
         sams = env.get("sams", [])
         if sams:
             try:
-                print(f"[v3] Pre-computing SAM-aware distance matrix...", flush=True)
                 sam_matrix = calculate_sam_aware_matrix(env, use_supabase_cache=True)
                 env_hash = sam_matrix.get("env_hash")
                 routing_model_hash = sam_matrix.get("routing_model_hash")
                 distance_matrix_id = sam_matrix.get("distance_matrix_id")
                 cache_hit = sam_matrix.get("cache_hit", False)
-                print(f"[v3] Matrix ready: env_hash={env_hash[:8] if env_hash else 'N/A'}..., "
-                      f"matrix_id={distance_matrix_id[:8] if distance_matrix_id else 'N/A'}..., "
-                      f"cache_hit={cache_hit}", flush=True)
             except Exception as e:
-                print(f"[v3] Warning: SAM matrix pre-compute failed: {e}", flush=True)
 
         # -------------------------------
         # 3. Create agent_run row BEFORE calling v3 (Supabase-first)
@@ -1920,9 +1908,7 @@ async def agent_chat_v4(req: AgentChatRequest):
         if raw_routes:
             if not mission_id:
                 mission_id = f"m_{uuid4().hex}"
-                print(f"[v3] Creating new mission {mission_id}", flush=True)
             else:
-                print(f"[v3] Updating mission {mission_id}", flush=True)
 
             MISSION_STORE[mission_id] = {
                 "env": env,
@@ -2073,23 +2059,15 @@ async def api_trajectory_swap_optimize(req: TrajectorySwapRequest):
     (line between prev/next waypoints). If another capable drone's trajectory
     passes closer, moves the target to that drone.
     """
-    print("\n" + "="*60)
-    print("📥 TRAJECTORY SWAP ENDPOINT CALLED")
-    print(f"   Received routes: {list(req.solution.get('routes', {}).keys())}")
-    print("="*60)
-    print(f"   debug flag: {bool(getattr(req, 'debug', False))}")
 
     # Use distance matrix from solution if available, else fall back to cache
     distance_matrix = req.solution.get('distance_matrix')
     if distance_matrix:
-        print(f"   Using distance matrix from solution with {len(distance_matrix.get('labels', []))} labels")
     else:
         # Fall back to cached matrix
         distance_matrix = get_current_matrix()
         if distance_matrix:
-            print(f"   Using cached distance matrix with {len(distance_matrix.get('labels', []))} labels")
         else:
-            print("   WARNING: No distance matrix available!")
 
     try:
         # Allow client to request server-side auto-iteration / regeneration.
@@ -2109,21 +2087,13 @@ async def api_trajectory_swap_optimize(req: TrajectorySwapRequest):
 
         # Log swaps made
         swaps = result.get("swaps_made", [])
-        print(f"\n🔄 TRAJECTORY SWAP OPTIMIZATION: Returning {len(swaps)} swaps to frontend")
         if swaps:
-            print(f"   Total swaps made: {len(swaps)}")
             for swap in swaps:
-                print(f"   {swap['target']}: Drone {swap['from_drone']} → Drone {swap['to_drone']} "
-                      f"(remove {swap.get('remove_delta', 0):.1f} → insert {swap.get('insert_delta', 0):.1f}, "
-                      f"savings {swap.get('savings', 0):.1f})")
         else:
-            print("   No beneficial swaps found")
 
         # Debug: Print route changes
-        print(f"\n📋 Routes being returned to frontend:")
         for did, route_data in result.get("routes", {}).items():
             route = route_data.get("route", [])
-            print(f"   D{did}: {' -> '.join(str(wp) for wp in route)}")
 
         return {
             "success": True,
@@ -2150,10 +2120,6 @@ async def api_crossing_removal_optimize(req: TrajectorySwapRequest):
     Scans each drone's route for segment crossings and reverses the
     middle portion to eliminate them.
     """
-    print("\n" + "="*60)
-    print("📥 CROSSING REMOVAL ENDPOINT CALLED")
-    print(f"   Received routes: {list(req.solution.get('routes', {}).keys())}")
-    print("="*60)
 
     try:
         result = crossing_removal_optimize(
@@ -2165,11 +2131,8 @@ async def api_crossing_removal_optimize(req: TrajectorySwapRequest):
         # Log fixes made
         fixes = result.get("fixes_made", [])
         if fixes:
-            print(f"\n✂️ CROSSING REMOVAL: {len(fixes)} crossings fixed")
             for fix in fixes:
-                print(f"   Drone {fix['drone']}: reversed segment {fix['segment_i']}-{fix['segment_j']} (pass {fix['pass']})")
         else:
-            print("\n✂️ CROSSING REMOVAL: No crossings found")
 
         return {
             "success": True,
@@ -2202,29 +2165,20 @@ async def api_insert_missed_optimize(req: InsertMissedRequest):
     into drone routes that have remaining fuel capacity. Targets are inserted
     at optimal positions to minimize additional fuel consumption.
     """
-    print("\n" + "="*80, flush=True)
-    print("📥 INSERT MISSED ENDPOINT CALLED", flush=True)
-    print(f"   Received routes: {list(req.solution.get('routes', {}).keys())}", flush=True)
 
     # Log BEFORE routes
-    print("\n🔍 ROUTES BEFORE INSERT MISSED:", flush=True)
     for did in sorted(req.solution.get('routes', {}).keys()):
         route = req.solution['routes'][did].get('route', [])
-        print(f"   D{did}: {route} (length={len(route)})", flush=True)
 
-    print("="*80, flush=True)
 
     # Use distance matrix from solution if available, else fall back to cache
     distance_matrix = req.solution.get('distance_matrix')
     if distance_matrix:
-        print(f"   Using distance matrix from solution with {len(distance_matrix.get('labels', []))} labels")
     else:
         # Fall back to cached matrix
         distance_matrix = get_current_matrix()
         if distance_matrix:
-            print(f"   Using cached distance matrix with {len(distance_matrix.get('labels', []))} labels")
         else:
-            print("   WARNING: No distance matrix available!")
 
     try:
         result = post_optimize_solution(
@@ -2249,20 +2203,14 @@ async def api_insert_missed_optimize(req: InsertMissedRequest):
                     insertions.append({"target": tid, "drone": did})
 
         # Log AFTER routes
-        print("\n✅ ROUTES AFTER INSERT MISSED:", flush=True)
         for did in sorted(result.get('routes', {}).keys()):
             route = result['routes'][did].get('route', [])
             complete = "COMPLETE" if (route and route[0].startswith('A') and route[-1].startswith('A')) else "INCOMPLETE"
-            print(f"   D{did}: {route} (length={len(route)}, {complete})", flush=True)
 
         if insertions:
-            print(f"\n➕ INSERT MISSED OPTIMIZATION: {len(insertions)} targets inserted", flush=True)
             for ins in insertions:
-                print(f"   {ins['target']} → Drone {ins['drone']}", flush=True)
         else:
-            print("\n➕ INSERT MISSED OPTIMIZATION: No insertions possible (all targets visited or fuel exhausted)", flush=True)
 
-        print("="*80 + "\n", flush=True)
 
         return {
             "success": True,

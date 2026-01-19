@@ -64,16 +64,11 @@ OrienteeringSolverInterface = None
 try:
     # Docker path: /app/webapp/editor/solver/...
     from webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
-    print("✅ OrienteeringSolverInterface loaded (Docker path)")
 except ImportError as e:
-    print(f"⚠️ Docker import failed: {e}")
     try:
         # Local development path: isr_web/webapp/editor/solver/...
         from isr_web.webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
-        print("✅ OrienteeringSolverInterface loaded (local path)")
     except ImportError as e2:
-        print(f"⚠️ Local import failed: {e2}")
-        print("❌ OrienteeringSolverInterface not available - orienteering features disabled")
 
 from ..solver.target_allocator import (
     allocate_targets as _allocate_targets_impl,
@@ -801,8 +796,6 @@ def solve_all_routes() -> str:
     user_request = state.get("user_request", "")
 
     # Always log the user_request for debugging
-    print(f"🔍 [ROUTER] solve_all_routes called", file=sys.stderr)
-    print(f"🔍 [ROUTER] user_request: '{user_request[:100]}...' (len={len(user_request)})" if user_request else "🔍 [ROUTER] user_request is EMPTY", file=sys.stderr)
 
     if not allocation:
         return "ERROR: No allocation found. Allocation must happen first."
@@ -816,13 +809,9 @@ def solve_all_routes() -> str:
         try:
             parse_result = parse_constraints(user_request)
             sequencing_hints = parse_result.program.sequencing_hints or {}
-            print(f"🔍 [ROUTER] parse_constraints returned: sequencing_hints={sequencing_hints}", file=sys.stderr)
             if sequencing_hints:
-                print(f"🔒 [ROUTER] Sequencing hints from user request: {sequencing_hints}", file=sys.stderr)
             else:
-                print(f"⚠️ [ROUTER] No sequencing hints parsed from: '{user_request[:80]}...'", file=sys.stderr)
         except Exception as e:
-            print(f"⚠️ [ROUTER] Failed to parse constraints: {e}", file=sys.stderr)
             import traceback
             traceback.print_exc(file=sys.stderr)
 
@@ -859,21 +848,16 @@ def solve_all_routes() -> str:
     priority_threshold = sequencing_hints.get("start_with", {}).get("priority_gte")
     if priority_threshold:
         qualifying_targets = [t.get("id", t.get("label")) for t in targets if t.get("priority", 5) >= priority_threshold]
-        print(f"🔍 [ROUTER] Constraint: start_with priority >= {priority_threshold}", file=sys.stderr)
-        print(f"🔍 [ROUTER] Targets with priority >= {priority_threshold}: {qualifying_targets if qualifying_targets else 'NONE!'}", file=sys.stderr)
         if not qualifying_targets:
-            print(f"⚠️ [ROUTER] WARNING: No targets meet the priority threshold ({priority_threshold}). Constraint cannot be satisfied!", file=sys.stderr)
             # Log all target priorities for debugging
             priority_summary = {}
             for t in targets:
                 p = t.get("priority", 5)
                 priority_summary[p] = priority_summary.get(p, 0) + 1
-            print(f"🔍 [ROUTER] Target priority distribution: {dict(sorted(priority_summary.items(), reverse=True))}", file=sys.stderr)
     else:
         # Just log if there are any high priority targets
         priority_10_targets = [t.get("id", t.get("label")) for t in targets if t.get("priority", 5) >= 10]
         if priority_10_targets:
-            print(f"🔍 [ROUTER] Priority 10+ targets in env: {priority_10_targets}", file=sys.stderr)
 
     solver = get_solver()
     results = {}
@@ -965,11 +949,9 @@ def solve_all_routes() -> str:
                             if t_priority >= priority_gte:
                                 qualifying_target = wp
                                 qualifying_idx = i
-                                print(f"🔍 [ROUTER] D{drone_id}: Found qualifying target {wp} (priority={t_priority}) at idx {i}", file=sys.stderr)
                                 break
 
                     if not qualifying_target:
-                        print(f"⚠️ [ROUTER] D{drone_id}: NO target with priority >= {priority_gte} in route {route}", file=sys.stderr)
 
                     # If first target doesn't meet threshold but another does, reorder
                     if qualifying_target and qualifying_idx and qualifying_idx > 1:
@@ -981,7 +963,6 @@ def solve_all_routes() -> str:
                                 new_route.append(wp)
                         new_route.append(route[-1])  # End airport
                         route = new_route
-                        print(f"🔒 [ROUTER] D{drone_id}: Reordered route to start with {qualifying_target} (priority >= {priority_gte})", file=sys.stderr)
 
                     # Check if first target now meets the constraint
                     if len(route) > 1 and route[1] in target_map:
@@ -989,7 +970,6 @@ def solve_all_routes() -> str:
                         if t_priority >= priority_gte:
                             # Freeze segment 0 (start -> first target)
                             frozen_segments = [0]
-                            print(f"🔒 [ROUTER] D{drone_id}: Froze segment 0 (start_with constraint)", file=sys.stderr)
 
             return {
                 "drone_id": drone_id,
@@ -1035,10 +1015,8 @@ def solve_all_routes() -> str:
             "frozen_segments": r.get("frozen_segments", []),  # CRITICAL: Preserve frozen segments
         }
     state["routes"] = routes
-    print(f"📍 [ROUTER TOOL] Stored routes in state: {list(routes.keys())}", file=sys.stderr)
     frozen_info = {did: routes[did].get("frozen_segments", []) for did in routes if routes[did].get("frozen_segments")}
     if frozen_info:
-        print(f"🔒 [ROUTER TOOL] Frozen segments: {frozen_info}", file=sys.stderr)
     sys.stderr.flush()
 
     # Format output
@@ -1944,7 +1922,6 @@ def create_multi_agent_workflow():
 
     def coordinator_node(state: MissionState) -> Dict[str, Any]:
         """Coordinator analyzes request and starts workflow."""
-        print("\n🎯 [COORDINATOR] Analyzing mission request...", file=sys.stderr)
         sys.stderr.flush()
 
         # Set global state for tool access
@@ -1967,7 +1944,6 @@ def create_multi_agent_workflow():
 
     def allocator_node(state: MissionState) -> Dict[str, Any]:
         """Allocator distributes targets to drones."""
-        print("\n🎯 [ALLOCATOR] Distributing targets...", file=sys.stderr)
         sys.stderr.flush()
 
         set_state(state)
@@ -1988,7 +1964,6 @@ def create_multi_agent_workflow():
 
     def router_node(state: MissionState) -> Dict[str, Any]:
         """Router computes optimal routes."""
-        print("\n🎯 [ROUTER] Computing optimal routes...", file=sys.stderr)
         sys.stderr.flush()
 
         set_state(state)
@@ -2009,7 +1984,6 @@ def create_multi_agent_workflow():
 
     def validator_node(state: MissionState) -> Dict[str, Any]:
         """Validator checks constraints."""
-        print("\n🎯 [VALIDATOR] Checking constraints...", file=sys.stderr)
         sys.stderr.flush()
 
         set_state(state)
@@ -2030,7 +2004,6 @@ def create_multi_agent_workflow():
 
     def optimizer_node(state: MissionState) -> Dict[str, Any]:
         """Optimizer improves solution with post-optimization."""
-        print("\n🎯 [OPTIMIZER] Running post-optimization...", file=sys.stderr)
         sys.stderr.flush()
 
         set_state(state)
@@ -2068,10 +2041,8 @@ def create_multi_agent_workflow():
             if _current_state:
                 if _current_state.get("allocation") is not None:
                     state_updates["allocation"] = _current_state["allocation"]
-                    print(f"📍 [{name}] Propagating allocation: {list(_current_state['allocation'].keys())}", file=sys.stderr)
                 if _current_state.get("routes") is not None:
                     state_updates["routes"] = _current_state["routes"]
-                    print(f"📍 [{name}] Propagating routes: {list(_current_state['routes'].keys())}", file=sys.stderr)
                 if _current_state.get("validation_results") is not None:
                     state_updates["validation_results"] = _current_state["validation_results"]
                 sys.stderr.flush()
@@ -2277,7 +2248,6 @@ def run_isr_agent(
 
     # Use pre-computed matrix if provided, otherwise compute
     if sam_matrix and sam_matrix.get("matrix"):
-        print("🎯 Using pre-computed SAM-aware distance matrix...", file=sys.stderr)
         labels = sam_matrix.get("labels", [])
         matrix = sam_matrix.get("matrix", [])
         dist_matrix = {}
@@ -2289,7 +2259,6 @@ def run_isr_agent(
         # Compute distance matrix
         sams = env.get("sams", [])
         if sams:
-            print("🎯 Computing SAM-aware distance matrix...", file=sys.stderr)
             dist_data = calculate_sam_aware_matrix(env)
             # Convert to dict format
             labels = dist_data.get("labels", [])
@@ -2325,12 +2294,10 @@ def run_isr_agent(
         prev_routes = existing_solution.get("routes")
         if prev_routes:
             initial_state["routes"] = prev_routes
-            print(f"🔄 [V3] Seeded state with existing routes: {list(prev_routes.keys())}", file=sys.stderr)
 
         prev_allocation = existing_solution.get("allocation")
         if prev_allocation:
             initial_state["allocation"] = prev_allocation
-            print(f"🔄 [V3] Seeded state with existing allocation", file=sys.stderr)
 
     # Get workflow
     workflow = get_workflow()
@@ -2338,9 +2305,6 @@ def run_isr_agent(
     # Run
     config = {"recursion_limit": 50}
 
-    print(f"\n{'='*60}", file=sys.stderr)
-    print(f"🚀 MULTI-AGENT V3 WORKFLOW STARTED", file=sys.stderr)
-    print(f"{'='*60}", file=sys.stderr)
     sys.stderr.flush()
 
     final_state = None
@@ -2350,13 +2314,9 @@ def run_isr_agent(
         step_count += 1
         for node_name, node_output in step.items():
             phase = node_output.get("phase", "?") if isinstance(node_output, dict) else "?"
-            print(f"[Step {step_count}] Node: {node_name} | Phase: {phase}", file=sys.stderr)
             sys.stderr.flush()
         final_state = step
 
-    print(f"{'='*60}", file=sys.stderr)
-    print(f"🏁 WORKFLOW COMPLETED after {step_count} steps", file=sys.stderr)
-    print(f"{'='*60}\n", file=sys.stderr)
     sys.stderr.flush()
 
     # Extract results from final state
@@ -2413,13 +2373,11 @@ def _extract_results(
 
     # Get global state (tools may have updated it)
     global _current_state
-    print(f"📍 [EXTRACT] _current_state routes: {_current_state.get('routes') if _current_state else 'None'}", file=sys.stderr)
     if _current_state:
         state = _current_state
 
     # Extract routes - handle None explicitly
     routes = state.get("routes") or {}
-    print(f"📍 [EXTRACT] Final routes: {list(routes.keys()) if routes else 'empty'}", file=sys.stderr)
     sys.stderr.flush()
     allocation = state.get("allocation") or {}
 

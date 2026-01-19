@@ -37,9 +37,7 @@ try:
     from path_planning_core.boundary_navigation import plan_path as boundary_plan_path
     from path_planning_core.sam_wrapping import wrap_sams
     HAS_SAM_NAVIGATION = True
-    print("✅ SAM navigation (boundary_navigation) loaded successfully", flush=True)
 except ImportError as e:
-    print(f"⚠️ SAM navigation modules not available: {e}", flush=True)
     HAS_SAM_NAVIGATION = False
 
 
@@ -132,7 +130,6 @@ class SAMDistanceMatrixCalculator:
 
         # --- DEBUG: show SAMs (brief) ---
         if normalized_sams:
-            print(f"📐 [DEBUG] {len(normalized_sams)} SAM circles in distance-matrix calculator", flush=True)
         # --- END DEBUG ---
 
         for t in targets:
@@ -147,9 +144,6 @@ class SAMDistanceMatrixCalculator:
                 distance = math.sqrt((tx - sam_x)**2 + (ty - sam_y)**2)
                 if distance < sam_range:
                     excluded_inside_boundary.append(t["id"])
-                    print(f"⚠️ Target {t['id']} at ({tx:.1f}, {ty:.1f}) is INSIDE SAM circle "
-                          f"(center=({sam_x:.1f},{sam_y:.1f}), range={sam_range:.1f}, dist={distance:.1f}) "
-                          f"- excluding from mission", flush=True)
                     should_exclude = True
                     break
 
@@ -158,8 +152,6 @@ class SAMDistanceMatrixCalculator:
                 for polygon in polygon_boundaries:
                     if point_in_polygon((tx, ty), polygon):
                         excluded_inside_boundary.append(t["id"])
-                        print(f"⚠️ Target {t['id']} at ({tx:.1f}, {ty:.1f}) is INSIDE polygon boundary "
-                              f"- excluding from mission", flush=True)
                         should_exclude = True
                         break
 
@@ -253,11 +245,6 @@ class SAMDistanceMatrixCalculator:
         all_excluded = excluded_inside_boundary + unreachable_targets
 
         if all_excluded:
-            print(
-                f"📊 Excluded {len(all_excluded)} targets from mission: {all_excluded} "
-                f"(inside boundary: {excluded_inside_boundary}, unreachable: {unreachable_targets})",
-                flush=True,
-            )
 
         # Store wrapped polygons for visualization
         wrapped_polygon_lists = []
@@ -464,7 +451,6 @@ class SAMDistanceMatrixCalculator:
             return None, float('inf'), "no_path_found"
 
         except Exception as e:
-            print(f"⚠️ SAM path planning error: {e}")
             return None, float('inf'), f"error: {str(e)}"
 
 
@@ -496,8 +482,38 @@ def calculate_sam_aware_matrix(
     """
     import time
 
-    airports = list(env.get("airports", []))
-    targets = env.get("targets", [])
+    # Normalize airports to x/y format (handle both x/y and pos formats)
+    airports = []
+    for a in env.get("airports", []):
+        if "x" in a and "y" in a:
+            airports.append(a)
+        elif "pos" in a:
+            airports.append({
+                "id": a["id"],
+                "x": float(a["pos"][0]),
+                "y": float(a["pos"][1]),
+                "is_synthetic": a.get("is_synthetic", False),
+            })
+        else:
+            raise ValueError(f"Airport {a.get('id')} missing position (need x/y or pos)")
+
+    # Normalize targets to x/y format (handle both x/y and pos formats)
+    targets = []
+    for t in env.get("targets", []):
+        if "x" in t and "y" in t:
+            targets.append(t)
+        elif "pos" in t:
+            targets.append({
+                "id": t["id"],
+                "x": float(t["pos"][0]),
+                "y": float(t["pos"][1]),
+                "priority": t.get("priority", 5),
+                "type": t.get("type", "a"),
+                "assigned_drone": t.get("assigned_drone"),
+            })
+        else:
+            raise ValueError(f"Target {t.get('id')} missing position (need x/y or pos)")
+
     sams = env.get("sams", [])
 
     # Add synthetic start nodes (for checkpoint replanning)
@@ -509,7 +525,6 @@ def calculate_sam_aware_matrix(
             "y": float(node_data["y"]),
             "is_synthetic": True,
         })
-        print(f"📍 [SAM Matrix] Added synthetic start: {node_id} at ({node_data['x']:.1f}, {node_data['y']:.1f})", flush=True)
 
     # Try Supabase cache first
     if use_supabase_cache:
@@ -531,7 +546,6 @@ def calculate_sam_aware_matrix(
             # Check Supabase cache
             cached = get_supabase_cached_matrix(env_hash, routing_model_hash)
             if cached is not None:
-                print(f"✅ [SAM Matrix] Using Supabase cached matrix (id={cached['id'][:8]}...)", flush=True)
                 # Convert from Supabase format back to our internal format
                 result = {
                     "matrix": cached["matrix"],
@@ -570,9 +584,7 @@ def calculate_sam_aware_matrix(
                 return result
 
         except ImportError:
-            print("⚠️ [SAM Matrix] Supabase caching unavailable - using local only", flush=True)
         except Exception as e:
-            print(f"⚠️ [SAM Matrix] Supabase cache error: {e}", flush=True)
 
     # Calculate fresh matrix
     start_time = time.time()
@@ -612,12 +624,10 @@ def calculate_sam_aware_matrix(
             )
             if matrix_id:
                 result["distance_matrix_id"] = matrix_id
-                print(f"✅ [SAM Matrix] Cached in Supabase (id={matrix_id[:8]}..., {computation_ms}ms)", flush=True)
 
     except ImportError:
         pass
     except Exception as e:
-        print(f"⚠️ [SAM Matrix] Failed to cache in Supabase: {e}", flush=True)
 
     return result
 

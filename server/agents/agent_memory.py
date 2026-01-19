@@ -66,7 +66,6 @@ def _load_memory_supabase() -> List[Dict[str, Any]]:
             for row in response.data
         ]
     except Exception as e:
-        print(f"Error loading memories from Supabase: {e}")
         return []
 
 
@@ -91,7 +90,6 @@ def _add_memory_supabase(content: str, category: str) -> Optional[Dict[str, Any]
                 "timestamp": row["created_at"],
             }
     except Exception as e:
-        print(f"Error adding memory to Supabase: {e}")
     return None
 
 
@@ -110,7 +108,6 @@ def _clear_memory_supabase() -> int:
         client.table("agent_memories").delete().neq("id", 0).execute()
         return count
     except Exception as e:
-        print(f"Error clearing memories from Supabase: {e}")
         return 0
 
 
@@ -124,7 +121,6 @@ def _delete_memory_supabase(memory_id: int) -> bool:
         response = client.table("agent_memories").delete().eq("id", memory_id).execute()
         return len(response.data) > 0
     except Exception as e:
-        print(f"Error deleting memory from Supabase: {e}")
         return False
 
 
