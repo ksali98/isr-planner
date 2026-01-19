@@ -16,6 +16,7 @@ Core Principles:
 
 Architecture:
 - STRATEGIST: Analyzes request, determines mode (optimize vs command), identifies constraints
+- MISSION_PLANNER: Orchestrates complex missions (segmentation, constraints, multi-phase)
 - ALLOCATOR: Reasons about target-drone assignments with explanations
 - ROUTE_OPTIMIZER: Computes routes, checks feasibility, reports trade-offs
 - CRITIC: Reviews solution quality, suggests improvements
@@ -77,8 +78,29 @@ from ..solver.target_allocator import (
     clear_allocator_matrix,
 )
 from ..solver.sam_distance_matrix import calculate_sam_aware_matrix
-from ..solver.post_optimizer import post_optimize_solution
+from ..solver.post_optimizer import (
+    post_optimize_solution,
+    trajectory_swap_optimize,
+    crossing_removal_optimize,
+)
 from ..solver.trajectory_planner import ISRTrajectoryPlanner
+
+# Import mission orchestration tools
+from .mission_orchestration_tools import (
+    MissionOrchestrator,
+    inspect_mission_state,
+    get_mission_summary,
+    get_unvisited_targets,
+    solve_full_mission,
+    solve_single_drone,
+    apply_insert_missed,
+    apply_swap_closer,
+    create_segment_at_checkpoint,
+    freeze_segment_at_checkpoint,
+    continue_from_checkpoint,
+    add_fuel_reserve_constraint,
+    add_loiter_constraint,
+)
 
 # Import policy rules from mission_ledger for Learning v1
 try:
@@ -138,10 +160,22 @@ class MissionState(TypedDict):
 
     # Agent reasoning outputs
     strategy_analysis: Optional[str]  # Strategist's analysis
+    mission_plan: Optional[str]  # Mission Planner's orchestration plan
     allocation_reasoning: Optional[str]  # Allocator's reasoning
     route_analysis: Optional[str]  # Router's analysis
+    optimizer_analysis: Optional[str]  # Optimizer's analysis
     critic_review: Optional[str]  # Critic's review
     suggestions: Optional[List[str]]  # Improvement suggestions
+
+    # Mission orchestration fields
+    requires_segmentation: Optional[bool]  # Multi-segment mission needed?
+    segments: Optional[List[Dict[str, Any]]]  # Segment definitions
+    constraint_operations: Optional[List[Dict[str, Any]]]  # Constraint ops to apply
+
+    # Retry counters
+    allocator_retry_count: Optional[int]
+    router_retry_count: Optional[int]
+    optimizer_retry_count: Optional[int]
 
     # Solution data
     allocation: Optional[Dict[str, List[str]]]
@@ -764,6 +798,629 @@ Defaulting to optimization mode due to API failure.
         "request_type": request_type,
         "llm_success": llm_success,
         "llm_error": error_message,
+    }
+
+
+# ============================================================================
+# MISSION PLANNER AGENT - Orchestrates complex missions
+# ============================================================================
+
+MISSION_PLANNER_PROMPT = """You are the MISSION PLANNER agent in an ISR mission planning system.
+
+ROLE
+Orchestrate complex mission scenarios that require:
+- Multi-segment missions (checkpoint replanning, drone losses, phase transitions)
+- Constraint operations (fuel reserves, loiter times, trajectory filtering)
+- Special mission patterns (skip targets, prioritize certain types, etc.)
+
+You have access to powerful orchestration tools that can:
+1. Create mission segments with frozen trajectories
+2. Continue from checkpoints with new drone states
+3. Apply fuel reserve constraints
+4. Add loiter time at specific targets
+5. Inspect and manipulate mission state
+
+WHEN TO ACT
+You should orchestrate when the user request involves:
+- "After X steps/km, drone Y is lost/lands" → Multi-segment with drone removal
+- "Reserve 25% fuel" or "land with X fuel remaining" → Fuel constraint
+- "Loiter N steps at target type T" → Loiter constraint
+- "Skip every other target" → Trajectory filtering (post-solve)
+- "First solve for drones 1-3, then continue with drone 4" → Phased planning
+- Multiple checkpoints or mission phases
+
+WHEN NOT TO ACT
+For simple single-phase missions, set requires_segmentation=false and let the 
+normal workflow (Allocator → Router) handle it.
+
+OUTPUT FORMAT (STRICT JSON)
+{
+  "requires_segmentation": true|false,
+  "orchestration_plan": "brief description of multi-phase approach",
+  "segments": [
+    {
+      "name": "Phase 1",
+      "description": "Initial patrol with all drones",
+      "drone_ids": ["1", "2", "3"],
+      "constraints": ["fuel_reserve:25%"],
+      "checkpoint_km": 150
+    },
+    {
+      "name": "Phase 2", 
+      "description": "Continue after drone 2 lands",
+      "drone_ids": ["1", "3"],
+      "synthetic_starts": {"1": "T5", "3": "T7"},
+      "constraints": []
+    }
+  ],
+  "constraint_operations": [
+    {"type": "fuel_reserve", "percentage": 25, "applies_to": "all"},
+    {"type": "loiter", "target_type": "C", "steps": 20}
+  ],
+  "skip_to_allocator": true|false
+}
+
+If requires_segmentation is false, you can set skip_to_allocator=true to proceed 
+directly to allocation without additional orchestration.
+
+Be explicit about segment boundaries, drone state changes, and constraint timing.
+"""
+
+
+def mission_planner_node(state: MissionState) -> Dict[str, Any]:
+    """Mission Planner orchestrates complex multi-segment missions and constraints."""
+    print("\n🗺️  [MISSION_PLANNER] Analyzing orchestration requirements...", file=sys.stderr)
+    sys.stderr.flush()
+
+    set_state(state)
+
+    user_request = state.get("user_request", "")
+    strategy_analysis = state.get("strategy_analysis", "")
+    
+    # Check if this is a simple question - skip orchestration
+    request_type = state.get("request_type", "optimize")
+    if request_type == "question":
+        print("🔍 [MISSION_PLANNER] Question mode detected - skipping orchestration", file=sys.stderr)
+        return {
+            "messages": [AIMessage(content="[MISSION_PLANNER] Question mode - no orchestration needed")],
+            "mission_plan": "No orchestration required for question mode.",
+            "requires_segmentation": False,
+        }
+
+    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
+
+    mission_context = build_mission_context(state)
+
+    # Build tools context
+    tools_context = """
+AVAILABLE ORCHESTRATION TOOLS:
+
+Mission Inspection:
+- inspect_mission_state() - Get current mission status
+- get_mission_summary() - High-level mission overview
+- get_unvisited_targets() - List targets not yet visited
+
+Solving:
+- solve_full_mission() - Solve complete mission
+- solve_single_drone() - Solve for one drone only
+
+Optimization:
+- apply_insert_missed() - Add unvisited targets
+- apply_swap_closer() - Reassign targets to closer drones
+
+Segmentation:
+- create_segment_at_checkpoint() - Create new segment at distance/step checkpoint
+- freeze_segment_at_checkpoint() - Freeze trajectory up to checkpoint
+- continue_from_checkpoint() - Resume from checkpoint with new drone state
+
+Constraints:
+- add_fuel_reserve_constraint() - Reserve % of fuel
+- add_loiter_constraint() - Add loiter time at target types
+"""
+
+    planning_prompt = f"""
+{HARD_CONSTRAINTS}
+
+{MISSION_PLANNER_PROMPT}
+
+{mission_context}
+
+STRATEGIST ANALYSIS:
+{strategy_analysis}
+
+{tools_context}
+
+USER REQUEST: "{user_request}"
+
+Analyze this request and determine if complex orchestration is needed.
+Provide your orchestration plan in the required JSON format.
+"""
+
+    messages = [HumanMessage(content=planning_prompt)]
+
+    try:
+        print("🌐 [MISSION_PLANNER] Calling Anthropic API...", file=sys.stderr)
+        response = llm.invoke(messages)
+        plan = response.content
+        print("✅ [MISSION_PLANNER] API call successful", file=sys.stderr)
+
+        # Try to parse JSON from response
+        requires_segmentation = False
+        segments = []
+        constraint_ops = []
+        
+        # Look for JSON in response
+        if "{" in plan and "}" in plan:
+            try:
+                # Extract JSON (may be wrapped in markdown)
+                json_start = plan.find("{")
+                json_end = plan.rfind("}") + 1
+                json_str = plan[json_start:json_end]
+                parsed = json.loads(json_str)
+                
+                requires_segmentation = parsed.get("requires_segmentation", False)
+                segments = parsed.get("segments", [])
+                constraint_ops = parsed.get("constraint_operations", [])
+                
+                print(f"📊 [MISSION_PLANNER] Parsed plan: segmentation={requires_segmentation}, segments={len(segments)}, constraints={len(constraint_ops)}", file=sys.stderr)
+            except json.JSONDecodeError as e:
+                print(f"⚠️  [MISSION_PLANNER] Failed to parse JSON: {e}", file=sys.stderr)
+
+    except Exception as e:
+        print(f"❌ [MISSION_PLANNER] API call failed: {e}", file=sys.stderr)
+        plan = f"API call failed: {e}\n\nDefaulting to simple mission (no orchestration)."
+        requires_segmentation = False
+        segments = []
+        constraint_ops = []
+
+    return {
+        "messages": [AIMessage(content=f"[MISSION_PLANNER]\n{plan}")],
+        "mission_plan": plan,
+        "requires_segmentation": requires_segmentation,
+        "segments": segments,
+        "constraint_operations": constraint_ops,
+    }
+
+
+# ============================================================================
+# OPTIMIZER TOOLS - Post-optimization operations
+# ============================================================================
+
+@tool
+def insert_unvisited_tool() -> str:
+    """
+    Insert unvisited targets into drone routes.
+
+    This optimization finds targets that were not assigned to any drone
+    and inserts them into routes where:
+    - The drone has remaining fuel capacity
+    - The drone is allowed to visit that target type
+    - The insertion minimizes additional fuel cost
+
+    Only applies the optimization if it improves efficiency (increases points covered).
+
+    Returns:
+        Updated routes with unvisited targets inserted, or rejection message if no improvement.
+    """
+    state = get_state()
+    env = state.get("environment", {})
+    configs = state.get("drone_configs", {})
+    routes = state.get("routes", {})
+    dist_matrix = state.get("distance_matrix")
+
+    if not routes:
+        return "ERROR: No routes to optimize"
+
+    # Build solution dict
+    targets = {str(t.get("id", t.get("label"))): t for t in env.get("targets", [])}
+    solution = {"routes": {}}
+
+    for did, route_data in routes.items():
+        route = route_data.get("route", [])
+        cfg = configs.get(did, {})
+        points = sum(targets[wp].get("priority", 5) for wp in route if wp in targets)
+        distance = route_data.get("distance", 0)
+        # CRITICAL: Include frozen_segments so optimizer won't modify them
+        frozen_segments = route_data.get("frozen_segments", [])
+
+        solution["routes"][did] = {
+            "route": route,
+            "points": points,
+            "distance": distance,
+            "fuel_budget": cfg.get("fuel_budget", 200),
+            "frozen_segments": frozen_segments,
+        }
+
+    # Build matrix
+    matrix_data = None
+    if dist_matrix:
+        labels = list(dist_matrix.keys())
+        matrix = [[dist_matrix[f].get(t, 1000) for t in labels] for f in labels]
+        matrix_data = {"labels": labels, "matrix": matrix}
+
+    # Calculate initial metrics
+    initial_fuel = sum(r.get("distance", 0) for r in solution["routes"].values())
+    initial_points = sum(r.get("points", 0) for r in solution["routes"].values())
+
+    # Run post_optimize_solution which handles inserting unvisited targets
+    optimized = post_optimize_solution(solution, env, configs, matrix_data)
+
+    # Calculate optimized metrics
+    optimized_fuel = sum(r.get("distance", 0) for r in optimized.get("routes", {}).values())
+    optimized_points = sum(r.get("points", 0) for r in optimized.get("routes", {}).values())
+
+    # Count targets before and after
+    original_visited = set()
+    for did, route_data in routes.items():
+        for wp in route_data.get("route", []):
+            if wp in targets:
+                original_visited.add(wp)
+
+    optimized_visited = set()
+    for did, route_data in optimized.get("routes", {}).items():
+        for wp in route_data.get("route", []):
+            if wp in targets:
+                optimized_visited.add(wp)
+
+    inserted_count = len(optimized_visited) - len(original_visited)
+
+    # Check if optimization improves efficiency
+    improves_points = optimized_points > initial_points
+    same_points_less_fuel = (optimized_points == initial_points and optimized_fuel < initial_fuel)
+
+    if not (improves_points or same_points_less_fuel):
+        # Reject optimization - no improvement
+        all_target_ids = set(targets.keys())
+        remaining_unvisited = len(all_target_ids) - len(original_visited)
+        return f"""INSERT UNVISITED OPTIMIZATION REJECTED
+
+Reason: Optimization does not improve efficiency
+Points: {initial_points} → {optimized_points} (no increase)
+Fuel: {initial_fuel:.1f} → {optimized_fuel:.1f}
+Targets that could be inserted: {inserted_count}
+Remaining unvisited: {remaining_unvisited}
+
+Original routes preserved (no changes applied)."""
+
+    # Update state - optimization improves efficiency
+    new_routes = {}
+    for did, route_data in optimized.get("routes", {}).items():
+        new_routes[did] = {
+            "route": route_data.get("route", []),
+            "sequence": ",".join(route_data.get("route", [])),
+            "points": route_data.get("points", 0),
+            "distance": route_data.get("distance", 0),
+            "fuel_budget": route_data.get("fuel_budget", 200),
+            "frozen_segments": route_data.get("frozen_segments", []),
+        }
+    state["routes"] = new_routes
+
+    # Count remaining unvisited
+    all_target_ids = set(targets.keys())
+    remaining_unvisited = len(all_target_ids) - len(optimized_visited)
+
+    return f"""INSERT UNVISITED TARGETS COMPLETE
+
+Targets inserted: {inserted_count}
+Points gained: {optimized_points - initial_points} ({initial_points} → {optimized_points})
+Fuel change: {optimized_fuel - initial_fuel:.1f} ({initial_fuel:.1f} → {optimized_fuel:.1f})
+Remaining unvisited: {remaining_unvisited}
+
+Optimization applied successfully."""
+
+
+@tool
+def swap_closer_tool() -> str:
+    """
+    Run trajectory swap optimization - moves targets to closer drone trajectories.
+
+    This specifically does the "Swap Closer" optimization where targets are
+    reassigned to drones whose trajectory passes closer to them.
+
+    Only applies the optimization if it improves efficiency (reduces fuel).
+
+    Returns:
+        Optimized routes with swap improvements, or rejection message if no improvement.
+    """
+    state = get_state()
+    env = state.get("environment", {})
+    configs = state.get("drone_configs", {})
+    routes = state.get("routes", {})
+    dist_matrix = state.get("distance_matrix")
+
+    if not routes:
+        return "ERROR: No routes to optimize"
+
+    # Build solution dict
+    targets = {str(t.get("id", t.get("label"))): t for t in env.get("targets", [])}
+    solution = {"routes": {}}
+
+    for did, route_data in routes.items():
+        route = route_data.get("route", [])
+        cfg = configs.get(did, {})
+        points = sum(targets[wp].get("priority", 5) for wp in route if wp in targets)
+        distance = route_data.get("distance", 0)
+        # CRITICAL: Include frozen_segments so optimizer won't modify them
+        frozen_segments = route_data.get("frozen_segments", [])
+
+        solution["routes"][did] = {
+            "route": route,
+            "points": points,
+            "distance": distance,
+            "fuel_budget": cfg.get("fuel_budget", 200),
+            "frozen_segments": frozen_segments,
+        }
+
+    # Build matrix
+    matrix_data = None
+    if dist_matrix:
+        labels = list(dist_matrix.keys())
+        matrix = [[dist_matrix[f].get(t, 1000) for t in labels] for f in labels]
+        matrix_data = {"labels": labels, "matrix": matrix}
+
+    # Calculate initial metrics
+    initial_fuel = sum(r.get("distance", 0) for r in solution["routes"].values())
+    initial_points = sum(r.get("points", 0) for r in solution["routes"].values())
+
+    # Run swap optimization only
+    optimized = trajectory_swap_optimize(solution, env, configs, matrix_data)
+
+    # Calculate optimized metrics
+    optimized_fuel = sum(r.get("distance", 0) for r in optimized.get("routes", {}).values())
+    optimized_points = sum(r.get("points", 0) for r in optimized.get("routes", {}).values())
+
+    # Check if optimization improves efficiency
+    improves_fuel = optimized_fuel < initial_fuel
+    maintains_points = optimized_points >= initial_points
+
+    if not (improves_fuel and maintains_points):
+        # Reject optimization - no improvement
+        return f"""SWAP CLOSER OPTIMIZATION REJECTED
+
+Reason: Optimization does not improve efficiency
+Fuel: {initial_fuel:.1f} → {optimized_fuel:.1f} (would {'save' if improves_fuel else 'increase'} {abs(initial_fuel - optimized_fuel):.1f})
+Points: {initial_points} → {optimized_points}
+
+Original routes preserved (no changes applied)."""
+
+    # Update state - optimization improves efficiency
+    new_routes = {}
+    for did, route_data in optimized.get("routes", {}).items():
+        new_routes[did] = {
+            "route": route_data.get("route", []),
+            "sequence": ",".join(route_data.get("route", [])),
+            "points": route_data.get("points", 0),
+            "distance": route_data.get("distance", 0),
+            "fuel_budget": route_data.get("fuel_budget", 200),
+            "frozen_segments": route_data.get("frozen_segments", []),
+        }
+    state["routes"] = new_routes
+
+    return f"""SWAP CLOSER OPTIMIZATION COMPLETE
+
+Fuel saved: {initial_fuel - optimized_fuel:.1f} ({initial_fuel:.1f} → {optimized_fuel:.1f})
+Points: {initial_points} → {optimized_points}
+
+Optimization applied successfully."""
+
+
+@tool
+def remove_crossings_tool() -> str:
+    """
+    Run 2-opt crossing removal optimization.
+
+    This removes self-crossings in drone trajectories where segments
+    cross over each other. Uses the 2-opt algorithm.
+
+    Only applies the optimization if it improves efficiency (reduces fuel).
+
+    Returns:
+        Optimized routes with crossings removed, or rejection message if no improvement.
+    """
+    state = get_state()
+    env = state.get("environment", {})
+    configs = state.get("drone_configs", {})
+    routes = state.get("routes", {})
+    dist_matrix = state.get("distance_matrix")
+
+    if not routes:
+        return "ERROR: No routes to optimize"
+
+    # Build solution dict
+    targets = {str(t.get("id", t.get("label"))): t for t in env.get("targets", [])}
+    solution = {"routes": {}}
+
+    for did, route_data in routes.items():
+        route = route_data.get("route", [])
+        cfg = configs.get(did, {})
+        points = sum(targets[wp].get("priority", 5) for wp in route if wp in targets)
+        distance = route_data.get("distance", 0)
+        # CRITICAL: Include frozen_segments so optimizer won't modify them
+        frozen_segments = route_data.get("frozen_segments", [])
+
+        solution["routes"][did] = {
+            "route": route,
+            "points": points,
+            "distance": distance,
+            "fuel_budget": cfg.get("fuel_budget", 200),
+            "frozen_segments": frozen_segments,
+        }
+
+    # Build matrix
+    matrix_data = None
+    if dist_matrix:
+        labels = list(dist_matrix.keys())
+        matrix = [[dist_matrix[f].get(t, 1000) for t in labels] for f in labels]
+        matrix_data = {"labels": labels, "matrix": matrix}
+
+    # Calculate initial metrics
+    initial_fuel = sum(r.get("distance", 0) for r in solution["routes"].values())
+    initial_points = sum(r.get("points", 0) for r in solution["routes"].values())
+
+    # Run crossing removal only
+    optimized = crossing_removal_optimize(solution, env, configs, matrix_data)
+
+    # Calculate optimized metrics
+    optimized_fuel = sum(r.get("distance", 0) for r in optimized.get("routes", {}).values())
+    optimized_points = sum(r.get("points", 0) for r in optimized.get("routes", {}).values())
+
+    # Check if optimization improves efficiency
+    improves_fuel = optimized_fuel < initial_fuel
+    maintains_points = optimized_points >= initial_points
+
+    if not (improves_fuel and maintains_points):
+        # Reject optimization - no improvement
+        return f"""CROSSING REMOVAL OPTIMIZATION REJECTED
+
+Reason: Optimization does not improve efficiency
+Fuel: {initial_fuel:.1f} → {optimized_fuel:.1f} (would {'save' if improves_fuel else 'increase'} {abs(initial_fuel - optimized_fuel):.1f})
+Points: {initial_points} → {optimized_points}
+
+Original routes preserved (no changes applied)."""
+
+    # Update state - optimization improves efficiency
+    new_routes = {}
+    for did, route_data in optimized.get("routes", {}).items():
+        new_routes[did] = {
+            "route": route_data.get("route", []),
+            "sequence": ",".join(route_data.get("route", [])),
+            "points": route_data.get("points", 0),
+            "distance": route_data.get("distance", 0),
+            "fuel_budget": route_data.get("fuel_budget", 200),
+            "frozen_segments": route_data.get("frozen_segments", []),
+        }
+    state["routes"] = new_routes
+
+    return f"""CROSSING REMOVAL COMPLETE
+
+Fuel saved: {initial_fuel - optimized_fuel:.1f} ({initial_fuel:.1f} → {optimized_fuel:.1f})
+Points: {initial_points} → {optimized_points}
+
+Optimization applied successfully."""
+
+
+# Define optimizer tools list for binding
+OPTIMIZER_TOOLS = [insert_unvisited_tool, swap_closer_tool, remove_crossings_tool]
+
+
+# ============================================================================
+# OPTIMIZER AGENT - Applies post-optimization
+# ============================================================================
+
+OPTIMIZER_PROMPT = """You are the OPTIMIZER agent in an ISR mission planning system.
+
+ROLE
+Analyze the current solution and apply post-optimization techniques to improve efficiency.
+
+You have THREE optimization tools available:
+1. **insert_unvisited_tool()** - Insert missed/unvisited targets into routes where fuel allows
+2. **swap_closer_tool()** - Reassign targets to drones whose trajectories pass closer
+3. **remove_crossings_tool()** - Apply 2-opt to eliminate self-crossing trajectories
+
+WHEN TO USE EACH TOOL:
+- **Insert Unvisited**: When unvisited_targets list is not empty and drones have spare fuel capacity
+- **Swap Closer**: When targets might be better served by a different drone (fuel efficiency)
+- **Remove Crossings**: When routes have obvious detours or crossing paths
+
+CRITICAL RULES:
+1. Each tool checks if the optimization improves efficiency before applying
+2. Tools will REJECT changes that don't improve the solution
+3. You can call multiple tools in sequence (insert, then swap, then crossing removal)
+4. Always explain WHY you're calling each tool
+5. Frozen segments (from checkpoint replanning) will NOT be modified by optimizers
+
+DECISION PROCESS:
+1. Review current solution metrics (fuel, points, unvisited targets)
+2. Identify optimization opportunities
+3. Call appropriate tools in logical order
+4. Report final optimization results
+
+Be strategic - don't call tools that won't help (e.g., don't try to insert targets if all are visited).
+"""
+
+
+def optimizer_node(state: MissionState) -> Dict[str, Any]:
+    """Optimizer applies post-optimization tools to improve solution."""
+    print("\n⚙️  [OPTIMIZER] Analyzing optimization opportunities...", file=sys.stderr)
+    sys.stderr.flush()
+
+    set_state(state)
+
+    # Check if routes exist
+    routes = state.get("routes", {})
+    if not routes:
+        print("⚠️  [OPTIMIZER] No routes to optimize - skipping", file=sys.stderr)
+        return {
+            "messages": [AIMessage(content="[OPTIMIZER] No routes to optimize - skipping.")],
+            "optimizer_analysis": "No routes available for optimization.",
+        }
+
+    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
+    
+    # Bind optimizer tools
+    llm_with_tools = llm.bind_tools(OPTIMIZER_TOOLS, tool_choice="auto")
+
+    mission_context = build_mission_context(state)
+    current_solution = build_current_solution_context(state)
+    route_analysis = state.get("route_analysis", "")
+
+    optimizer_prompt = f"""
+{HARD_CONSTRAINTS}
+
+{OPTIMIZER_PROMPT}
+
+{mission_context}
+
+ROUTE OPTIMIZER ANALYSIS:
+{route_analysis}
+
+{current_solution}
+
+Analyze this solution and decide which optimization tools to apply.
+"""
+
+    messages = [HumanMessage(content=optimizer_prompt)]
+
+    try:
+        print("🌐 [OPTIMIZER] Calling Anthropic API with tools...", file=sys.stderr)
+        response = llm_with_tools.invoke(messages)
+        print("✅ [OPTIMIZER] API call successful", file=sys.stderr)
+
+        # Check if tools were called
+        if hasattr(response, 'tool_calls') and response.tool_calls:
+            print(f"🔧 [OPTIMIZER] {len(response.tool_calls)} tool(s) called", file=sys.stderr)
+            
+            # Execute each tool call
+            tool_results = []
+            for tool_call in response.tool_calls:
+                tool_name = tool_call.get('name', 'unknown')
+                print(f"   → Executing {tool_name}...", file=sys.stderr)
+                
+                # Find and execute the tool
+                for tool in OPTIMIZER_TOOLS:
+                    if tool.name == tool_name:
+                        try:
+                            result = tool.invoke({})
+                            tool_results.append(f"\n{tool_name} result:\n{result}")
+                            print(f"   ✓ {tool_name} completed", file=sys.stderr)
+                        except Exception as e:
+                            error_msg = f"Error in {tool_name}: {e}"
+                            tool_results.append(error_msg)
+                            print(f"   ✗ {tool_name} failed: {e}", file=sys.stderr)
+                        break
+            
+            analysis = response.content + "\n\n" + "\n".join(tool_results)
+        else:
+            print("ℹ️  [OPTIMIZER] No tools called - keeping solution as is", file=sys.stderr)
+            analysis = response.content
+
+    except Exception as e:
+        print(f"❌ [OPTIMIZER] API call failed: {e}", file=sys.stderr)
+        analysis = f"Optimizer error: {e}\n\nSolution preserved without optimization."
+
+    return {
+        "messages": [AIMessage(content=f"[OPTIMIZER]\n{analysis}")],
+        "optimizer_analysis": analysis,
     }
 
 
@@ -1722,15 +2379,17 @@ def handle_solution_response(state: MissionState) -> Dict[str, Any]:
 # ============================================================================
 
 def build_reasoning_workflow():
-    """Build the v4 reasoning-based multi-agent workflow."""
-    print("🔧 [v4] Building reasoning workflow...", file=sys.stderr)
+    """Build the v4 reasoning-based multi-agent workflow with Mission Planner and Optimizer."""
+    print("🔧 [v4] Building reasoning workflow with Mission Planner and Optimizer...", file=sys.stderr)
 
     workflow = StateGraph(MissionState)
 
     # Add nodes
     workflow.add_node("strategist", strategist_node)
+    workflow.add_node("mission_planner", mission_planner_node)
     workflow.add_node("allocator", allocator_node)
     workflow.add_node("route_optimizer", route_optimizer_node)
+    workflow.add_node("optimizer", optimizer_node)
     workflow.add_node("critic", critic_node)
     workflow.add_node("responder", responder_node)
 
@@ -1739,6 +2398,13 @@ def build_reasoning_workflow():
         request_type = state.get("request_type", "optimize")
         if request_type == "question":
             return "responder"  # Skip solving for questions
+        return "mission_planner"  # Route to planner for complex orchestration
+
+    # Routing function after mission planner
+    def after_mission_planner(state: MissionState) -> str:
+        request_type = state.get("request_type", "optimize")
+        if request_type == "question":
+            return "responder"
         return "allocator"
 
     # Set entry point
@@ -1747,15 +2413,21 @@ def build_reasoning_workflow():
     # Add edges
     workflow.add_conditional_edges("strategist", after_strategist, {
         "responder": "responder",
+        "mission_planner": "mission_planner",
+    })
+
+    workflow.add_conditional_edges("mission_planner", after_mission_planner, {
+        "responder": "responder",
         "allocator": "allocator",
     })
 
     workflow.add_edge("allocator", "route_optimizer")
-    workflow.add_edge("route_optimizer", "critic")
+    workflow.add_edge("route_optimizer", "optimizer")  # Add optimizer after routing
+    workflow.add_edge("optimizer", "critic")
     workflow.add_edge("critic", "responder")
     workflow.add_edge("responder", END)
 
-    print("✅ [v4] Workflow built successfully", file=sys.stderr)
+    print("✅ [v4] Workflow built successfully with Mission Planner and Optimizer", file=sys.stderr)
     return workflow.compile()
 
 
@@ -2342,8 +3014,10 @@ def run_multi_agent_v4(
         "allocation_strategy": final_state.get("allocation_strategy", "unknown"),
         "suggestions": final_state.get("suggestions", []),
         "strategy_analysis": final_state.get("strategy_analysis"),
+        "mission_plan": final_state.get("mission_plan"),
         "allocation_reasoning": final_state.get("allocation_reasoning"),
         "route_analysis": final_state.get("route_analysis"),
+        "optimizer_analysis": final_state.get("optimizer_analysis"),
         "critic_review": final_state.get("critic_review"),
         "mission_metrics": mission_metrics,
         # Decision Trace v1 fields

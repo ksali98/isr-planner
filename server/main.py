@@ -20,10 +20,10 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from .agents.graph import workflow  # <-- our LangGraph workflow (GPT-based)
-# Use v3 multi-agent system (with mandatory tool calls and optimizer tools)
-from .agents.isr_agent_multi_v3 import run_isr_agent as run_multi_agent_v3
-# Legacy v4 (kept for reference but not used)
-# from .agents.isr_agent_multi_v4 import run_multi_agent_v4
+# Use v4 multi-agent system with Mission Planner (reasoning-based orchestration)
+from .agents.isr_agent_multi_v4 import run_multi_agent_v4
+# Legacy v3 (task-based, kept for reference)
+# from .agents.isr_agent_multi_v3 import run_isr_agent as run_multi_agent_v3
 # Memory functions (shared across all agent versions)
 from .agents.agent_memory import (
     load_memory,
@@ -1810,23 +1810,23 @@ async def agent_chat_v4(req: AgentChatRequest):
         # -------------------------------
         agent_run_id = create_agent_run(
             request_text=req.message,
-            agent_version="v3",
+            agent_version="v4",
             mode="agentic",
         )
 
         # -------------------------------
-        # 4. Call the v3 multi-agent planner (with optimizer tools)
+        # 4. Call the v4 multi-agent planner (with Mission Planner orchestration)
         # -------------------------------
-        result = run_multi_agent_v3(
-            env=env,
-            user_query=req.message,
+        result = run_multi_agent_v4(
+            user_message=req.message,
+            environment=env,
             drone_configs=drone_configs,
             sam_matrix=sam_matrix,  # Pass pre-computed matrix with metadata
             existing_solution=existing_solution,
         )
 
         if not isinstance(result, dict):
-            raise RuntimeError(f"run_multi_agent_v3 returned non-dict: {type(result)}")
+            raise RuntimeError(f"run_multi_agent_v4 returned non-dict: {type(result)}")
 
         runtime_ms = int((time.time() - t0) * 1000)
 
