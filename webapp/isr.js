@@ -1786,7 +1786,7 @@ function acceptSolutionWithManager() {
     }
 
     // Calculate visited targets from the ACTUAL optimized trajectory, not the JSON
-    // This is critical: after Swap Closer, targets may have been swapped between drones,
+    // This is critical: after Swap optimization, targets may have been swapped between drones,
     // so the JSON's visitedTargets no longer reflects reality
     const jsonVisited = segmentedImport.getVisitedTargetsForSegment(newSegIdx);
     const actualVisited = calculateVisitedTargetsFromRoutes(routesToUse, cutDistance);
@@ -5393,7 +5393,6 @@ function mergeWithFrozenRoutes(optimizedRoutes) {
 // ----------------------------------------------------
 function attachOptimizationHandlers() {
   const btnInsert = $("btn-optimize-insert");
-  const btnSwap = $("btn-optimize-swap");
   const btnCrossRemove = $("btn-optimize-cross");
 
   if (btnInsert) {
@@ -5475,182 +5474,22 @@ function attachOptimizationHandlers() {
         appendDebugLine("Insert optimization error: " + err.message);
       } finally {
         btnInsert.disabled = false;
-        btnInsert.textContent = "Insert Missed";
+        btnInsert.textContent = "Insert";
       }
     });
   }
 
-  if (btnSwap) {
-    console.log("Swap button handler attached");
-    btnSwap.addEventListener("click", async () => {
-      console.log("Swap button clicked!", state.routes);
-      if (!state.routes || Object.keys(state.routes).length === 0) {
-        appendDebugLine("No routes to optimize. Run planner first.");
-        return;
-      }
-      appendDebugLine("Running Trajectory Swap optimization (auto-iterate mode)...");
-      btnSwap.disabled = true;
-      btnSwap.textContent = "Optimizing...";
-
-      try {
-        const droneConfigs = state.droneConfigs;
-        // FROZEN TRAJECTORY RESPECT: Use only unfrozen targets
-        const unfrozenEnv = getUnfrozenEnv();
-        // Check for frozen targets from EITHER segmented import OR checkpoint replan
-        const segmentedFrozen = segmentedImport.isActive() && segmentedImport.getCurrentSegmentIndex() > 0;
-        const checkpointFrozen = (state.visitedTargets && state.visitedTargets.length > 0);
-        const hasFrozen = segmentedFrozen || checkpointFrozen;
-        // For segmented import, use trajectory-based frozen targets; for checkpoint, use state.visitedTargets
-        const actualFrozenTargets = segmentedFrozen ? getActualFrozenTargets() : (state.visitedTargets || []);
-        console.log(`[Trajectory Swap] segmentedFrozen=${segmentedFrozen}, checkpointFrozen=${checkpointFrozen}, hasFrozen=${hasFrozen}`);
-        console.log(`[Trajectory Swap] actualFrozen=${actualFrozenTargets.join(",")}, visitedTargets=${(state.visitedTargets || []).join(",")}`);
-
-        // Debug: Log what we're sending to the backend
-        console.log("=== SWAP CLOSER REQUEST ===");
-        console.log("Current routes:", state.routes);
-        console.log("Distance matrix available:", !!state.distanceMatrix);
-        if (state.distanceMatrix) {
-          console.log("Distance matrix labels:", state.distanceMatrix.labels);
-        }
-
-        const autoRegen = $("chk-auto-regen") ? $("chk-auto-regen").checked : false;
-        const resp = await fetch("/api/trajectory_swap_optimize", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            solution: {
-              routes: state.routes,
-              distance_matrix: state.distanceMatrix
-            },
-            env: unfrozenEnv, // Only unfrozen targets
-            drone_configs: droneConfigs,
-            visited_targets: actualFrozenTargets, // Tell backend which targets are frozen
-            auto_iterate: !!autoRegen,
-            auto_regen: !!autoRegen
-          })
-        });
-        const data = await resp.json();
-
-        // Debug: Log the complete response
-        console.log("=== SWAP CLOSER RESPONSE ===");
-        console.log("Success:", data.success);
-        console.log("Swaps made:", data.swaps_made);
-        console.log("Number of swaps:", (data.swaps_made || []).length);
-        if (data.swaps_made && data.swaps_made.length > 0) {
-          console.log("Swap details:");
-          data.swaps_made.forEach(swap => {
-            console.log(`  ${swap.target}: D${swap.from_drone} -> D${swap.to_drone}`);
-          });
-        }
-        console.log("Routes in response:", Object.keys(data.routes || {}));
-        console.log("Full response data:", data);
-
-        if (data.success) {
-          const swaps = data.swaps_made || [];
-          const iterations = data.iterations || 1;
-          const bestIteration = data.best_iteration || iterations;
-          const bestDistance = data.best_distance || 0;
-          const cycleDetected = data.cycle_detected || false;
-          const converged = data.converged || false;
-
-          if (swaps.length > 0) {
-            // FROZEN TRAJECTORY RESPECT: Save frozen trajectories BEFORE updating state.routes
-            // The optimizer returns routes without trajectories, so we need to preserve
-            // the frozen portions from the current state.routes and let regenerateTrajectories
-            // handle the merge later
-            let savedFrozenTrajectories = null;
-            if (hasFrozen) {
-              const frozenCounts = getFrozenTrajectoryCounts();
-              savedFrozenTrajectories = {};
-              Object.entries(state.routes || {}).forEach(([did, routeData]) => {
-                const frozenCount = frozenCounts[did] || 0;
-                if (frozenCount > 0 && routeData.trajectory && routeData.trajectory.length >= frozenCount) {
-                  savedFrozenTrajectories[did] = routeData.trajectory.slice(0, frozenCount);
-                  console.log(`[Trajectory Swap] Saved ${frozenCount}pts frozen trajectory for D${did}`);
-                }
-              });
-            }
-
-            // Deep clone optimizer routes (has route sequences but no/empty trajectories)
-            state.routes = JSON.parse(JSON.stringify(data.routes));
-
-            // Restore frozen trajectories so regenerateTrajectories can use them
-            if (savedFrozenTrajectories) {
-              Object.entries(savedFrozenTrajectories).forEach(([did, frozenTraj]) => {
-                if (state.routes[did]) {
-                  state.routes[did].trajectory = frozenTraj;
-                  console.log(`[Trajectory Swap] Restored frozen trajectory for D${did}: ${frozenTraj.length}pts`);
-                }
-              });
-            }
-
-            // Deep clone sequences to avoid read-only property errors
-            state.sequences = JSON.parse(JSON.stringify(data.sequences || {}));
-
-            // Update sequence display
-            for (const [did, seq] of Object.entries(state.sequences)) {
-              state.sequences[did] = seq;
-            }
-
-            // Show summary of auto-iteration
-            if (cycleDetected) {
-              appendDebugLine(`Swap optimization: Cycle detected after ${iterations} iterations.`);
-              appendDebugLine(`  Using best solution from iteration ${bestIteration} (distance: ${bestDistance.toFixed(1)})`);
-            } else if (converged) {
-              appendDebugLine(`Swap optimization: Converged after ${iterations} iterations.`);
-            } else {
-              appendDebugLine(`Swap optimization: Completed ${iterations} iterations.`);
-            }
-
-            appendDebugLine(`  Total swaps: ${swaps.length}, Best distance: ${bestDistance.toFixed(1)}`);
-
-            // Show individual swaps (limit to first 10 if many)
-            const swapsToShow = swaps.slice(0, 10);
-            swapsToShow.forEach(swap => {
-              const iter = swap.iteration ? ` (iter ${swap.iteration})` : '';
-              appendDebugLine(`  ${swap.target}: D${swap.from_drone} -> D${swap.to_drone}${iter}`);
-            });
-            if (swaps.length > 10) {
-              appendDebugLine(`  ... and ${swaps.length - 10} more swaps`);
-            }
-
-            // Recalculate trajectories for modified routes
-            await regenerateTrajectories();
-            updateStatsFromRoutes();
-            drawEnvironment();
-
-            // Update the committed segment so Reset preserves optimizer changes
-            missionReplay.updateCurrentSegmentSolution(state.routes, state.sequences);
-          } else {
-            appendDebugLine(`Swap optimization: No beneficial swaps found (${iterations} iteration${iterations > 1 ? 's' : ''}).`);
-          }
-        } else {
-          appendDebugLine("Swap optimization error: " + (data.error || "Unknown error"));
-        }
-      } catch (err) {
-        appendDebugLine("Swap optimization error: " + err.message);
-      } finally {
-        btnSwap.disabled = false;
-        btnSwap.textContent = "Swap Closer";
-      }
-    });
-  }
-
-  // "Swap Until No More" - client-side loop that repeatedly calls the
-  // single-pass swap endpoint until no swaps are returned. This preserves
-  // per-swap visibility while automating the repeat-click process.
+  // "Swap" button - runs cascade swap optimization until no more beneficial swaps
   const btnSwapUntil = $("btn-optimize-swap-until");
   if (btnSwapUntil) {
     btnSwapUntil.addEventListener("click", async () => {
-      console.log("Swap Until No More clicked", state.routes);
+      console.log("Swap clicked", state.routes);
       if (!state.routes || Object.keys(state.routes).length === 0) {
         appendDebugLine("No routes to optimize. Run planner first.");
         return;
       }
 
-      // Disable both swap buttons while running
       btnSwapUntil.disabled = true;
-      if (btnSwap) btnSwap.disabled = true;
       const originalText = btnSwapUntil.textContent;
       btnSwapUntil.textContent = "Running...";
 
@@ -5789,22 +5628,20 @@ function attachOptimizationHandlers() {
             await new Promise(r => setTimeout(r, 50));
           }
 
-          appendDebugLine(`Swap Until finished: total swaps applied = ${totalSwaps}, iterations = ${loop}`);
+          appendDebugLine(`Swap finished: total swaps applied = ${totalSwaps}, iterations = ${loop}`);
         }
       } catch (err) {
-        appendDebugLine("Swap Until error: " + err.message);
+        appendDebugLine("Swap error: " + err.message);
       } finally {
         btnSwapUntil.disabled = false;
-        if (btnSwap) btnSwap.disabled = false;
         btnSwapUntil.textContent = originalText;
       }
     });
   }
 
   if (btnCrossRemove) {
-    console.log("Cross Remove button handler attached");
     btnCrossRemove.addEventListener("click", async () => {
-      console.log("Cross Remove button clicked!", state.routes);
+      console.log("No Cross button clicked!", state.routes);
       if (!state.routes || Object.keys(state.routes).length === 0) {
         appendDebugLine("No routes to optimize. Run planner first.");
         return;
@@ -5879,7 +5716,7 @@ function attachOptimizationHandlers() {
         appendDebugLine("Crossing removal error: " + err.message);
       } finally {
         btnCrossRemove.disabled = false;
-        btnCrossRemove.textContent = "Cross Remove";
+        btnCrossRemove.textContent = "No Cross";
       }
     });
   }

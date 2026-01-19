@@ -20,10 +20,10 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from .agents.graph import workflow  # <-- our LangGraph workflow (GPT-based)
-# Use v3 multi-agent system (with mandatory tool calls)
-from .agents.isr_agent import run_isr_agent
-# Use v4 reasoning-based multi-agent system
-from .agents.isr_agent_multi_v4 import run_multi_agent_v4
+# Use v3 multi-agent system (with mandatory tool calls and optimizer tools)
+from .agents.isr_agent_multi_v3 import run_isr_agent as run_multi_agent_v3
+# Legacy v4 (kept for reference but not used)
+# from .agents.isr_agent_multi_v4 import run_multi_agent_v4
 # Memory functions (shared across all agent versions)
 from .agents.agent_memory import (
     load_memory,
@@ -1747,7 +1747,7 @@ async def agent_chat_v4(req: AgentChatRequest):
         # This enables follow-up requests like "move T5 to D1" to work
         if req.existing_solution:
             existing_solution = req.existing_solution
-            print(f"[v4] Using existing_solution from request: {len(existing_solution.get('routes', {}))} routes", flush=True)
+            print(f"[v3] Using existing_solution from request: {len(existing_solution.get('routes', {}))} routes", flush=True)
         # Priority 2: Load from mission store by mission_id
         elif mission_id and mission_id in MISSION_STORE:
             mission = MISSION_STORE[mission_id]
@@ -1759,10 +1759,10 @@ async def agent_chat_v4(req: AgentChatRequest):
             stored_cfg_hash = mission.get("cfg_hash")
 
             if stored_env_hash and stored_env_hash != incoming_env_hash:
-                print(f"[v4] mission_id={mission_id} env_hash mismatch; ignoring stored solution and treating as new mission", flush=True)
+                print(f"[v3] mission_id={mission_id} env_hash mismatch; ignoring stored solution and treating as new mission", flush=True)
                 mission_id = None
             elif stored_cfg_hash and stored_cfg_hash != incoming_cfg_hash:
-                print(f"[v4] mission_id={mission_id} cfg_hash mismatch; ignoring stored solution and treating as new mission", flush=True)
+                print(f"[v3] mission_id={mission_id} cfg_hash mismatch; ignoring stored solution and treating as new mission", flush=True)
                 mission_id = None
             else:
                 # Use incoming env if provided, fallback to stored env
@@ -1775,9 +1775,9 @@ async def agent_chat_v4(req: AgentChatRequest):
                     "routes": mission.get("routes") or {},
                     "allocation": mission.get("allocation") or {},
                 }
-                print(f"[v4] Loaded existing mission {mission_id} from store", flush=True)
+                print(f"[v3] Loaded existing mission {mission_id} from store", flush=True)
         elif mission_id:
-            print(f"[v4] mission_id={mission_id} not found; treating as new mission", flush=True)
+            print(f"[v3] mission_id={mission_id} not found; treating as new mission", flush=True)
             mission_id = None
 
         # -------------------------------
@@ -1793,40 +1793,40 @@ async def agent_chat_v4(req: AgentChatRequest):
         sams = env.get("sams", [])
         if sams:
             try:
-                print(f"[v4] Pre-computing SAM-aware distance matrix...", flush=True)
+                print(f"[v3] Pre-computing SAM-aware distance matrix...", flush=True)
                 sam_matrix = calculate_sam_aware_matrix(env, use_supabase_cache=True)
                 env_hash = sam_matrix.get("env_hash")
                 routing_model_hash = sam_matrix.get("routing_model_hash")
                 distance_matrix_id = sam_matrix.get("distance_matrix_id")
                 cache_hit = sam_matrix.get("cache_hit", False)
-                print(f"[v4] Matrix ready: env_hash={env_hash[:8] if env_hash else 'N/A'}..., "
+                print(f"[v3] Matrix ready: env_hash={env_hash[:8] if env_hash else 'N/A'}..., "
                       f"matrix_id={distance_matrix_id[:8] if distance_matrix_id else 'N/A'}..., "
                       f"cache_hit={cache_hit}", flush=True)
             except Exception as e:
-                print(f"[v4] Warning: SAM matrix pre-compute failed: {e}", flush=True)
+                print(f"[v3] Warning: SAM matrix pre-compute failed: {e}", flush=True)
 
         # -------------------------------
-        # 3. Create agent_run row BEFORE calling v4 (Supabase-first)
+        # 3. Create agent_run row BEFORE calling v3 (Supabase-first)
         # -------------------------------
         agent_run_id = create_agent_run(
             request_text=req.message,
-            agent_version="v4",
+            agent_version="v3",
             mode="agentic",
         )
 
         # -------------------------------
-        # 4. Call the v4 multi-agent planner
+        # 4. Call the v3 multi-agent planner (with optimizer tools)
         # -------------------------------
-        result = run_multi_agent_v4(
-            user_message=req.message,
-            environment=env,
+        result = run_multi_agent_v3(
+            env=env,
+            user_query=req.message,
             drone_configs=drone_configs,
             sam_matrix=sam_matrix,  # Pass pre-computed matrix with metadata
             existing_solution=existing_solution,
         )
 
         if not isinstance(result, dict):
-            raise RuntimeError(f"run_multi_agent_v4 returned non-dict: {type(result)}")
+            raise RuntimeError(f"run_multi_agent_v3 returned non-dict: {type(result)}")
 
         runtime_ms = int((time.time() - t0) * 1000)
 
@@ -1920,9 +1920,9 @@ async def agent_chat_v4(req: AgentChatRequest):
         if raw_routes:
             if not mission_id:
                 mission_id = f"m_{uuid4().hex}"
-                print(f"[v4] Creating new mission {mission_id}", flush=True)
+                print(f"[v3] Creating new mission {mission_id}", flush=True)
             else:
-                print(f"[v4] Updating mission {mission_id}", flush=True)
+                print(f"[v3] Updating mission {mission_id}", flush=True)
 
             MISSION_STORE[mission_id] = {
                 "env": env,
@@ -1957,7 +1957,7 @@ async def agent_chat_v4(req: AgentChatRequest):
         # 10. Build and return response
         # -------------------------------
         return AgentChatResponse(
-            reply=result.get("response", "(No v4 agent reply)"),
+            reply=result.get("response", "(No v3 agent reply)"),
             route=legacy_route,
             routes=routes_for_ui,
             trajectories=trajectories,
@@ -1974,7 +1974,7 @@ async def agent_chat_v4(req: AgentChatRequest):
         import traceback
         traceback.print_exc()
         return AgentChatResponse(
-            reply=f"Error running v4 agent: {str(e)}",
+            reply=f"Error running v3 agent: {str(e)}",
             route=None,
             routes=None,
             trajectories=None,

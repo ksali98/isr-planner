@@ -90,6 +90,9 @@ except ImportError:
 # Import Coordinator v4 for deterministic pre-pass
 from .coordinator_v4 import run_coordinator, CoordinatorDecision
 
+# Import constraint parser for sequencing hints
+from ..memory.constraint_parser import parse_constraints
+
 # Load environment variables
 load_dotenv()
 
@@ -128,6 +131,10 @@ class MissionState(TypedDict):
     guardrails: Optional[Dict[str, Any]]  # validation results
     drone_contracts: Optional[Dict[str, Dict[str, Any]]]  # per-drone start/home/endpoint contracts
     allocation_strategy: Optional[str]  # efficient|greedy|balanced|geographic|exclusive
+
+    # Constraint program fields (from memory.constraints)
+    constraint_program: Optional[Dict[str, Any]]  # Parsed constraint operations
+    sequencing_hints: Optional[Dict[str, Any]]  # Hints for visit ordering (Strategist interprets)
 
     # Agent reasoning outputs
     strategy_analysis: Optional[str]  # Strategist's analysis
@@ -581,12 +588,49 @@ CRITICAL CONSTRAINT:
   - Set MODE to `answer_question`.
   - Ensure downstream behavior does NOT change routes or allocation.
 
+═══════════════════════════════════════════════════════════════════════════════
+                         SEQUENCING HINTS (Visit Order Control)
+═══════════════════════════════════════════════════════════════════════════════
+
+When SEQUENCING_HINTS are provided, you control target visit order by configuring
+the solver appropriately. These hints are NOT allocation constraints - they tell
+you HOW to set up the solve.
+
+1. **start_with: {priority_gte: N}** or **start_with: {targets: [T1, T2]}**
+   - User wants to begin with high-priority or specific targets.
+   - Configure solver: Use one of the specified targets as the "end_airport"
+     (pseudo-endpoint), then solve remaining targets from there in a second segment.
+   - Example: "Start with priority 10 targets" → solve only priority≥10 targets
+     first, then use that last target as start for segment 2.
+
+2. **end_with: {targets: [T5, T8]}**
+   - User wants specific targets to be the last visited before landing.
+   - Strategy: Solve with each candidate as "end_airport" (pseudo-endpoint),
+     insert the other(s) before the real airport, pick lowest-cost solution.
+   - Example: "Make T5 and T8 the last targets" → solve with T5 as end, insert T8
+     before real airport; then solve with T8 as end, insert T5; pick cheaper.
+
+3. **segment_by_priority: {threshold: 7, order: "high_first"}**
+   - Split mission into segments by priority.
+   - Segment 1: Solve only targets with priority > threshold.
+   - Freeze segment 1 trajectory.
+   - Segment 2: Solve remaining targets from last position of segment 1.
+
+4. **priority_order: "high_first"** (no threshold)
+   - General preference for higher priority targets earlier.
+   - Use this as a soft hint when ranking targets during allocation.
+
+When you detect sequencing hints, output them in your response:
+SEQUENCING_STRATEGY: <describe how you will configure the solver to honor the hints>
+═══════════════════════════════════════════════════════════════════════════════
+
 You MUST reply in the following STRICT format:
 
 REQUEST_TYPE: <one of: question | optimize | reallocate | reroute | evaluate | debug>
 MODE: <one of: answer_question | optimize_freely | suggest_reallocation | suggest_reroute | analyze_solution>
 COMMANDS_DETECTED: <short comma-separated list of interpreted user commands, or "none">
 CONSTRAINTS_SUMMARY: <one or two sentences summarizing key constraints from the user text>
+SEQUENCING_STRATEGY: <if sequencing hints provided, describe solver configuration; otherwise "none">
 NEEDS_ALLOCATION: <true or false>   # true if Allocator should run or re-run
 NEEDS_ROUTING: <true or false>      # true if RouteOptimizer should run or re-run
 FEASIBILITY: <feasible | infeasible | unknown>
@@ -629,6 +673,22 @@ def strategist_node(state: MissionState) -> Dict[str, Any]:
     mission_context = build_mission_context(state)
     current_solution = build_current_solution_context(state)
 
+    # Build sequencing hints context if present
+    sequencing_hints = state.get("sequencing_hints")
+    sequencing_context = ""
+    if sequencing_hints:
+        sequencing_context = f"""
+═══════════════════════════════════════════════════════════════════════════════
+                              SEQUENCING HINTS
+═══════════════════════════════════════════════════════════════════════════════
+The constraint parser has extracted the following sequencing hints from the user request:
+{json.dumps(sequencing_hints, indent=2)}
+
+You MUST configure the solver to honor these hints as described in the SEQUENCING HINTS
+section above.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
     # Build prompt with full context
     analysis_prompt = f"""
 {HARD_CONSTRAINTS}
@@ -638,7 +698,7 @@ def strategist_node(state: MissionState) -> Dict[str, Any]:
 {mission_context}
 
 {current_solution}
-
+{sequencing_context}
 USER REQUEST: "{user_request}"
 
 Analyze this request and provide your strategic assessment.
@@ -771,7 +831,8 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
 
     # Read Coordinator policy
     policy = state.get("policy") or {}
-    force_algo = bool(policy.get("force_algorithmic_allocation", False))
+    # Check both keys for backward compatibility (coordinator uses force_allocation)
+    force_algo = bool(policy.get("force_allocation", policy.get("force_algorithmic_allocation", False)))
     policy_strategy = policy.get("allocation_strategy", "efficient")
     use_existing = bool(policy.get("use_existing_allocation", False))
     allocation_mods = policy.get("allocation_modifications", [])
@@ -835,105 +896,33 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
                 "excluded_by_allocator": [],
             }
 
-    # Priority 2: If force_algorithmic_allocation is True, skip LLM entirely
-    if force_algo:
-        print(f"🔧 [ALLOCATOR] Force algorithmic allocation enabled - skipping LLM", file=sys.stderr)
-        env = state.get("environment", {})
-        configs = state.get("drone_configs", {})
-        dist_matrix = state.get("distance_matrix")
+    # ALWAYS use algorithmic allocation - LLM's job is reasoning (in Strategist),
+    # not arithmetic. The allocator tool handles the computation.
+    print(f"🔧 [ALLOCATOR] Using algorithmic allocation with strategy: {policy_strategy}", file=sys.stderr)
+    env = state.get("environment", {})
+    configs = state.get("drone_configs", {})
+    dist_matrix = state.get("distance_matrix")
 
-        # Build matrix_data for allocator
-        matrix_data = None
-        if dist_matrix:
-            labels = list(dist_matrix.keys())
-            matrix = [[dist_matrix[f].get(t, 1000) for t in labels] for f in labels]
-            matrix_data = {"labels": labels, "matrix": matrix}
-            set_allocator_matrix(matrix_data)
+    # Build matrix_data for allocator
+    matrix_data = None
+    if dist_matrix:
+        labels = list(dist_matrix.keys())
+        matrix = [[dist_matrix[f].get(t, 1000) for t in labels] for f in labels]
+        matrix_data = {"labels": labels, "matrix": matrix}
+        set_allocator_matrix(matrix_data)
 
-        # Call algorithmic allocation with policy-specified strategy
-        allocation = _allocate_targets_impl(env, configs, policy_strategy, matrix_data)
-        strategy_used = policy_strategy
-        excluded_targets: List[Dict[str, Any]] = []
+    # Call algorithmic allocation with policy-specified strategy
+    allocation = _allocate_targets_impl(env, configs, policy_strategy, matrix_data)
+    strategy_used = policy_strategy
+    excluded_targets: List[Dict[str, Any]] = []
 
-        reasoning = (
-            f"[Algorithmic allocation - force_algorithmic_allocation=True]\n"
-            f"Strategy: {strategy_used}\n"
-            f"Allocation: {allocation}"
-        )
-
-        print(f"📋 [ALLOCATOR] Algorithmic allocation complete: {allocation}", file=sys.stderr)
-
-        return {
-            "messages": [AIMessage(content=f"[ALLOCATOR]\n{reasoning}")],
-            "allocation_reasoning": reasoning,
-            "allocation": allocation,
-            "allocation_strategy": strategy_used,
-            "excluded_by_allocator": excluded_targets,
-        }
-
-    # Otherwise, use LLM-based allocation
-    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
-
-    mission_context = build_mission_context(state)
-    strategy_analysis = state.get("strategy_analysis", "No strategy analysis available")
-
-    allocation_prompt = f"""
-{HARD_CONSTRAINTS}
-
-{ALLOCATOR_PROMPT}
-
-{mission_context}
-
-STRATEGIST'S ANALYSIS:
-{strategy_analysis}
-
-Based on this context, determine the optimal target allocation.
-Return your response as a single valid JSON object (no markdown fences).
-"""
-
-    messages = [HumanMessage(content=allocation_prompt)]
-
-    # Attempt LLM call with error handling
-    reasoning = None
-    llm_success = False
-    error_message = None
-
-    try:
-        print(f"🌐 [ALLOCATOR] Calling Anthropic API...", file=sys.stderr)
-        sys.stderr.flush()
-
-        response = llm.invoke(messages)
-
-        print(f"✅ [ALLOCATOR] API call successful", file=sys.stderr)
-        sys.stderr.flush()
-
-        reasoning = response.content
-        llm_success = True
-
-        # Log first 200 chars of response for debugging
-        preview = reasoning[:200] if len(reasoning) > 200 else reasoning
-        print(f"📄 [ALLOCATOR] Response preview: {preview}...", file=sys.stderr)
-        sys.stderr.flush()
-
-    except Exception as e:
-        error_message = str(e)
-        print(f"❌ [ALLOCATOR] API call FAILED: {error_message}", file=sys.stderr)
-        sys.stderr.flush()
-
-        # Fallback to algorithmic allocation if LLM fails
-        reasoning = "API call failed. Using fallback algorithmic allocation."
-
-    print(f"📋 [ALLOCATOR] Reasoning complete (LLM success: {llm_success})", file=sys.stderr)
-    sys.stderr.flush()
-
-    # Parse allocation from JSON response (uses policy_strategy in fallback)
-    allocation, strategy_used, excluded_targets = parse_allocation_from_json(
-        reasoning, state, fallback_strategy=policy_strategy
+    reasoning = (
+        f"[Algorithmic allocation]\n"
+        f"Strategy: {strategy_used}\n"
+        f"Allocation: {allocation}"
     )
 
-    print(f"📋 [ALLOCATOR] Strategy used: {strategy_used}", file=sys.stderr)
-    if excluded_targets:
-        print(f"📋 [ALLOCATOR] Excluded targets: {len(excluded_targets)}", file=sys.stderr)
+    print(f"📋 [ALLOCATOR] Algorithmic allocation complete: {allocation}", file=sys.stderr)
 
     return {
         "messages": [AIMessage(content=f"[ALLOCATOR]\n{reasoning}")],
@@ -1158,6 +1147,19 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
     if OrienteeringSolverInterface:
         solver = OrienteeringSolverInterface()
 
+    # Read sequencing hints for visit order constraints
+    sequencing_hints = state.get("sequencing_hints") or {}
+    start_with_hint = sequencing_hints.get("start_with")  # {priority_gte: N} or {targets: [...]}
+
+    # Build target priority lookup from environment
+    target_priority_map: Dict[str, int] = {}
+    for t in env.get("targets", []):
+        tid = str(t.get("id", t.get("label", "")))
+        target_priority_map[tid] = t.get("priority", 5)
+
+    if start_with_hint:
+        print(f"🎯 [ROUTE_OPTIMIZER] Sequencing hint: start_with = {start_with_hint}", file=sys.stderr)
+
     for did, target_ids in allocation.items():
         cfg = configs.get(did, {})
         if not cfg.get("enabled", did == "1"):
@@ -1331,6 +1333,80 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                 points = solution.get("total_points", 0)
                 visited = solution.get("visited_targets", [])
 
+                # ---------------------------------------------------------------
+                # Enforce start_with sequencing hint
+                # If user requested "start with priority >= N", ensure first target
+                # after the airport is a qualifying target. Reorder if needed.
+                # ---------------------------------------------------------------
+                if start_with_hint and len(route) > 2:
+                    # Find the first target in the route (skip airport at index 0)
+                    first_target_idx = None
+                    for idx, wp in enumerate(route):
+                        if wp.startswith("T"):
+                            first_target_idx = idx
+                            break
+
+                    if first_target_idx is not None:
+                        first_target = route[first_target_idx]
+                        first_target_priority = target_priority_map.get(first_target, 5)
+
+                        # Check if constraint is satisfied
+                        needs_reorder = False
+                        qualifying_targets = []
+
+                        if "priority_gte" in start_with_hint:
+                            threshold = start_with_hint["priority_gte"]
+                            if first_target_priority < threshold:
+                                needs_reorder = True
+                                # Find all qualifying targets in this route
+                                for wp in route:
+                                    if wp.startswith("T"):
+                                        wp_priority = target_priority_map.get(wp, 5)
+                                        if wp_priority >= threshold:
+                                            qualifying_targets.append(wp)
+
+                        elif "targets" in start_with_hint:
+                            required_first = start_with_hint["targets"]
+                            if first_target not in required_first:
+                                needs_reorder = True
+                                qualifying_targets = [t for t in required_first if t in route]
+
+                        if needs_reorder and qualifying_targets:
+                            # Reorder: move the best qualifying target to first position
+                            # Best = closest to start airport (minimize detour)
+                            best_qual_target = qualifying_targets[0]
+                            if len(qualifying_targets) > 1 and dist_matrix:
+                                # Find closest qualifying target to start
+                                best_dist = float('inf')
+                                for qt in qualifying_targets:
+                                    d = dist_matrix.get(start_id, {}).get(qt, float('inf'))
+                                    if d < best_dist:
+                                        best_dist = d
+                                        best_qual_target = qt
+
+                            # Remove the qualifying target and insert after airport
+                            old_route = route.copy()
+                            route = [start_id]
+                            route.append(best_qual_target)
+                            for wp in old_route[1:]:  # Skip the old start
+                                if wp != best_qual_target:
+                                    route.append(wp)
+
+                            print(f"🔄 [ROUTE_OPT] D{did}: Reordered route to start with {best_qual_target} "
+                                  f"(priority={target_priority_map.get(best_qual_target, '?')})", file=sys.stderr)
+                            print(f"   Old: {' → '.join(old_route[:5])}{'...' if len(old_route) > 5 else ''}", file=sys.stderr)
+                            print(f"   New: {' → '.join(route[:5])}{'...' if len(route) > 5 else ''}", file=sys.stderr)
+                        elif needs_reorder:
+                            print(f"⚠️ [ROUTE_OPT] D{did}: No qualifying targets for start_with constraint in allocation", file=sys.stderr)
+
+                # Determine frozen segments based on sequencing constraints
+                # If start_with constraint was applied, freeze segment 0 (start -> first target)
+                frozen_segments: List[int] = []
+                if start_with_hint and len(route) > 1:
+                    # Freeze segment 0: the trajectory from start to first target
+                    frozen_segments = [0]
+                    print(f"🔒 [ROUTE_OPT] D{did}: Freezing segment 0 (start_with constraint)", file=sys.stderr)
+
                 routes[did] = {
                     "route": route,
                     "distance": distance,
@@ -1339,6 +1415,8 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                     "start_id": start_id,  # Track start for trajectory generation
                     "end_airport": actual_end,
                     "is_synthetic_start": is_synthetic_start,
+                    "frozen_segments": frozen_segments,
+                    "fuel_budget": fuel_budget,
                 }
 
                 status = "FEASIBLE" if distance <= fuel_budget else "OVER BUDGET"
@@ -1364,6 +1442,8 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                     "error": str(e),
                     "start_id": start_id,
                     "is_synthetic_start": is_synthetic_start,
+                    "frozen_segments": [],
+                    "fuel_budget": fuel_budget,
                 }
         else:
             # Fallback: simple route without optimization
@@ -1379,6 +1459,8 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                 "visited_targets": list(target_ids),
                 "start_id": start_id,
                 "is_synthetic_start": is_synthetic_start,
+                "frozen_segments": [],
+                "fuel_budget": fuel_budget,
             }
 
     route_analysis = "\n".join(route_analysis_lines)
@@ -1942,6 +2024,22 @@ def run_multi_agent_v4(
         print(f"📍 [v4] Populated env.synthetic_starts: {list(coordinator_synthetic_starts.keys())}", file=sys.stderr)
 
     # ------------------------------------------------------------------
+    # 3c) Parse constraint program from user message (sequencing hints)
+    # ------------------------------------------------------------------
+    constraint_parse_result = parse_constraints(
+        user_message=user_message,
+        environment=env,
+        drone_configs=normalized_configs,
+    )
+    sequencing_hints = constraint_parse_result.program.sequencing_hints
+    constraint_program = constraint_parse_result.program.to_dict() if not constraint_parse_result.program.is_empty() or sequencing_hints else None
+
+    if sequencing_hints:
+        print(f"🎯 [v4] Parsed sequencing hints: {sequencing_hints}", file=sys.stderr)
+    if constraint_parse_result.program.constraints:
+        print(f"📋 [v4] Parsed {len(constraint_parse_result.program.constraints)} constraint operations", file=sys.stderr)
+
+    # ------------------------------------------------------------------
     # 4) Build initial mission state for the v4 workflow
     # ------------------------------------------------------------------
     initial_state: MissionState = {
@@ -1959,6 +2057,9 @@ def run_multi_agent_v4(
         "guardrails": coordinator_guardrails,
         "drone_contracts": coordinator_drone_contracts,  # Per-drone start/home/endpoint contracts
         "allocation_strategy": coordinator_policy.get("allocation_strategy", "efficient"),
+        # Constraint program fields
+        "constraint_program": constraint_program,
+        "sequencing_hints": sequencing_hints,
         # Agent reasoning outputs
         "strategy_analysis": None,
         "allocation_reasoning": None,

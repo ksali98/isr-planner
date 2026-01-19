@@ -88,6 +88,7 @@ from ..solver.post_optimizer import (
     crossing_removal_optimize,
 )
 from ..solver.trajectory_planner import ISRTrajectoryPlanner
+from ..memory.constraint_parser import parse_constraints
 
 # Load environment variables
 load_dotenv()
@@ -612,11 +613,9 @@ COORDINATOR_TOOLS = [analyze_mission_request, request_optimization, get_mission_
 
 ALLOCATOR_SYSTEM_PROMPT = """You are the ALLOCATOR agent specializing in target distribution.
 
-Your job is to allocate targets to drones optimally. You MUST call one of your tools:
-- allocate_targets: Standard allocation using a strategy
-- allocate_with_constraints: When priority constraints are specified
+Your job is to allocate targets to drones optimally. You MUST call allocate_targets.
 
-IMPORTANT: You MUST call one of these tools. Do not describe allocation - actually do it.
+IMPORTANT: You MUST call allocate_targets. Do not describe allocation - actually do it.
 
 Strategies available:
 - "efficient": Maximize priority/distance ratio (recommended)
@@ -747,7 +746,7 @@ def allocate_with_constraints(constraints: str, strategy: str = "efficient") -> 
     return "\n".join(lines)
 
 
-ALLOCATOR_TOOLS = [allocate_targets, allocate_with_constraints]
+ALLOCATOR_TOOLS = [allocate_targets]
 
 
 # ============================================================================
@@ -799,12 +798,33 @@ def solve_all_routes() -> str:
     configs = state.get("drone_configs", {})
     allocation = state.get("allocation", {})
     dist_matrix = state.get("distance_matrix")
+    user_request = state.get("user_request", "")
+
+    # Always log the user_request for debugging
+    print(f"🔍 [ROUTER] solve_all_routes called", file=sys.stderr)
+    print(f"🔍 [ROUTER] user_request: '{user_request[:100]}...' (len={len(user_request)})" if user_request else "🔍 [ROUTER] user_request is EMPTY", file=sys.stderr)
 
     if not allocation:
         return "ERROR: No allocation found. Allocation must happen first."
 
     if not is_solver_available():
         return "ERROR: Route optimization solver is not available in this deployment. The orienteering solver requires additional dependencies (matplotlib/tkinter) that are not installed in the cloud environment. Please use the manual route planning features instead."
+
+    # Parse sequencing constraints from user request (e.g., "start with priority 10")
+    sequencing_hints = {}
+    if user_request:
+        try:
+            parse_result = parse_constraints(user_request)
+            sequencing_hints = parse_result.program.sequencing_hints or {}
+            print(f"🔍 [ROUTER] parse_constraints returned: sequencing_hints={sequencing_hints}", file=sys.stderr)
+            if sequencing_hints:
+                print(f"🔒 [ROUTER] Sequencing hints from user request: {sequencing_hints}", file=sys.stderr)
+            else:
+                print(f"⚠️ [ROUTER] No sequencing hints parsed from: '{user_request[:80]}...'", file=sys.stderr)
+        except Exception as e:
+            print(f"⚠️ [ROUTER] Failed to parse constraints: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
 
     # Build matrix data for solver
     matrix_data = None
@@ -834,6 +854,26 @@ def solve_all_routes() -> str:
     airports = env.get("airports", [])
     sams = env.get("sams", [])
     target_map = {str(t.get("id", t.get("label"))): t for t in targets}
+
+    # Debug: Log priority targets and check constraint satisfiability
+    priority_threshold = sequencing_hints.get("start_with", {}).get("priority_gte")
+    if priority_threshold:
+        qualifying_targets = [t.get("id", t.get("label")) for t in targets if t.get("priority", 5) >= priority_threshold]
+        print(f"🔍 [ROUTER] Constraint: start_with priority >= {priority_threshold}", file=sys.stderr)
+        print(f"🔍 [ROUTER] Targets with priority >= {priority_threshold}: {qualifying_targets if qualifying_targets else 'NONE!'}", file=sys.stderr)
+        if not qualifying_targets:
+            print(f"⚠️ [ROUTER] WARNING: No targets meet the priority threshold ({priority_threshold}). Constraint cannot be satisfied!", file=sys.stderr)
+            # Log all target priorities for debugging
+            priority_summary = {}
+            for t in targets:
+                p = t.get("priority", 5)
+                priority_summary[p] = priority_summary.get(p, 0) + 1
+            print(f"🔍 [ROUTER] Target priority distribution: {dict(sorted(priority_summary.items(), reverse=True))}", file=sys.stderr)
+    else:
+        # Just log if there are any high priority targets
+        priority_10_targets = [t.get("id", t.get("label")) for t in targets if t.get("priority", 5) >= 10]
+        if priority_10_targets:
+            print(f"🔍 [ROUTER] Priority 10+ targets in env: {priority_10_targets}", file=sys.stderr)
 
     solver = get_solver()
     results = {}
@@ -903,14 +943,62 @@ def solve_all_routes() -> str:
         # Calculate points
         points = sum(target_map[tid].get("priority", 5) for tid in visited if tid in target_map)
 
+        frozen_segments = []
+
         if route:
+            # Apply start_with constraint if present (e.g., start with priority >= 10)
+            start_with = sequencing_hints.get("start_with", {})
+            if start_with and len(route) > 2:  # At least start, one target, end
+                priority_gte = start_with.get("priority_gte")
+                if priority_gte is not None:
+                    # Find first target in route (after start airport)
+                    # Check if it meets the priority threshold
+                    first_target_idx = 1  # Position after start airport
+                    first_target = route[first_target_idx] if first_target_idx < len(route) else None
+
+                    # Find a target meeting the priority threshold
+                    qualifying_target = None
+                    qualifying_idx = None
+                    for i, wp in enumerate(route[1:-1], start=1):  # Skip start and end airports
+                        if wp in target_map:
+                            t_priority = target_map[wp].get("priority", 5)
+                            if t_priority >= priority_gte:
+                                qualifying_target = wp
+                                qualifying_idx = i
+                                print(f"🔍 [ROUTER] D{drone_id}: Found qualifying target {wp} (priority={t_priority}) at idx {i}", file=sys.stderr)
+                                break
+
+                    if not qualifying_target:
+                        print(f"⚠️ [ROUTER] D{drone_id}: NO target with priority >= {priority_gte} in route {route}", file=sys.stderr)
+
+                    # If first target doesn't meet threshold but another does, reorder
+                    if qualifying_target and qualifying_idx and qualifying_idx > 1:
+                        # Move qualifying target to first position after start
+                        new_route = [route[0]]  # Start airport
+                        new_route.append(qualifying_target)  # Priority target first
+                        for i, wp in enumerate(route[1:-1], start=1):
+                            if wp != qualifying_target:
+                                new_route.append(wp)
+                        new_route.append(route[-1])  # End airport
+                        route = new_route
+                        print(f"🔒 [ROUTER] D{drone_id}: Reordered route to start with {qualifying_target} (priority >= {priority_gte})", file=sys.stderr)
+
+                    # Check if first target now meets the constraint
+                    if len(route) > 1 and route[1] in target_map:
+                        t_priority = target_map[route[1]].get("priority", 5)
+                        if t_priority >= priority_gte:
+                            # Freeze segment 0 (start -> first target)
+                            frozen_segments = [0]
+                            print(f"🔒 [ROUTER] D{drone_id}: Froze segment 0 (start_with constraint)", file=sys.stderr)
+
             return {
                 "drone_id": drone_id,
                 "status": "optimal",
                 "route": route,
                 "points": points,
                 "distance": distance,
-                "fuel_budget": fuel_budget
+                "fuel_budget": fuel_budget,
+                "frozen_segments": frozen_segments,
             }
         else:
             # Fallback
@@ -921,7 +1009,8 @@ def solve_all_routes() -> str:
                 "route": fallback_route,
                 "points": sum(t.get("priority", 5) for t in drone_targets[:3]),
                 "distance": 0,
-                "fuel_budget": fuel_budget
+                "fuel_budget": fuel_budget,
+                "frozen_segments": [],
             }
 
     # Get drones to solve
@@ -934,7 +1023,7 @@ def solve_all_routes() -> str:
             result = future.result()
             results[result["drone_id"]] = result
 
-    # Store routes in state
+    # Store routes in state (including frozen_segments)
     routes = {}
     for did, r in results.items():
         routes[did] = {
@@ -942,10 +1031,14 @@ def solve_all_routes() -> str:
             "sequence": ",".join(r.get("route", [])),
             "points": r.get("points", 0),
             "distance": r.get("distance", 0),
-            "fuel_budget": r.get("fuel_budget", 200)
+            "fuel_budget": r.get("fuel_budget", 200),
+            "frozen_segments": r.get("frozen_segments", []),  # CRITICAL: Preserve frozen segments
         }
     state["routes"] = routes
     print(f"📍 [ROUTER TOOL] Stored routes in state: {list(routes.keys())}", file=sys.stderr)
+    frozen_info = {did: routes[did].get("frozen_segments", []) for did in routes if routes[did].get("frozen_segments")}
+    if frozen_info:
+        print(f"🔒 [ROUTER TOOL] Frozen segments: {frozen_info}", file=sys.stderr)
     sys.stderr.flush()
 
     # Format output
@@ -1340,12 +1433,15 @@ def optimize_routes() -> str:
 
         points = sum(targets[wp].get("priority", 5) for wp in route if wp in targets)
         distance = route_data.get("distance", 0)
+        # CRITICAL: Include frozen_segments so optimizer won't modify them
+        frozen_segments = route_data.get("frozen_segments", [])
 
         solution["routes"][did] = {
             "route": route,
             "points": points,
             "distance": distance,
-            "fuel_budget": cfg.get("fuel_budget", 200)
+            "fuel_budget": cfg.get("fuel_budget", 200),
+            "frozen_segments": frozen_segments,
         }
 
     # Build matrix
@@ -1459,12 +1555,15 @@ def swap_closer_optimize() -> str:
         cfg = configs.get(did, {})
         points = sum(targets[wp].get("priority", 5) for wp in route if wp in targets)
         distance = route_data.get("distance", 0)
+        # CRITICAL: Include frozen_segments so optimizer won't modify them
+        frozen_segments = route_data.get("frozen_segments", [])
 
         solution["routes"][did] = {
             "route": route,
             "points": points,
             "distance": distance,
-            "fuel_budget": cfg.get("fuel_budget", 200)
+            "fuel_budget": cfg.get("fuel_budget", 200),
+            "frozen_segments": frozen_segments,
         }
 
     # Build matrix
@@ -1577,12 +1676,15 @@ def remove_crossings() -> str:
         cfg = configs.get(did, {})
         points = sum(targets[wp].get("priority", 5) for wp in route if wp in targets)
         distance = route_data.get("distance", 0)
+        # CRITICAL: Include frozen_segments so optimizer won't modify them
+        frozen_segments = route_data.get("frozen_segments", [])
 
         solution["routes"][did] = {
             "route": route,
             "points": points,
             "distance": distance,
-            "fuel_budget": cfg.get("fuel_budget", 200)
+            "fuel_budget": cfg.get("fuel_budget", 200),
+            "frozen_segments": frozen_segments,
         }
 
     # Build matrix
@@ -1698,12 +1800,15 @@ def insert_unvisited() -> str:
         cfg = configs.get(did, {})
         points = sum(targets[wp].get("priority", 5) for wp in route if wp in targets)
         distance = route_data.get("distance", 0)
+        # CRITICAL: Include frozen_segments so optimizer won't modify them
+        frozen_segments = route_data.get("frozen_segments", [])
 
         solution["routes"][did] = {
             "route": route,
             "points": points,
             "distance": distance,
-            "fuel_budget": cfg.get("fuel_budget", 200)
+            "fuel_budget": cfg.get("fuel_budget", 200),
+            "frozen_segments": frozen_segments,
         }
 
     # Build matrix
@@ -2148,7 +2253,9 @@ def run_isr_agent(
     env: Dict[str, Any],
     user_query: str,
     drone_configs: Optional[Dict[str, Any]] = None,
-    sequences: Optional[Dict[str, str]] = None
+    sequences: Optional[Dict[str, str]] = None,
+    sam_matrix: Optional[Dict[str, Any]] = None,
+    existing_solution: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Run the multi-agent ISR system.
@@ -2160,28 +2267,41 @@ def run_isr_agent(
         user_query: User's mission planning request
         drone_configs: Drone configurations
         sequences: Current sequences (for context)
+        sam_matrix: Pre-computed SAM-aware distance matrix (optional)
+        existing_solution: Existing solution for incremental planning (optional)
 
     Returns:
         Dict with response, routes, trajectories, and statistics
     """
     drone_configs = drone_configs or {}
 
-    # Compute distance matrix
-    sams = env.get("sams", [])
-    if sams:
-        print("🎯 Computing SAM-aware distance matrix...", file=sys.stderr)
-        dist_data = calculate_sam_aware_matrix(env)
-        # Convert to dict format
-        labels = dist_data.get("labels", [])
-        matrix = dist_data.get("matrix", [])
+    # Use pre-computed matrix if provided, otherwise compute
+    if sam_matrix and sam_matrix.get("matrix"):
+        print("🎯 Using pre-computed SAM-aware distance matrix...", file=sys.stderr)
+        labels = sam_matrix.get("labels", [])
+        matrix = sam_matrix.get("matrix", [])
         dist_matrix = {}
         for i, from_id in enumerate(labels):
             dist_matrix[from_id] = {}
             for j, to_id in enumerate(labels):
                 dist_matrix[from_id][to_id] = matrix[i][j]
     else:
-        # Simple Euclidean
-        dist_matrix = _compute_euclidean_matrix(env)
+        # Compute distance matrix
+        sams = env.get("sams", [])
+        if sams:
+            print("🎯 Computing SAM-aware distance matrix...", file=sys.stderr)
+            dist_data = calculate_sam_aware_matrix(env)
+            # Convert to dict format
+            labels = dist_data.get("labels", [])
+            matrix = dist_data.get("matrix", [])
+            dist_matrix = {}
+            for i, from_id in enumerate(labels):
+                dist_matrix[from_id] = {}
+                for j, to_id in enumerate(labels):
+                    dist_matrix[from_id][to_id] = matrix[i][j]
+        else:
+            # Simple Euclidean
+            dist_matrix = _compute_euclidean_matrix(env)
 
     # Build initial state
     initial_state: MissionState = {
@@ -2199,6 +2319,18 @@ def run_isr_agent(
         "user_request": user_query,
         "priority_constraints": None,
     }
+
+    # If continuing an existing mission, seed state with previous solution
+    if existing_solution:
+        prev_routes = existing_solution.get("routes")
+        if prev_routes:
+            initial_state["routes"] = prev_routes
+            print(f"🔄 [V3] Seeded state with existing routes: {list(prev_routes.keys())}", file=sys.stderr)
+
+        prev_allocation = existing_solution.get("allocation")
+        if prev_allocation:
+            initial_state["allocation"] = prev_allocation
+            print(f"🔄 [V3] Seeded state with existing allocation", file=sys.stderr)
 
     # Get workflow
     workflow = get_workflow()
