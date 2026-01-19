@@ -1727,11 +1727,14 @@ function acceptSolutionWithManager() {
     // These are "lost" even if they weren't flying at a checkpoint
     const prevSeg = missionReplay.getSegment(newSegIdx - 1);
     const prevDroneConfigs = prevSeg?.drone_configs || {};
-    const currentDroneConfigs = state.droneConfigs || {};
+    
+    // IMPORTANT: Get the NEXT segment's drone_configs from JSON to compare
+    // Don't use state.droneConfigs because it may have been updated already
+    const nextSegmentConfigs = segmentedImport.getDroneConfigsForSegment(newSegIdx) || {};
     
     Object.keys(prevDroneConfigs).forEach(did => {
       const wasEnabled = prevDroneConfigs[did]?.enabled === true;
-      const isEnabled = currentDroneConfigs[did]?.enabled === true;
+      const isEnabled = nextSegmentConfigs[did]?.enabled === true;
       
       if (wasEnabled && !isEnabled && !savedLostDrones.includes(did)) {
         // Drone was active before but disabled now - mark as lost
@@ -2111,8 +2114,26 @@ function acceptSolutionWithManager() {
 
     let derivedConfigs;
     if (segmentConfigs && Object.keys(segmentConfigs).length > 0) {
-      // Use the JSON's per-segment drone_configs directly
+      // MERGE JSON configs with current UI configs, preserving user modifications
       derivedConfigs = JSON.parse(JSON.stringify(segmentConfigs));
+
+      // Override with current UI values where they exist
+      // UI values (like fuel_budget) should ALWAYS trump JSON values
+      Object.keys(derivedConfigs).forEach(did => {
+        const currentConfig = state.droneConfigs?.[did];
+        if (currentConfig) {
+          // Preserve UI-modified values: fuel_budget, target_access, etc.
+          if (currentConfig.fuel_budget !== undefined) {
+            derivedConfigs[did].fuel_budget = currentConfig.fuel_budget;
+            console.log(`[ACCEPT] Preserving UI fuel_budget for D${did}: ${currentConfig.fuel_budget}`);
+          }
+          if (currentConfig.target_access) {
+            derivedConfigs[did].target_access = JSON.parse(JSON.stringify(currentConfig.target_access));
+          }
+        }
+      });
+
+
 
       // Update start_airport for drones that have cutPositions
       const thisSegCutPositions = segmentedImport.getCutPositionForSegment(newSegIdx);
@@ -2125,7 +2146,7 @@ function acceptSolutionWithManager() {
       }
 
       const enabledDrones = Object.entries(derivedConfigs).filter(([,c]) => c.enabled).map(([d]) => d);
-      console.log(`[ACCEPT] Using JSON drone_configs for segment ${newSegIdx}: enabled=[${enabledDrones.join(',')}]`);
+      console.log(`[ACCEPT] Using merged drone_configs for segment ${newSegIdx}: enabled=[${enabledDrones.join(',')}]`);
     } else {
       // Fallback to displayEnv drone_configs
       derivedConfigs = JSON.parse(JSON.stringify(displayEnv.drone_configs || {}));
