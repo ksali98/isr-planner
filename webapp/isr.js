@@ -8,7 +8,9 @@
 
 "use strict";
 
-console.log("isr.js loaded", new Date().toISOString());
+// VERSION CHECK - Frozen trajectory fix applied 2026-01-19
+const ISR_CODE_VERSION = "2026-01-19-frozen-fix";
+console.log(`✅ isr.js loaded - VERSION: ${ISR_CODE_VERSION}`, new Date().toISOString());
 
 // ----------------------------------------------------
 // DOM helper
@@ -1702,13 +1704,15 @@ function acceptSolutionWithManager() {
     console.log(`[ACCEPT] Segment ${newSegIdx}: cutDistance=${cutDistance}`);
 
     // Derive lostDrones: drones that started segment N but won't start segment N+1
-    // Compare cutPositions of segment newSegIdx (C{newSegIdx}) vs segment newSegIdx+1 (C{newSegIdx+1})
-    // If a drone is in C{newSegIdx} but not in C{newSegIdx+1}, it's lost at C{newSegIdx}
+    // Two ways a drone becomes "lost":
+    // 1. Was flying at C{N} but not at C{N+1} (crashed/ran out of fuel)
+    // 2. Was enabled in segment N-1 but disabled before solving segment N (manually disabled)
     const savedLostDrones = [];
     const thisCutPositions = segmentedImport.getCutPositionForSegment(newSegIdx);
     const nextCutPositions = segmentedImport.getCutPositionForSegment(newSegIdx + 1);
+    
     if (thisCutPositions && nextCutPositions) {
-      // Drones in this cut but not in next cut are "lost" at this cut
+      // Case 1: Drones in this cut but not in next cut are "lost" at this cut
       Object.keys(thisCutPositions).forEach(did => {
         if (!nextCutPositions[did]) {
           savedLostDrones.push(did);
@@ -1718,6 +1722,24 @@ function acceptSolutionWithManager() {
       // This is the last cut - no drones lost at this marker
       // (drones finish at their end airports, not "lost")
     }
+    
+    // Case 2: Also check for drones that were enabled in previous segment but disabled now
+    // These are "lost" even if they weren't flying at a checkpoint
+    const prevSeg = missionReplay.getSegment(newSegIdx - 1);
+    const prevDroneConfigs = prevSeg?.drone_configs || {};
+    const currentDroneConfigs = state.droneConfigs || {};
+    
+    Object.keys(prevDroneConfigs).forEach(did => {
+      const wasEnabled = prevDroneConfigs[did]?.enabled === true;
+      const isEnabled = currentDroneConfigs[did]?.enabled === true;
+      
+      if (wasEnabled && !isEnabled && !savedLostDrones.includes(did)) {
+        // Drone was active before but disabled now - mark as lost
+        savedLostDrones.push(did);
+        console.log(`[ACCEPT] D${did} marked as lost (was enabled in seg ${newSegIdx-1}, disabled in seg ${newSegIdx})`);
+      }
+    });
+    
     console.log(`[ACCEPT] Derived lostDrones at C${newSegIdx}: [${savedLostDrones.join(",")}]`);
 
     // For segmented import: Use state.routes (which has the ACTUAL displayed trajectory: frozen + merged)
@@ -3889,6 +3911,7 @@ async function exportEnvironment() {
             env: s.env,
             cutDistance: s.cutDistance || null,
             cutPositions: s.cutPositions || null,  // Save exact cut positions for marker display
+            lostDrones: s.lostDrones || null,  // Drones that crashed/were lost at this checkpoint
             drone_configs: JSON.parse(JSON.stringify(segDroneConfigs)),  // Per-segment config
             // NO frozenSolution - solutions come from solver, not JSON
           };
@@ -7437,13 +7460,19 @@ function startAnimation(droneIds) {
           });
         }
       } else {
-        // LEGACY: For non-segmented imports, use newSegment's routes directly
-        console.log(`🔄 SEGMENT SWITCH (Legacy): newSegment.solution.routes keys:`, Object.keys(newSegment.solution.routes || {}));
-        Object.entries(newSegment.solution.routes || {}).forEach(([did, routeData]) => {
-          console.log(`🔄 D${did} from segment: trajectory=${routeData.trajectory?.length || 0} pts, route=[${(routeData.route || []).join(",")}]`);
-          if (state.routes[did] && routeData.trajectory) {
+        // LEGACY/CHECKPOINT: Build combined trajectories from all segments
+        // This preserves frozen trajectories for drones that completed in earlier segments
+        console.log(`🔄 SEGMENT SWITCH (Legacy/Checkpoint): Building combined routes from segments 0-${newSegment.index}`);
+        
+        const combinedRoutes = buildCombinedRoutesFromSegments();
+        
+        Object.entries(combinedRoutes).forEach(([did, routeData]) => {
+          const trajectory = routeData.trajectory || [];
+          console.log(`🔄 D${did} from combined: trajectory=${trajectory.length} pts, route=[${(routeData.route || []).join(",")}]`);
+          
+          if (state.routes[did] && trajectory.length > 0) {
             const oldLen = state.routes[did].trajectory?.length || 0;
-            state.routes[did].trajectory = JSON.parse(JSON.stringify(routeData.trajectory));
+            state.routes[did].trajectory = JSON.parse(JSON.stringify(trajectory));
             state.routes[did].route = JSON.parse(JSON.stringify(routeData.route || []));
             const newLen = state.routes[did].trajectory.length;
             appendDebugLine(`🔄 D${did}: trajectory ${oldLen}→${newLen} pts`);
@@ -7462,15 +7491,20 @@ function startAnimation(droneIds) {
               }
               droneState.cumulativeDistances = cumulativeDistances;
               droneState.totalDistance = totalDistance;
-              // Keep distanceTraveled as-is (we're continuing from C point)
+              // Keep distanceTraveled as-is (we're continuing from checkpoint)
 
               // IMPORTANT: Re-enable animation for drones that have more to fly
-              // This handles drones that completed their segment 1 flight but have new targets in segment 2
+              // Frozen drones (completed in earlier segments) won't animate because distanceTraveled >= totalDistance
               if (droneState.distanceTraveled < totalDistance) {
                 if (!droneState.animating) {
-                  appendDebugLine(`🔄 D${did}: Re-enabling animation (was finished, now has more trajectory)`);
+                  appendDebugLine(`🔄 D${did}: Re-enabling animation (has more trajectory to fly)`);
                 }
                 droneState.animating = true;
+              } else {
+                // Drone is frozen/completed - ensure it stays stopped but visible
+                droneState.animating = false;
+                state.trajectoryVisible[did] = true;
+                appendDebugLine(`🔄 D${did}: Frozen (completed in earlier segment)`);
               }
 
               appendDebugLine(`🔄 D${did}: totalDistance now ${totalDistance.toFixed(1)}, distanceTraveled=${droneState.distanceTraveled.toFixed(1)}, animating=${droneState.animating}`);
