@@ -204,10 +204,92 @@ function buildFullTrajectory(droneId) {
 
 ---
 
+## Segmented Mission JSON Files
+
+### Creating a Segmented Mission JSON
+
+A segmented mission can be created through the UI workflow described above (solve → cut → solve → cut → ...). Once complete, the mission can be exported/saved as a segmented JSON file.
+
+**When to create:**
+- User completes a multi-segment mission (multiple cuts with re-solves)
+- User wants to save the mission for later replay or sharing
+
+**What gets saved in the JSON:**
+```json
+{
+  "version": "segmented_v1",
+  "environment": {
+    "targets": [...],
+    "airports": [...],
+    "sams": [...],
+    "drone_configs": {...}
+  },
+  "segments": [
+    {
+      "index": 0,
+      "solution": {
+        "routes": { "1": {...}, "2": {...} },
+        "trajectories": { "1": [[x,y], ...], "2": [[x,y], ...] }
+      },
+      "cutPositions": { "1": [x,y], "2": [x,y] },
+      "cutDistance": 45.5,
+      "env_snapshot": { /* targets visible at this segment */ }
+    },
+    {
+      "index": 1,
+      "solution": { ... },
+      "cutPositions": { ... },
+      "cutDistance": 92.3,
+      "lostDrones": ["1"],
+      "env_snapshot": { ... }
+    },
+    {
+      "index": 2,
+      "solution": { ... },
+      "env_snapshot": { ... }
+    }
+  ]
+}
+```
+
+### Importing/Loading a Segmented Mission JSON
+
+**Workflow when loading:**
+1. Parse JSON file
+2. Load environment (targets, airports, SAMs, drone configs)
+3. Load all segments into `missionReplay`
+4. Set UI to "ready to animate" state
+5. User clicks Animate → Full mission replays from segment 0 through all segments
+
+**Key behavior on import:**
+- No solving needed - solutions are already in the JSON
+- User can immediately animate to see the full mission replay
+- Cut markers (C1, C2, etc.) are displayed based on segment cutPositions
+- Lost drone markers shown at appropriate points
+
+### Use Cases for Segmented JSONs
+
+1. **Mission Replay**: Load a previously planned mission and watch it execute
+2. **Mission Sharing**: Share a complex multi-segment mission with others
+3. **Mission Review**: Analyze a completed mission's decisions at each cut point
+4. **Template Missions**: Use as starting point, modify environment, re-solve segments
+
+### Differences: Fresh Creation vs. Import
+
+| Aspect | Fresh Creation | Import from JSON |
+|--------|---------------|------------------|
+| Solving | Required at each segment | Not needed - solutions included |
+| Editing | Full edit capabilities | View/animate only (or re-solve) |
+| Segments | Built incrementally | All loaded at once |
+| State | `missionReplay` populated as user works | `missionReplay` populated from JSON |
+
+---
+
 ## File References
 
 - Main UI: `webapp/isr.js`
 - Segment Manager: `webapp/segment_manager.js`
+- Segmented Import Manager: `webapp/isr.js` (segmentedImport object)
 - Server Solver: `server/solver/solver_bridge.py`
 - Distance Matrix: `server/solver/sam_distance_matrix.py`
 
