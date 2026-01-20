@@ -2083,8 +2083,6 @@ function acceptSolutionWithManager() {
     // The JSON stores per-segment drone_configs which specify exactly which drones are enabled
     const segmentConfigs = segmentedImport.getDroneConfigsForSegment(newSegIdx);
 
-      segmentConfigs ? Object.entries(segmentConfigs).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(',') : 'null');
-
     let derivedConfigs;
     if (segmentConfigs && Object.keys(segmentConfigs).length > 0) {
       // MERGE JSON configs with current UI configs, preserving user modifications
@@ -2126,9 +2124,6 @@ function acceptSolutionWithManager() {
     state.droneConfigs = derivedConfigs;
     state.env.drone_configs = state.droneConfigs;
     missionState.acceptedEnv = JSON.parse(JSON.stringify(displayEnv));
-
-      Object.entries(state.droneConfigs).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(','));
-
 
     initDroneConfigsFromEnv();
     updateSamWrappingClientSide();
@@ -4253,9 +4248,6 @@ function initDroneConfigsFromEnv() {
   // Check if drone_configs are saved in the environment
   const savedConfigs = (state.env && state.env.drone_configs) || {};
 
-    Object.entries(state.droneConfigs || {}).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(','));
-    Object.entries(savedConfigs).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(','));
-
   function populateStartSelect(selectId) {
     const sel = $(selectId);
     if (!sel) return;
@@ -4327,8 +4319,6 @@ function initDroneConfigsFromEnv() {
       }
     });
   }
-
-    Object.entries(state.droneConfigs || {}).filter(([,c]) => c.enabled).map(([d]) => `D${d}`).join(','));
 }
 
 function attachConfigListeners() {
