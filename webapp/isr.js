@@ -1880,7 +1880,22 @@ function acceptSolutionWithManager() {
         // We need to truncate it at the cut marker position
         const mergedTraj = state.routes[droneId].trajectory || [];
 
-        if (mergedTraj.length > 0 && jsonCutPos) {
+        // Calculate the total distance of this drone's trajectory
+        let trajTotalDist = 0;
+        for (let i = 1; i < mergedTraj.length; i++) {
+          const dx = mergedTraj[i][0] - mergedTraj[i-1][0];
+          const dy = mergedTraj[i][1] - mergedTraj[i-1][1];
+          trajTotalDist += Math.sqrt(dx * dx + dy * dy);
+        }
+
+        // Check if this drone completed BEFORE the current cut distance
+        // If so, don't truncate - keep the full trajectory
+        const droneFinishedBeforeCut = cutDistance > 0 && trajTotalDist > 0 && trajTotalDist < cutDistance;
+
+        if (droneFinishedBeforeCut) {
+          // Drone completed its mission before this cut - preserve full trajectory
+          frozenRoutes[droneId] = JSON.parse(JSON.stringify(state.routes[droneId]));
+        } else if (mergedTraj.length > 0 && jsonCutPos) {
           // Truncate at the JSON cut position by finding closest point on trajectory
           const truncated = truncateTrajectoryAtPosition(mergedTraj, jsonCutPos);
           frozenRoutes[droneId] = {
@@ -6463,8 +6478,9 @@ function applyDraftSolutionToUI(draft) {
   // Deep copy to allow UI modifications without affecting the stored draft
   state.sequences = JSON.parse(JSON.stringify(draft.sequences || {}));
 
-  // For segmented import: MERGE draft routes with frozen routes (don't replace!)
-  if (segmentedImport.isActive() && draft.isCheckpointReplan) {
+  // For checkpoint replans: MERGE draft routes with frozen routes (don't replace!)
+  // This preserves trajectories for drones that completed their mission before the cut
+  if (draft.isCheckpointReplan) {
     // Keep existing frozen routes and add/update with draft routes
     const mergedRoutes = { ...state.routes };
     Object.entries(draft.routes || {}).forEach(([did, routeData]) => {
@@ -6492,9 +6508,17 @@ function applyDraftSolutionToUI(draft) {
         mergedRoutes[did] = JSON.parse(JSON.stringify(routeData));
       }
     });
+    // IMPORTANT: Preserve routes for drones NOT in the draft (completed drones)
+    // These drones finished their mission before the cut and should keep their trajectory
     state.routes = mergedRoutes;
+
+    // CRITICAL: Ensure trajectoryVisible is set for ALL drones in merged routes
+    // This includes completed drones that weren't in the solver response
+    Object.keys(mergedRoutes).forEach(did => {
+      state.trajectoryVisible[did] = true;
+    });
   } else {
-    // Not a segmented import checkpoint - just replace as before
+    // Not a checkpoint replan - just replace as before
     state.routes = JSON.parse(JSON.stringify(draft.routes || {}));
   }
 
@@ -6736,19 +6760,26 @@ function freezeAtCheckpoint() {
     // Use the drone's CURRENT distanceTraveled (actual position during animation)
     const currentDist = droneState.distanceTraveled || 0;
 
+    // Compute whether this drone has finished its route
+    const totalDist = droneState.totalDistance || 0;
+    const finished = totalDist > 0 && currentDist >= (totalDist - 1e-6); // epsilon
+    appendDebugLine(`✂️ D${did}: currentDist=${currentDist.toFixed(1)}, totalDist=${totalDist.toFixed(1)}, finished=${finished}`);
+
     const { prefixPoints, suffixPoints, splitPoint } =
       split_polyline_at_distance(traj, currentDist);
 
-    // Store the current position as splitPoint for drawing
+    // Always store checkpoint segment info (so UI can show "where it is")
+    // But for finished drones we treat splitPoint as the last point and do not "cut" them.
     state.checkpoint.segments[did] = {
       prefix: prefixPoints,
       suffix: suffixPoints,
       splitPoint,
       checkpointDist: currentDist,
+      finishedAtCut: finished, // flag for debugging / later logic
     };
 
-    // Capture per-drone cut position for later "Accept"
-    if (splitPoint && splitPoint.length === 2) {
+    // Only record cut positions for drones that are actually still moving.
+    if (!finished && splitPoint && splitPoint.length === 2) {
       state.pendingCutPositions[did] = [splitPoint[0], splitPoint[1]];
     }
 
@@ -6804,9 +6835,16 @@ function freezeAtCheckpoint() {
     // Stop animating but keep current position
     droneState.animating = false;
 
-    // Store full trajectory and replace with prefix (traveled portion only)
-    state.routes[did]._fullTrajectory = state.routes[did]._fullTrajectory || traj;
-    state.routes[did].trajectory = prefixPoints;
+    // Only truncate displayed trajectory for drones still in-flight.
+    // For finished drones, preserve the full trajectory exactly as-is.
+    if (!finished) {
+      state.routes[did]._fullTrajectory = state.routes[did]._fullTrajectory || traj;
+      state.routes[did].trajectory = prefixPoints;
+    } else {
+      // Make sure full trajectory is preserved for later redraws/replays
+      state.routes[did]._fullTrajectory = state.routes[did]._fullTrajectory || traj;
+      // leave state.routes[did].trajectory unchanged
+    }
   });
 
   if (targetsVisitedThisSegment.length > 0) {
@@ -7289,9 +7327,17 @@ function startAnimation(droneIds) {
             }
 
             const traj = routeData.trajectory || [];
-            if (traj.length === 0) return;
 
-            const oldLen = state.routes[did].trajectory?.length || 0;
+            // If the new trajectory is empty or shorter than existing, this drone likely
+            // completed its mission in an earlier segment - preserve its existing trajectory
+            const existingTraj = state.routes[did].trajectory || [];
+            if (traj.length === 0 || (existingTraj.length > 0 && traj.length < existingTraj.length)) {
+              // Preserve existing trajectory for completed drone
+              state.trajectoryVisible[did] = true;
+              return;
+            }
+
+            const oldLen = existingTraj.length;
             state.routes[did].trajectory = [...traj];
             state.routes[did].route = [...(routeData.route || [])];
             // Update cumulative distances for the new trajectory
