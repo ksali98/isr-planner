@@ -175,21 +175,15 @@ class PostOptimizer:
         airports = env.get("airports", [])
         targets = env.get("targets", [])
 
+        print(f"   [set_environment] Building waypoint positions from {len(airports)} airports and {len(targets)} targets", flush=True)
 
         for a in airports:
-            # Handle both x/y and pos formats
-            if "x" in a and "y" in a:
-                waypoint_positions[str(a["id"])] = [float(a["x"]), float(a["y"])]
-            elif "pos" in a:
-                waypoint_positions[str(a["id"])] = [float(a["pos"][0]), float(a["pos"][1])]
+            waypoint_positions[str(a["id"])] = [float(a["x"]), float(a["y"])]
         for t in targets:
-            # Handle both x/y and pos formats
-            if "x" in t and "y" in t:
-                waypoint_positions[str(t["id"])] = [float(t["x"]), float(t["y"])]
-            elif "pos" in t:
-                waypoint_positions[str(t["id"])] = [float(t["pos"][0]), float(t["pos"][1])]
+            waypoint_positions[str(t["id"])] = [float(t["x"]), float(t["y"])]
         self._waypoint_positions = waypoint_positions
 
+        print(f"   [set_environment] Waypoint positions: {list(waypoint_positions.keys())}", flush=True)
 
         # Store SAM data
         self._sams = env.get("sams", [])
@@ -382,12 +376,16 @@ class PostOptimizer:
         Returns:
             Optimized solution with updated routes
         """
+        print(f"\n📍 [OPTIMIZER.optimize] Starting optimization", flush=True)
+        print(f"   _waypoint_positions has {len(self._waypoint_positions or {})} entries", flush=True)
+        print(f"   _distance_matrix is {'SET' if self._distance_matrix else 'NOT SET'}", flush=True)
 
         # Parse priority constraints into per-drone filter functions
         priority_filters = parse_priority_constraint(priority_constraints) if priority_constraints else {}
         targets = env.get("targets", [])
         airports = env.get("airports", [])
 
+        print(f"   env has {len(targets)} targets, {len(airports)} airports", flush=True)
 
         # Get all target IDs
         all_target_ids = {str(t["id"]) for t in targets}
@@ -403,9 +401,13 @@ class PostOptimizer:
         # Identify unvisited targets
         unvisited = all_target_ids - visited_targets
 
+        print(f"   all_target_ids = {sorted(all_target_ids)}", flush=True)
+        print(f"   visited_targets = {sorted(visited_targets)}", flush=True)
+        print(f"   unvisited = {sorted(unvisited)}", flush=True)
 
         if not unvisited:
             # All targets visited, no optimization needed
+            print(f"   ⚡ EARLY RETURN: All targets already visited!", flush=True)
             return solution
 
         # Filter out targets inside SAM polygons (no-fly zones)
@@ -414,6 +416,7 @@ class PostOptimizer:
         for tid in unvisited:
             if self._is_inside_polygon(tid):
                 targets_inside_polygons.add(tid)
+                print(f"⚠️ Insert Missed: Skipping {tid} - inside SAM polygon (no-fly zone)", flush=True)
 
         unvisited = unvisited - targets_inside_polygons
 
@@ -439,9 +442,15 @@ class PostOptimizer:
             drone_remaining_fuel[did] = fuel_budget - distance_used
 
         # DEBUG: Log state before insertion attempts
+        print(f"\n🔍 INSERT MISSED OPTIMIZER DEBUG:", flush=True)
+        print(f"   All targets: {sorted(all_target_ids)}", flush=True)
+        print(f"   Visited: {sorted(visited_targets)}", flush=True)
+        print(f"   Unvisited (sorted by priority): {unvisited_sorted}", flush=True)
+        print(f"   Drone configs received: {list(drone_configs.keys())}", flush=True)
         for did in sorted(drone_configs.keys()):
             cfg = drone_configs[did]
             remaining = drone_remaining_fuel.get(did, 0)
+            print(f"   D{did}: enabled={cfg.get('enabled')}, remaining_fuel={remaining:.1f}, target_access={cfg.get('target_access', {})}", flush=True)
 
         # Try to assign each unvisited target
         # GOAL: Maximize total points by inserting ALL targets that fit within fuel budget
@@ -552,9 +561,12 @@ class PostOptimizer:
 
             # If no drone can take this target, log why
             if not viable_options:
+                print(f"   ❌ {tid} (type={target_type}, priority={priority}): NO VIABLE DRONES", flush=True)
                 for did, reason in sorted(skip_reasons.items()):
+                    print(f"      D{did}: {reason}", flush=True)
                 continue
             else:
+                print(f"   ✅ {tid} (type={target_type}, priority={priority}): {len(viable_options)} viable options", flush=True)
 
             # Among viable options, pick the drone with LOWEST insertion cost
             # This minimizes fuel usage when multiple drones can service the target
@@ -685,16 +697,20 @@ class PostOptimizer:
                 try:
                     path, distance, method = boundary_plan_path(start_pos, end_pos, self._wrapped_polygons)
                     if path and distance < float('inf'):
+                        print(f"⚠️ Distance matrix fallback: {from_id}→{to_id} = {distance:.2f} (SAM-aware, {method})", flush=True)
                         return distance
                 except Exception as e:
+                    print(f"⚠️ SAM-aware fallback failed for {from_id}→{to_id}: {e}", flush=True)
 
             # Final fallback: Euclidean distance
             dx = end_pos[0] - start_pos[0]
             dy = end_pos[1] - start_pos[1]
             euclidean = math.hypot(dx, dy)
+            print(f"⚠️ Distance matrix fallback: {from_id}→{to_id} = {euclidean:.2f} (Euclidean)", flush=True)
             return euclidean
 
         # Absolute fallback if no position data available
+        print(f"❌ No distance data available for {from_id}→{to_id}, returning large sentinel value", flush=True)
         return 99999.0
 
     def _calculate_route_distance(self, route: List[str]) -> float:
@@ -752,16 +768,25 @@ def post_optimize_solution(
 
     DEBUG: Entry point logging
     """
+    print(f"\n🔧 POST_OPTIMIZE_SOLUTION CALLED", flush=True)
+    print(f"   solution keys: {list(solution.keys())}", flush=True)
+    print(f"   env keys: {list(env.keys())}", flush=True)
+    print(f"   drone_configs: {list(drone_configs.keys())}", flush=True)
+    print(f"   distance_matrix provided: {distance_matrix is not None}", flush=True)
+    print(f"   priority_constraints: {priority_constraints}", flush=True)
 
     # Debug: Check solution routes structure
     routes = solution.get("routes", {})
+    print(f"   Solution has {len(routes)} routes:", flush=True)
     for did, rdata in routes.items():
         if isinstance(rdata, dict):
             route = rdata.get("route", [])
             traj = rdata.get("trajectory", [])
             fuel = rdata.get("fuel_budget", "N/A")
             dist = rdata.get("distance", "N/A")
+            print(f"      D{did}: route={route}, trajectory_pts={len(traj)}, fuel_budget={fuel}, distance={dist}", flush=True)
         else:
+            print(f"      D{did}: (not a dict) {type(rdata)}", flush=True)
 
     # Set environment for SAM-aware distance fallback calculations
     _optimizer.set_environment(env)
@@ -770,7 +795,9 @@ def post_optimize_solution(
     if distance_matrix:
         _optimizer.set_distance_matrix(distance_matrix)
 
+    print(f"   Calling _optimizer.optimize()...", flush=True)
     result = _optimizer.optimize(solution, env, drone_configs, priority_constraints)
+    print(f"   _optimizer.optimize() returned {len(result.get('routes', {}))} routes", flush=True)
     return result
 
 
@@ -947,6 +974,7 @@ class TrajectorySwapOptimizer:
         Auto-iterate Swap Closer until convergence or cycle detection.
         Returns the solution with the lowest total distance encountered.
         """
+        print(f"\n🔄 [TrajectorySwapOptimizer] AUTO-ITERATE MODE (max {max_iterations} iterations)")
 
         # Track seen states for cycle detection
         seen_signatures: Set[str] = set()
@@ -972,6 +1000,8 @@ class TrajectorySwapOptimizer:
 
             # Check for cycle
             if signature in seen_signatures:
+                print(f"\n🔁 CYCLE DETECTED at iteration {iteration}")
+                print(f"   Returning best solution from iteration {best_iteration} (distance: {best_distance:.2f})")
                 break
 
             seen_signatures.add(signature)
@@ -989,7 +1019,9 @@ class TrajectorySwapOptimizer:
                 best_distance = current_distance
                 best_solution = self._deep_copy_solution(current_solution)
                 best_iteration = iteration
+                print(f"   ✨ Iteration {iteration}: NEW BEST distance = {best_distance:.2f}")
             else:
+                print(f"   📍 Iteration {iteration}: distance = {current_distance:.2f}")
 
             # Run single swap iteration
             result = self._optimize_single(
@@ -1000,6 +1032,8 @@ class TrajectorySwapOptimizer:
 
             # Check for convergence (no more swaps)
             if not swaps_made:
+                print(f"\n✅ CONVERGED at iteration {iteration} (no more beneficial swaps)")
+                print(f"   Final distance: {current_distance:.2f}")
                 # Use current solution if it's the best, otherwise use tracked best
                 if current_distance <= best_distance:
                     best_solution = self._deep_copy_solution(current_solution)
@@ -1046,17 +1080,22 @@ class TrajectorySwapOptimizer:
                         try:
                             traj = planner.generate_trajectory(route, waypoint_positions, did)
                         except Exception as e:
+                            print(f"   ⚠️ Trajectory planner failed for D{did}: {e}", flush=True)
                             traj = [tuple(waypoint_positions.get(wp, [0, 0])) for wp in route]
 
                         # Store trajectory and recompute route distance
                         rd["trajectory"] = traj
                         rd["distance"] = self._calculate_route_distance(route)
 
+                    print("   ✅ Regenerated trajectories for next iteration", flush=True)
                 except Exception as e:
                     # Non-fatal: log and continue without trajectories
+                    print(f"   ⚠️ Trajectory regeneration skipped due to error: {e}", flush=True)
 
         else:
             # Max iterations reached
+            print(f"\n⚠️ MAX ITERATIONS ({max_iterations}) reached")
+            print(f"   Returning best solution from iteration {best_iteration} (distance: {best_distance:.2f})")
 
         # Use best solution found
         if best_solution is None:
@@ -1073,6 +1112,11 @@ class TrajectorySwapOptimizer:
             route_data["distance"] = self._calculate_route_distance(route)
             route_data["points"] = self._calculate_route_points(route, target_by_id)
 
+        print(f"\n📊 AUTO-ITERATE SUMMARY:")
+        print(f"   Total iterations: {iteration}")
+        print(f"   Total swaps made: {len(all_swaps)}")
+        print(f"   Best iteration: {best_iteration}")
+        print(f"   Best total distance: {best_distance:.2f}")
 
         return {
             "sequences": {
@@ -1175,8 +1219,10 @@ class TrajectorySwapOptimizer:
         num_passes = 1
         all_swaps = []  # Track all swaps made
 
+        print(f"\n🔧 [TrajectorySwapOptimizer] Searching for best swap...")
 
         for pass_num in range(num_passes):
+            print(f"\n  📍 Evaluating all targets...")
 
             # Collect ALL possible swap candidates in this pass
             swap_candidates = []
@@ -1227,16 +1273,19 @@ class TrajectorySwapOptimizer:
                 # Use actual trajectory vertices instead of route waypoints
                 # This correctly accounts for SAM-avoidance trajectory deviations
                 if str(wp_id) not in target_to_traj_index:
+                    print(f"    ⏭️  SKIP {wp_id}: Not found in trajectory index")
                     continue
 
                 traj_drone_id, traj_idx = target_to_traj_index[str(wp_id)]
 
                 # Ensure this target is still on the same drone
                 if traj_drone_id != current_drone:
+                    print(f"    ⏭️  SKIP {wp_id}: Drone mismatch (index:{traj_drone_id}, current:{current_drone})")
                     continue
 
                 trajectory = drone_trajectories.get(current_drone)
                 if not trajectory or len(trajectory) < 2:
+                    print(f"    ⏭️  SKIP {wp_id}: No valid trajectory (len={len(trajectory) if trajectory else 0})")
                     continue
 
                 # Get actual trajectory vertices immediately before/after this target
@@ -1269,8 +1318,10 @@ class TrajectorySwapOptimizer:
                 next_wp = route[current_idx + 1] if current_idx < len(route) - 1 else "?"
 
                 if remove_delta is None or remove_delta <= 0.0:
+                    print(f"    🎯 {wp_id}: remove_delta=None or <=0 (skip) ({prev_wp}→{wp_id}→{next_wp})")
                     continue
 
+                print(f"    🎯 {wp_id}: remove_delta={remove_delta:.2f} (route neighbors {prev_wp}→{wp_id}→{next_wp})")
 
                 # Search for segments where inserting this target yields the best delta (insertion cost)
                 best_drone = None
@@ -1400,6 +1451,7 @@ class TrajectorySwapOptimizer:
                             other_current_distance = other_route_data.get("distance") or self._calculate_route_distance(other_route)
                             to_new = other_current_distance + insertion_cost
                             if to_new > other_fuel_budget:
+                                print(f"            ⛽ FUEL: D{other_drone} {seg_start_id}→{seg_end_id} exceeds budget ({other_current_distance:.1f}+{insertion_cost:.1f} > {other_fuel_budget:.1f})")
                                 continue
 
                         # Calculate net savings: remove_delta - insertion_cost
@@ -1421,6 +1473,7 @@ class TrajectorySwapOptimizer:
 
                         # Track best option: select target with MAXIMUM net savings
                         if net_savings > best_net_savings:
+                            print(f"            🔄 New best: D{other_drone} {seg_start_id}→{seg_end_id}, gain={net_savings:.2f} (remove={remove_delta:.2f} - insert={insertion_cost:.2f})")
                             best_net_savings = net_savings
                             best_osd = osd
                             best_insert_delta = insertion_cost
@@ -1430,6 +1483,7 @@ class TrajectorySwapOptimizer:
                 # If found a better segment, add to candidates (don't execute yet)
                 if best_drone and best_insert_delta < remove_delta:
                     gain = remove_delta - best_insert_delta
+                    print(f"       📋 Candidate: {wp_id} from D{current_drone} to D{best_drone}, gain={gain:.2f}")
 
                     swap_candidates.append({
                         "target": wp_id,
@@ -1449,6 +1503,7 @@ class TrajectorySwapOptimizer:
                 # Sort by gain (descending) and pick the best one
                 best_swap = max(swap_candidates, key=lambda x: x['gain'])
 
+                print(f"\n  🏆 Selected best swap: {best_swap['target']} from D{best_swap['from_drone']} to D{best_swap['to_drone']}, gain={best_swap['gain']:.2f}")
 
                 # Execute only this one swap
                 wp_id = best_swap['target']
@@ -1475,6 +1530,7 @@ class TrajectorySwapOptimizer:
                     "pass": pass_num + 1
                 })
             else:
+                print(f"\n  ⏹️  No beneficial swaps found in this pass")
 
         # Recalculate metrics for all routes
         for did, route_data in optimized_routes.items():

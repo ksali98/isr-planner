@@ -611,17 +611,7 @@ def allocate_targets(
         _allocator.set_distance_matrix(distance_matrix)
 
     targets = env.get("targets", [])
-    airports = list(env.get("airports", []))  # Make a copy to avoid modifying original
-
-    # Add synthetic start nodes (for checkpoint replanning)
-    # These act like airports - drones can start from these positions
-    for node_id, node_data in env.get("synthetic_starts", {}).items():
-        airports.append({
-            "id": str(node_id),
-            "x": float(node_data["x"]),
-            "y": float(node_data["y"]),
-            "is_synthetic": True,
-        })
+    airports = env.get("airports", [])
 
     # Filter out excluded targets (e.g., targets inside SAM zones)
     if distance_matrix:
@@ -645,15 +635,6 @@ def allocate_targets(
 def set_allocator_matrix(matrix_data: Dict[str, Any]):
     """Set the distance matrix for the global allocator."""
     _allocator.set_distance_matrix(matrix_data)
-
-
-def clear_allocator_matrix():
-    """Clear the cached distance matrix from the global allocator.
-
-    This should be called before each fresh solve to ensure the allocator
-    doesn't use stale distance data from a previous environment state.
-    """
-    _allocator._distance_matrix = None
 
 
 # ============================================================================

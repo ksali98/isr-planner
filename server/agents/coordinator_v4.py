@@ -668,6 +668,13 @@ class CoordinatorV4:
         }
 
         if self.debug:
+            print(f"[Coordinator] Intent: {intent} (confidence: {confidence:.2f})")
+            print(f"[Coordinator] Rules hit: {rules_hit}")
+            print(f"[Coordinator] Policy: {policy}")
+            print(f"[Coordinator] Constraints: {constraints}")
+            print(f"[Coordinator] Drone contracts: {drone_contracts}")
+            print(f"[Coordinator] Errors: {errors}")
+            print(f"[Coordinator] Warnings: {warnings}")
 
         return CoordinatorDecision(
             intent=intent,

@@ -886,6 +886,7 @@ class SegmentedMissionManager:
                 json.dump(mission, f, indent=2)
             return True
         except Exception as e:
+            print(f"Error exporting segmented JSON: {e}")
             return False
 
 

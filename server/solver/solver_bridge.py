@@ -26,11 +26,16 @@ OrienteeringSolverInterface = None
 try:
     # Docker path: /app/webapp/editor/solver/...
     from webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
+    print("✅ OrienteeringSolverInterface loaded (Docker path)")
 except ImportError as e:
+    print(f"⚠️ Docker import failed: {e}")
     try:
         # Local development path: isr_web/webapp/editor/solver/...
         from isr_web.webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface  # type: ignore
+        print("✅ OrienteeringSolverInterface loaded (local path)")
     except ImportError as e2:
+        print(f"⚠️ Local import failed: {e2}")
+        print("❌ OrienteeringSolverInterface not available - orienteering features disabled")
 
 # Import new solver components
 from .sam_distance_matrix import (
@@ -48,8 +53,11 @@ from path_planning_core.sam_wrapping import wrap_sams
 # Single global solver instance (only if interface is available)
 _solver = None
 if OrienteeringSolverInterface is not None:
+    print("📦 Initializing OrienteeringSolverInterface...", flush=True)
     _solver = OrienteeringSolverInterface()
+    print("📦 Solver interface initialized", flush=True)
 else:
+    print("⚠️ OrienteeringSolverInterface not available - solver bridge will have limited functionality", flush=True)
 
 # Cached distance matrix for current environment
 _cached_env_hash: Optional[str] = None
@@ -160,17 +168,10 @@ def _parse_env_for_solver(
     """
     airports: List[Dict[str, Any]] = []
     for a in env.get("airports", []):
-        # Handle both formats: x/y fields or pos array
-        if "x" in a and "y" in a:
-            ax, ay = float(a["x"]), float(a["y"])
-        elif "pos" in a:
-            ax, ay = float(a["pos"][0]), float(a["pos"][1])
-        else:
-            raise ValueError(f"Airport {a.get('id')} missing position (need x/y or pos)")
         airport_entry = {
             "id": str(a["id"]),
-            "x": ax,
-            "y": ay,
+            "x": float(a["x"]),
+            "y": float(a["y"]),
         }
         # CRITICAL: Preserve is_synthetic flag from frontend
         # This flag marks synthetic starts (D1_START, D2_START, etc.) added during checkpoint replanning
@@ -188,6 +189,7 @@ def _parse_env_for_solver(
             "y": float(node_data["y"]),
             "is_synthetic": True,  # Mark as synthetic for reference
         })
+        print(f"📍 Added synthetic start: {node_id} at ({node_data['x']:.1f}, {node_data['y']:.1f})", flush=True)
 
     # Filter out visited targets for checkpoint replanning
     visited_target_ids = set(str(tid) for tid in env.get("visited_targets", []))
@@ -197,20 +199,13 @@ def _parse_env_for_solver(
         target_id = str(t["id"])
         # Skip visited targets - they are already completed in previous segments
         if target_id in visited_target_ids:
+            print(f"📍 Skipping visited target: {target_id} (already completed)", flush=True)
             continue
-
-        # Handle both formats: x/y fields or pos array
-        if "x" in t and "y" in t:
-            tx, ty = float(t["x"]), float(t["y"])
-        elif "pos" in t:
-            tx, ty = float(t["pos"][0]), float(t["pos"][1])
-        else:
-            raise ValueError(f"Target {target_id} missing position (need x/y or pos)")
 
         targets.append({
             "id": target_id,
-            "x": tx,
-            "y": ty,
+            "x": float(t["x"]),
+            "y": float(t["y"]),
             "priority": int(t.get("priority", 5)),
             "type": t.get("type", "a"),
             "assigned_drone": t.get("assigned_drone"),
@@ -263,14 +258,19 @@ def solve_mission(
         }
       }
     """
+    print(f"\n🚀 solve_mission() called with {len(drone_configs)} drone configs", flush=True)
 
     airports, targets, sams = _parse_env_for_solver(env)
+    print(f"📍 Parsed: {len(airports)} airports, {len(targets)} targets, {len(sams)} SAMs", flush=True)
 
     # DEBUG: Show which airports have is_synthetic flag
     synthetic_airports = [a["id"] for a in airports if a.get("is_synthetic", False)]
     real_airports = [a["id"] for a in airports if not a.get("is_synthetic", False)]
+    print(f"   🔍 Real airports: {real_airports}", flush=True)
+    print(f"   🔍 Synthetic airports: {synthetic_airports}", flush=True)
 
     if not airports or not targets:
+        print("⚠️ No airports or targets, returning empty", flush=True)
         return {
             "sequences": {},
             "routes": {},
@@ -279,12 +279,14 @@ def solve_mission(
     # Build a global distance matrix; we'll reuse it per drone
     # ALWAYS use SAM-aware distances for consistency and exclusion detection
     sam_count = len(sams) if sams else 0
+    print(f"🎯 Calculating fresh distance matrix ({sam_count} SAMs)...", flush=True)
     clear_matrix_cache()
     dist_data = calculate_sam_aware_matrix(env)
 
     # Get excluded targets (inside SAM polygons)
     excluded_targets = set(dist_data.get("excluded_targets", []))
     if excluded_targets:
+        print(f"🚫 [DEBUG] EXCLUDED TARGETS from distance matrix: {sorted(excluded_targets)}", flush=True)
 
     sequences: Dict[str, str] = {}
     routes_detail: Dict[str, Dict[str, Any]] = {}
@@ -313,14 +315,21 @@ def solve_mission(
             final_allocations = allocations
 
             # Debug: Print allocation sets
+            print("\n" + "="*60, flush=True)
+            print("🎯 TARGET ALLOCATION RESULTS (balanced strategy)", flush=True)
+            print("="*60, flush=True)
             total_allocated = 0
             for did in sorted(allocations.keys(), key=lambda x: int(x)):
                 target_ids = allocations[did]
                 total_allocated += len(target_ids)
                 if target_ids:
+                    print(f"  Drone {did}: {target_ids}", flush=True)
                 else:
                     cfg = drone_configs.get(did, {})
                     if cfg.get("enabled") is not False:
+                        print(f"  Drone {did}: [] (enabled but no targets)", flush=True)
+            print(f"  Total targets allocated: {total_allocated}/{len(targets)}", flush=True)
+            print("="*60 + "\n", flush=True)
 
             # Apply allocations to targets
             for did, target_ids in allocations.items():
@@ -356,6 +365,7 @@ def solve_mission(
 
         # DEBUG: Check what start_airport is in the config
         cfg_start = cfg.get("start_airport")
+        print(f"🔍 D{did} DEBUG: cfg.start_airport='{cfg_start}', airport_by_id keys={list(airport_by_id.keys())}", flush=True)
 
         # Check if cfg_start is a synthetic start (e.g., D1_START for checkpoint replanning)
         # Synthetic starts should be used directly, not fall back to real airports
@@ -364,12 +374,14 @@ def solve_mission(
         if is_synthetic_start:
             # Use the synthetic start directly - it's in matrix_labels but not airports
             start_id = cfg_start
+            print(f"🔍 D{did} DEBUG: Using SYNTHETIC start '{start_id}' for checkpoint replanning", flush=True)
         else:
             start_id = cfg_start or (
                 default_start if default_start in airport_by_id else airports[0]["id"]
             )
 
         # DEBUG: Final start_id decision
+        print(f"🔍 D{did} DEBUG: final start_id='{start_id}' (cfg_start was {'set' if cfg_start else 'NOT set'}, synthetic={is_synthetic_start})", flush=True)
 
         # Handle flexible endpoint: "-" means solver chooses optimal endpoint
         raw_end_id = cfg.get("end_airport") or start_id
@@ -377,6 +389,7 @@ def solve_mission(
         # Don't set end_id to start_id for flexible endpoints - solver will choose
         end_id = raw_end_id if not flexible_endpoint else None
 
+        print(f"🔧 D{did} endpoint config: cfg.end_airport={cfg.get('end_airport')}, start_id={start_id}, raw_end_id={raw_end_id}, end_id={end_id}, flexible={flexible_endpoint}", flush=True)
 
         # Filter targets by type access (A, B, C, D types)
         target_access = cfg.get("target_access", {})
@@ -399,6 +412,7 @@ def solve_mission(
         # DEBUG: Check if any excluded targets would have been included
         excluded_here = [t["id"] for t in targets if str(t.get("id", "")) in excluded_targets]
         if excluded_here:
+            print(f"   🚫 D{did}: Excluded targets (inside SAM polygons): {excluded_here}", flush=True)
 
         # Additionally filter by assigned_drone if any targets have assignments
         any_assigned = any(t.get("assigned_drone") is not None for t in targets)
@@ -423,10 +437,12 @@ def solve_mission(
                 "distance": 0.0,
                 "fuel_budget": fuel_budget,
             }
+            print(f"🚁 Drone {did}: No targets assigned, trivial route", flush=True)
             continue
 
         # Debug: Print drone solve info
         target_ids = [t["id"] for t in candidate_targets]
+        print(f"🚁 Drone {did}: Solving with {len(candidate_targets)} targets: {target_ids}", flush=True)
 
         # Build a FILTERED distance matrix containing only airports + this drone's targets
         # This is critical - the solver uses matrix_labels to determine which nodes to visit
@@ -453,6 +469,7 @@ def solve_mission(
             if required_id and required_id not in filtered_ids and required_id in orig_labels:
                 filtered_indices.append(orig_labels.index(required_id))
                 filtered_ids.append(required_id)
+                print(f"   ⚠️ Added missing required airport {required_id} to filtered matrix", flush=True)
 
         n = len(filtered_indices)
         filtered_matrix = [[0.0] * n for _ in range(n)]
@@ -470,6 +487,7 @@ def solve_mission(
         # Count actual airports and targets in filtered list
         actual_airport_count = sum(1 for fid in filtered_ids if fid in airport_ids)
         actual_target_count = len(filtered_ids) - actual_airport_count
+        print(f"   📊 Filtered matrix: {len(filtered_ids)} nodes ({actual_airport_count} airports + {actual_target_count} targets)", flush=True)
 
         # Build airports list for solver - start with real airports
         solver_airports = list(airports)  # Copy to avoid mutating original
@@ -497,8 +515,11 @@ def solve_mission(
                         "is_synthetic": True,  # Mark so we can filter for endpoints
                     }
                     solver_airports.append(synthetic_airport)
+                    print(f"   ✅ Added synthetic start '{fid}' to airports: ({wp['x']:.1f}, {wp['y']:.1f})", flush=True)
                 else:
+                    print(f"   ⚠️ WARNING: Synthetic start '{fid}' not found in waypoints!", flush=True)
 
+        print(f"   🔍 DEBUG: solver_airports: {[a['id'] for a in solver_airports]}", flush=True)
 
         # Build a per-drone environment using your existing interface
         env_for_solver = _solver.build_environment_for_solver(
@@ -511,17 +532,20 @@ def solve_mission(
 
         # Handle flexible endpoint vs fixed endpoint
         if flexible_endpoint:
+            print(f"   🔄 Flexible endpoint: solver will choose optimal end airport", flush=True)
             env_for_solver["mode"] = "best_end"
 
             # CRITICAL: Remove end_airport from env if it was set by build_environment_for_solver
             # This prevents the solver from using a synthetic start as the endpoint
             if "end_airport" in env_for_solver:
+                print(f"   🔍 DEBUG: Removing end_airport '{env_for_solver['end_airport']}' from env_for_solver", flush=True)
                 del env_for_solver["end_airport"]
 
             # CRITICAL: Filter out synthetic starts from valid end airports
             # Synthetic starts (e.g., D1_START) are used for checkpoint replanning
             # but should NEVER be valid endpoints - only real airports should be endpoints
             # Check both the is_synthetic flag AND the ID pattern (ends with _START)
+            print(f"   🔍 DEBUG: All airports: {[a['id'] for a in airports]}", flush=True)
             real_airports = [
                 a for a in airports
                 if not a.get("is_synthetic", False)
@@ -531,9 +555,13 @@ def solve_mission(
                 a for a in airports
                 if a.get("is_synthetic", False) or str(a.get("id", "")).endswith("_START")
             ]
+            print(f"   🔍 DEBUG: Real airports (non-synthetic): {[a['id'] for a in real_airports]}", flush=True)
+            print(f"   🔍 DEBUG: Synthetic airports: {[a['id'] for a in synthetic_airports]}", flush=True)
             if real_airports:
                 env_for_solver["valid_end_airports"] = [a["id"] for a in real_airports]
+                print(f"   ✈️ Valid end airports (excluding synthetic): {env_for_solver['valid_end_airports']}", flush=True)
             else:
+                print(f"   ⚠️ WARNING: No real airports found! All airports are synthetic.", flush=True)
         else:
             # Fixed endpoint
             env_for_solver["end_airport"] = end_id
@@ -558,6 +586,7 @@ def solve_mission(
         total_points: int = sum(target_priorities.get(tid, 0) for tid in visited_targets)
         travel_distance: float = float(sol.get("distance", 0.0))
 
+        print(f"   ✅ Drone {did} solved in {solve_time:.2f}s: {len(route_ids)} waypoints, {total_points} pts, {travel_distance:.1f} dist", flush=True)
 
         seq = ",".join(route_ids) if route_ids else ""
 
@@ -566,6 +595,7 @@ def solve_mission(
         waypoint_positions = {wp["id"]: [wp["x"], wp["y"]] for wp in dist_data.get("waypoints", [])}
         trajectory = trajectory_planner.generate_trajectory(route_ids, waypoint_positions)
 
+        print(f"   🛫 Generated trajectory: {len(trajectory)} points for route {route_ids}", flush=True)
 
         sequences[did] = seq
         routes_detail[did] = {
@@ -630,6 +660,7 @@ def solve_mission_with_allocation(
 
     # Always clear and recalculate to ensure fresh exclusion detection
     sam_count = len(sams) if sams else 0
+    print(f"🎯 Calculating fresh distance matrix ({sam_count} SAMs)...", flush=True)
     clear_matrix_cache()
     clear_allocator_matrix()  # Also clear allocator's cached matrix
     dist_data = calculate_sam_aware_matrix(env)
@@ -643,7 +674,9 @@ def solve_mission_with_allocation(
     # DEBUG: Log excluded targets from distance matrix
     excluded_targets = set(dist_data.get("excluded_targets", []))
     if excluded_targets:
+        print(f"🚫 [DEBUG] EXCLUDED TARGETS from distance matrix: {sorted(excluded_targets)}", flush=True)
     else:
+        print(f"🔍 [DEBUG] No excluded targets from distance matrix", flush=True)
 
     # Step 2: Allocate targets to drones
     allocations = allocate_targets(
@@ -651,6 +684,9 @@ def solve_mission_with_allocation(
     )
 
     # Log allocation results
+    print("\n" + "="*60, flush=True)
+    print(f"🎯 TARGET ALLOCATION RESULTS (strategy: {allocation_strategy})", flush=True)
+    print("="*60, flush=True)
     total_allocated = 0
     for did in sorted(allocations.keys(), key=lambda x: int(x)):
         target_ids = allocations[did]
@@ -658,7 +694,11 @@ def solve_mission_with_allocation(
         cfg = drone_configs.get(did, {})
         if cfg.get("enabled") is not False:
             if target_ids:
+                print(f"  Drone {did}: {target_ids}", flush=True)
             else:
+                print(f"  Drone {did}: [] (enabled but no targets)", flush=True)
+    print(f"  Total targets allocated: {total_allocated}/{len(targets)}", flush=True)
+    print("="*60 + "\n", flush=True)
 
     # Step 3: Solve for each drone with their assigned targets
     sequences: Dict[str, str] = {}
@@ -696,6 +736,7 @@ def solve_mission_with_allocation(
         if is_synthetic_start:
             # Use the synthetic start directly - it's in matrix_labels but not airports
             start_id = cfg_start
+            print(f"🔍 [solve_mission_with_allocation] D{did}: Using SYNTHETIC start '{start_id}'", flush=True)
         else:
             start_id = cfg_start or (
                 default_start if default_start in airport_by_id else airports[0]["id"]
@@ -708,6 +749,8 @@ def solve_mission_with_allocation(
         end_id = raw_end_id if not flexible_endpoint else None
 
         # Debug logging
+        print(f"🔍 [Run Planner] D{did} config: {cfg}", flush=True)
+        print(f"🔍 [Run Planner] D{did} start_id={start_id}, raw_end_id={raw_end_id}, flexible={flexible_endpoint}, end_id={end_id}, is_synthetic={is_synthetic_start}", flush=True)
 
         # Get this drone's assigned targets
         assigned_target_ids = set(allocations.get(did, []))
@@ -755,6 +798,7 @@ def solve_mission_with_allocation(
         # DEBUG: Check if any excluded targets were in the assignment
         excluded_in_assignment = assigned_target_ids & excluded_targets
         if excluded_in_assignment:
+            print(f"   🚫 [DEBUG] D{did}: Filtering out EXCLUDED targets from assignment: {sorted(excluded_in_assignment)}", flush=True)
 
         # CRITICAL: Limit targets to prevent exponential solver blowup
         # Orienteering solver has O(n!) complexity - cap at reasonable max
@@ -766,9 +810,11 @@ def solve_mission_with_allocation(
                 key=lambda t: int(t.get("priority", 5)),
                 reverse=True
             )[:MAX_TARGETS_PER_SOLVE]
+            print(f"  ⚠️ Drone {did}: Limited to {MAX_TARGETS_PER_SOLVE} highest-priority targets (had {len(assigned_target_ids)})", flush=True)
 
         # Debug: Print drone solve info
         target_ids = [t["id"] for t in candidate_targets]
+        print(f"🚁 Drone {did}: Solving with {len(candidate_targets)} targets: {target_ids}", flush=True)
 
         # Build a FILTERED distance matrix containing only airports + this drone's targets
         # This is critical - the solver uses matrix_labels to determine which nodes to visit
@@ -795,6 +841,7 @@ def solve_mission_with_allocation(
             if required_id and required_id not in filtered_ids and required_id in orig_labels:
                 filtered_indices.append(orig_labels.index(required_id))
                 filtered_ids.append(required_id)
+                print(f"   ⚠️ Added missing required airport {required_id} to filtered matrix", flush=True)
 
         n = len(filtered_indices)
         filtered_matrix = [[0.0] * n for _ in range(n)]
@@ -812,6 +859,7 @@ def solve_mission_with_allocation(
         # Count actual airports and targets in filtered list
         actual_airport_count = sum(1 for fid in filtered_ids if fid in airport_ids)
         actual_target_count = len(filtered_ids) - actual_airport_count
+        print(f"   📊 Filtered matrix: {len(filtered_ids)} nodes ({actual_airport_count} airports + {actual_target_count} targets)", flush=True)
 
         # Build airports list for solver - start with real airports
         solver_airports = list(airports)  # Copy to avoid mutating original
@@ -839,8 +887,11 @@ def solve_mission_with_allocation(
                         "is_synthetic": True,  # Mark so we can filter for endpoints
                     }
                     solver_airports.append(synthetic_airport)
+                    print(f"   ✅ Added synthetic start '{fid}' to airports: ({wp['x']:.1f}, {wp['y']:.1f})", flush=True)
                 else:
+                    print(f"   ⚠️ WARNING: Synthetic start '{fid}' not found in waypoints!", flush=True)
 
+        print(f"   🔍 DEBUG: solver_airports: {[a['id'] for a in solver_airports]}", flush=True)
 
         # Build environment for solver with FILTERED matrix
         env_for_solver = _solver.build_environment_for_solver(
@@ -851,14 +902,18 @@ def solve_mission_with_allocation(
         )
         env_for_solver["start_airport"] = start_id
 
+        print(f"   🔍 DEBUG: After build_environment_for_solver, env_for_solver has end_airport: {env_for_solver.get('end_airport', 'NOT SET')}", flush=True)
+        print(f"   🔍 DEBUG: flexible_endpoint={flexible_endpoint}", flush=True)
 
         # If flexible endpoint, use best_end mode to let solver choose optimal end
         if flexible_endpoint:
+            print(f"   🔄 Flexible endpoint: solver will choose optimal end airport", flush=True)
             env_for_solver["mode"] = "best_end"
 
             # CRITICAL: Remove end_airport from env if it was set by build_environment_for_solver
             # This prevents the solver from using a synthetic start as the endpoint
             if "end_airport" in env_for_solver:
+                print(f"   🔍 DEBUG: Removing end_airport '{env_for_solver['end_airport']}' from env_for_solver", flush=True)
                 del env_for_solver["end_airport"]
 
             # CRITICAL: Filter out synthetic starts from valid end airports
@@ -867,14 +922,17 @@ def solve_mission_with_allocation(
             # Use real_airport_ids we defined earlier (before adding synthetic starts)
             if real_airport_ids:
                 env_for_solver["valid_end_airports"] = real_airport_ids
+                print(f"   ✈️ Valid end airports (excluding synthetic): {env_for_solver['valid_end_airports']}", flush=True)
 
             # Don't set end_airport - let solver choose from valid_end_airports
             sol = _solver.solve(env_for_solver, fuel_budget)
             # Extract the end airport chosen by solver
             end_id = sol.get("end_airport", start_id)
+            print(f"   🎯 Solver chose endpoint: {end_id}", flush=True)
         else:
             env_for_solver["end_airport"] = end_id
             env_for_solver["mode"] = "return" if end_id == start_id else "end"
+            print(f"   🎯 Solving with start={start_id}, end={end_id}, mode={env_for_solver['mode']}", flush=True)
             # Solve orienteering for this drone
             sol = _solver.solve(env_for_solver, fuel_budget)
 
@@ -894,13 +952,18 @@ def solve_mission_with_allocation(
         travel_distance: float = float(sol.get("distance", 0.0))
 
         # DEBUG: Log solver output
+        print(f"🔍 [DEBUG] Drone {did} solver returned:", flush=True)
+        print(f"   route_ids = {route_ids}", flush=True)
+        print(f"   total_points = {total_points}, distance = {travel_distance:.2f}", flush=True)
 
         # Validate: check if route ends at expected endpoint
         if route_ids:
             actual_end = route_ids[-1]
             expected_end = end_id if end_id else start_id  # flexible endpoint defaults to start
             if actual_end != expected_end:
+                print(f"   ⚠️ ENDPOINT MISMATCH: Route ends at '{actual_end}' but expected '{expected_end}'", flush=True)
             else:
+                print(f"   ✅ Route correctly ends at '{actual_end}'", flush=True)
 
         seq = ",".join(route_ids) if route_ids else ""
 
@@ -920,7 +983,9 @@ def solve_mission_with_allocation(
                 if expected_pos:
                     end_diff = ((traj_end[0] - expected_pos[0])**2 + (traj_end[1] - expected_pos[1])**2)**0.5
                     if end_diff > 1.0:  # More than 1 unit off
+                        print(f"   ⚠️ TRAJECTORY ENDPOINT MISMATCH: traj ends at ({traj_end[0]:.1f},{traj_end[1]:.1f}) but {end_id_in_route} is at ({expected_pos[0]:.1f},{expected_pos[1]:.1f}), diff={end_diff:.1f}", flush=True)
                     else:
+                        print(f"   ✅ Trajectory correctly ends near {end_id_in_route}", flush=True)
 
         sequences[did] = seq
         routes_detail[did] = {
@@ -978,10 +1043,16 @@ def solve_mission_with_allocation(
         ]
 
     # Debug print to compare original allocator vs route-derived
+    print("\n" + "="*60, flush=True)
+    print("🎯 ROUTE-DERIVED TARGETS (what solver actually included)", flush=True)
+    print("="*60, flush=True)
     total_in_routes = 0
     for did in sorted(route_allocations.keys(), key=lambda x: int(x)):
         tids = route_allocations[did]
         total_in_routes += len(tids)
+        print(f"  Drone {did}: {tids}", flush=True)
+    print(f"  Total targets in routes: {total_in_routes}", flush=True)
+    print("="*60 + "\n", flush=True)
 
     # Keep the ORIGINAL allocator assignments (not route-derived)
     # UI will show what the allocator assigned, even if solver dropped some

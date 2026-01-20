@@ -62,10 +62,13 @@ if "/app" not in sys.path:
 OrienteeringSolverInterface = None
 try:
     from webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
+    print("✅ [v4] OrienteeringSolverInterface loaded (Docker path)")
 except ImportError:
     try:
         from isr_web.webapp.editor.solver.orienteering_interface import OrienteeringSolverInterface
+        print("✅ [v4] OrienteeringSolverInterface loaded (local path)")
     except ImportError:
+        print("⚠️ [v4] OrienteeringSolverInterface not available")
 
 from ..solver.target_allocator import (
     allocate_targets as _allocate_targets_impl,
@@ -104,6 +107,7 @@ try:
     from ..database.mission_ledger import get_active_policy_rules
 except ImportError:
     get_active_policy_rules = None
+    print("⚠️ [v4] mission_ledger not available, policy rules disabled")
 
 # Import Coordinator v4 for deterministic pre-pass
 from .coordinator_v4 import run_coordinator, CoordinatorDecision
@@ -678,6 +682,7 @@ Guidelines:
 
 def strategist_node(state: MissionState) -> Dict[str, Any]:
     """Strategist analyzes the request and determines approach."""
+    print("\n🧠 [STRATEGIST] Analyzing request...", file=sys.stderr)
     sys.stderr.flush()
 
     set_state(state)
@@ -686,6 +691,7 @@ def strategist_node(state: MissionState) -> Dict[str, Any]:
     policy = state.get("policy") or {}
     if policy.get("explain_only"):
         intent = state.get("intent", "explain")
+        print(f"🎯 [STRATEGIST] Coordinator set explain_only=True (intent={intent}), routing to responder", file=sys.stderr)
         return {
             "messages": [AIMessage(content=f"[STRATEGIST] Explain/debug mode - routing to responder")],
             "strategy_analysis": f"Coordinator classified intent as '{intent}'. Skipping allocation/routing.",
@@ -693,6 +699,7 @@ def strategist_node(state: MissionState) -> Dict[str, Any]:
         }
 
     user_request = state.get("user_request", "")
+    print(f"📝 [STRATEGIST] User request: '{user_request}'", file=sys.stderr)
     sys.stderr.flush()
 
     llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
@@ -739,10 +746,12 @@ Analyze this request and provide your strategic assessment.
     error_message = None
 
     try:
+        print(f"🌐 [STRATEGIST] Calling Anthropic API...", file=sys.stderr)
         sys.stderr.flush()
 
         response = llm.invoke(messages)
 
+        print(f"✅ [STRATEGIST] API call successful", file=sys.stderr)
         sys.stderr.flush()
 
         analysis = response.content
@@ -750,10 +759,12 @@ Analyze this request and provide your strategic assessment.
 
         # Log first 200 chars of response for debugging
         preview = analysis[:200] if len(analysis) > 200 else analysis
+        print(f"📄 [STRATEGIST] Response preview: {preview}...", file=sys.stderr)
         sys.stderr.flush()
 
     except Exception as e:
         error_message = str(e)
+        print(f"❌ [STRATEGIST] API call FAILED: {error_message}", file=sys.stderr)
         sys.stderr.flush()
 
         # Fallback analysis if LLM fails
@@ -764,6 +775,7 @@ REQUEST_TYPE: optimize
 Defaulting to optimization mode due to API failure.
 """
 
+    print(f"📋 [STRATEGIST] Analysis complete (LLM success: {llm_success})", file=sys.stderr)
     sys.stderr.flush()
 
     # Parse request type from analysis
@@ -771,9 +783,12 @@ Defaulting to optimization mode due to API failure.
     analysis_lower = analysis.lower()
     if "request_type: question" in analysis_lower:
         request_type = "question"
+        print(f"🔍 [STRATEGIST] Detected REQUEST_TYPE: question", file=sys.stderr)
     elif "request_type: command" in analysis_lower:
         request_type = "command"
+        print(f"🔍 [STRATEGIST] Detected REQUEST_TYPE: command", file=sys.stderr)
     else:
+        print(f"⚠️  [STRATEGIST] No REQUEST_TYPE found in response, defaulting to: optimize", file=sys.stderr)
 
     sys.stderr.flush()
 
@@ -854,6 +869,7 @@ Be explicit about segment boundaries, drone state changes, and constraint timing
 
 def mission_planner_node(state: MissionState) -> Dict[str, Any]:
     """Mission Planner orchestrates complex multi-segment missions and constraints."""
+    print("\n🗺️  [MISSION_PLANNER] Analyzing orchestration requirements...", file=sys.stderr)
     sys.stderr.flush()
 
     set_state(state)
@@ -864,6 +880,7 @@ def mission_planner_node(state: MissionState) -> Dict[str, Any]:
     # Check if this is a simple question - skip orchestration
     request_type = state.get("request_type", "optimize")
     if request_type == "question":
+        print("🔍 [MISSION_PLANNER] Question mode detected - skipping orchestration", file=sys.stderr)
         return {
             "messages": [AIMessage(content="[MISSION_PLANNER] Question mode - no orchestration needed")],
             "mission_plan": "No orchestration required for question mode.",
@@ -922,8 +939,10 @@ Provide your orchestration plan in the required JSON format.
     messages = [HumanMessage(content=planning_prompt)]
 
     try:
+        print("🌐 [MISSION_PLANNER] Calling Anthropic API...", file=sys.stderr)
         response = llm.invoke(messages)
         plan = response.content
+        print("✅ [MISSION_PLANNER] API call successful", file=sys.stderr)
 
         # Try to parse JSON from response
         requires_segmentation = False
@@ -943,9 +962,12 @@ Provide your orchestration plan in the required JSON format.
                 segments = parsed.get("segments", [])
                 constraint_ops = parsed.get("constraint_operations", [])
                 
+                print(f"📊 [MISSION_PLANNER] Parsed plan: segmentation={requires_segmentation}, segments={len(segments)}, constraints={len(constraint_ops)}", file=sys.stderr)
             except json.JSONDecodeError as e:
+                print(f"⚠️  [MISSION_PLANNER] Failed to parse JSON: {e}", file=sys.stderr)
 
     except Exception as e:
+        print(f"❌ [MISSION_PLANNER] API call failed: {e}", file=sys.stderr)
         plan = f"API call failed: {e}\n\nDefaulting to simple mission (no orchestration)."
         requires_segmentation = False
         segments = []
@@ -1319,6 +1341,7 @@ Be strategic - don't call tools that won't help (e.g., don't try to insert targe
 
 def optimizer_node(state: MissionState) -> Dict[str, Any]:
     """Optimizer applies post-optimization tools to improve solution."""
+    print("\n⚙️  [OPTIMIZER] Analyzing optimization opportunities...", file=sys.stderr)
     sys.stderr.flush()
 
     set_state(state)
@@ -1326,6 +1349,7 @@ def optimizer_node(state: MissionState) -> Dict[str, Any]:
     # Check if routes exist
     routes = state.get("routes", {})
     if not routes:
+        print("⚠️  [OPTIMIZER] No routes to optimize - skipping", file=sys.stderr)
         return {
             "messages": [AIMessage(content="[OPTIMIZER] No routes to optimize - skipping.")],
             "optimizer_analysis": "No routes available for optimization.",
@@ -1358,15 +1382,19 @@ Analyze this solution and decide which optimization tools to apply.
     messages = [HumanMessage(content=optimizer_prompt)]
 
     try:
+        print("🌐 [OPTIMIZER] Calling Anthropic API with tools...", file=sys.stderr)
         response = llm_with_tools.invoke(messages)
+        print("✅ [OPTIMIZER] API call successful", file=sys.stderr)
 
         # Check if tools were called
         if hasattr(response, 'tool_calls') and response.tool_calls:
+            print(f"🔧 [OPTIMIZER] {len(response.tool_calls)} tool(s) called", file=sys.stderr)
             
             # Execute each tool call
             tool_results = []
             for tool_call in response.tool_calls:
                 tool_name = tool_call.get('name', 'unknown')
+                print(f"   → Executing {tool_name}...", file=sys.stderr)
                 
                 # Find and execute the tool
                 for tool in OPTIMIZER_TOOLS:
@@ -1374,16 +1402,20 @@ Analyze this solution and decide which optimization tools to apply.
                         try:
                             result = tool.invoke({})
                             tool_results.append(f"\n{tool_name} result:\n{result}")
+                            print(f"   ✓ {tool_name} completed", file=sys.stderr)
                         except Exception as e:
                             error_msg = f"Error in {tool_name}: {e}"
                             tool_results.append(error_msg)
+                            print(f"   ✗ {tool_name} failed: {e}", file=sys.stderr)
                         break
             
             analysis = response.content + "\n\n" + "\n".join(tool_results)
         else:
+            print("ℹ️  [OPTIMIZER] No tools called - keeping solution as is", file=sys.stderr)
             analysis = response.content
 
     except Exception as e:
+        print(f"❌ [OPTIMIZER] API call failed: {e}", file=sys.stderr)
         analysis = f"Optimizer error: {e}\n\nSolution preserved without optimization."
 
     return {
@@ -1445,6 +1477,7 @@ Be concise but explicit.
 
 def allocator_node(state: MissionState) -> Dict[str, Any]:
     """Allocator reasons about and performs target allocation."""
+    print("\n🎯 [ALLOCATOR] Reasoning about allocation...", file=sys.stderr)
     sys.stderr.flush()
 
     # CRITICAL: Clear any cached distance matrix from previous solves
@@ -1461,14 +1494,17 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
     use_existing = bool(policy.get("use_existing_allocation", False))
     allocation_mods = policy.get("allocation_modifications", [])
 
+    print(f"🎯 [ALLOCATOR] Policy: force_algo={force_algo}, strategy={policy_strategy}", file=sys.stderr)
 
     # Priority 1: If use_existing_allocation is True, apply modifications to existing allocation
     if use_existing and allocation_mods:
+        print(f"🔄 [ALLOCATOR] Applying {len(allocation_mods)} modifications to existing allocation", file=sys.stderr)
 
         # Get existing allocation from state (seeded from existing_solution)
         existing_allocation = state.get("allocation") or {}
 
         if not existing_allocation:
+            print(f"⚠️ [ALLOCATOR] No existing allocation found, falling back to algorithmic", file=sys.stderr)
         else:
             # Deep copy to avoid mutation
             new_allocation = {did: list(targets) for did, targets in existing_allocation.items()}
@@ -1498,6 +1534,7 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
                     new_allocation[to_drone].append(target_id)
 
                 mods_applied.append(f"{target_id}: D{from_drone or '?'} → D{to_drone}")
+                print(f"   ✅ Moved {target_id} from D{from_drone or '?'} to D{to_drone}", file=sys.stderr)
 
             reasoning = (
                 f"[Allocation modification - use_existing_allocation=True]\n"
@@ -1506,6 +1543,7 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
                 f"New allocation: {new_allocation}"
             )
 
+            print(f"📋 [ALLOCATOR] Modified allocation: {new_allocation}", file=sys.stderr)
 
             return {
                 "messages": [AIMessage(content=f"[ALLOCATOR]\n{reasoning}")],
@@ -1517,6 +1555,7 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
 
     # ALWAYS use algorithmic allocation - LLM's job is reasoning (in Strategist),
     # not arithmetic. The allocator tool handles the computation.
+    print(f"🔧 [ALLOCATOR] Using algorithmic allocation with strategy: {policy_strategy}", file=sys.stderr)
     env = state.get("environment", {})
     configs = state.get("drone_configs", {})
     dist_matrix = state.get("distance_matrix")
@@ -1540,6 +1579,7 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
         f"Allocation: {allocation}"
     )
 
+    print(f"📋 [ALLOCATOR] Algorithmic allocation complete: {allocation}", file=sys.stderr)
 
     return {
         "messages": [AIMessage(content=f"[ALLOCATOR]\n{reasoning}")],
@@ -1611,8 +1651,10 @@ def parse_allocation_from_json(
         # Extract excluded targets
         excluded_targets = data.get("excluded", [])
 
+        print(f"📋 [ALLOCATOR] Successfully parsed JSON allocation", file=sys.stderr)
 
     except (json.JSONDecodeError, KeyError, TypeError) as e:
+        print(f"⚠️ [ALLOCATOR] JSON parsing failed: {e}, falling back to text parsing", file=sys.stderr)
         # Fall back to legacy text parsing
         allocation = parse_allocation_from_reasoning(reasoning, state)
         # Try to extract strategy from text
@@ -1624,11 +1666,14 @@ def parse_allocation_from_json(
                         break
 
     # Log what we parsed
+    print(f"📋 [ALLOCATOR] Parsed allocation: {allocation}", file=sys.stderr)
     total_allocated = sum(len(targets) for targets in allocation.values())
+    print(f"📋 [ALLOCATOR] Total targets allocated: {total_allocated}", file=sys.stderr)
 
     # If parsing failed completely, fall back to algorithmic allocation
     # Use fallback_strategy from Coordinator (not hardcoded "efficient")
     if all(len(v) == 0 for v in allocation.values()):
+        print(f"⚠️ [ALLOCATOR] Parsing failed, using fallback allocation (strategy={fallback_strategy})", file=sys.stderr)
         env = state.get("environment", {})
         dist_matrix = state.get("distance_matrix")
 
@@ -1641,6 +1686,7 @@ def parse_allocation_from_json(
 
         allocation = _allocate_targets_impl(env, configs, fallback_strategy, matrix_data)
         strategy_used = fallback_strategy
+        print(f"📋 [ALLOCATOR] Fallback allocation: {allocation}", file=sys.stderr)
 
     return allocation, strategy_used, excluded_targets
 
@@ -1712,6 +1758,7 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
     import time as _time
     solver_start = _time.time()
 
+    print("\n🛣️ [ROUTE_OPTIMIZER] Computing routes...", file=sys.stderr)
     sys.stderr.flush()
 
     set_state(state)
@@ -1768,6 +1815,7 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
         target_priority_map[tid] = t.get("priority", 5)
 
     if start_with_hint:
+        print(f"🎯 [ROUTE_OPTIMIZER] Sequencing hint: start_with = {start_with_hint}", file=sys.stderr)
 
     for did, target_ids in allocation.items():
         cfg = configs.get(did, {})
@@ -1816,9 +1864,12 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
         # For synthetic starts with return mode, we need best_end (can't return to synthetic)
         if is_synthetic_start and mode == "return":
             mode = "best_end"
+            print(f"[v4][ROUTE_OPT] D{did}: Synthetic start detected, switching mode to best_end", flush=True)
 
         end_airport = cfg_end if mode == "end" else None
 
+        print(f"[v4][ROUTE_OPT] D{did} start_id={start_id} home={home_airport} end={end_airport} "
+              f"synthetic={is_synthetic_start} flexible={flexible_endpoint} mode={mode}", flush=True)
 
         if not target_ids:
             # No targets: for synthetic starts, need to go to nearest real airport
@@ -1862,6 +1913,11 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                 labels = [x for x in labels if not (x in seen or seen.add(x))]
 
                 if not labels or start_id not in labels:
+                    print(
+                        f"⚠️ [ROUTE_OPTIMIZER] No valid labels for D{did} "
+                        f"(start_id={start_id}, targets={target_ids})",
+                        file=sys.stderr,
+                    )
                     routes[did] = {
                         "route": [start_id],
                         "distance": 0.0,
@@ -1893,7 +1949,10 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                         "y": synth_coords.get("y", 0),
                         "is_synthetic": True,
                     })
+                    print(f"[v4][ROUTE_OPT] Added synthetic start {start_id} to airports", flush=True)
 
+                print(f"[v4][ROUTE_OPT] D{did} start_id={start_id} end={end_airport} mode={mode} "
+                      f"labels={labels[:5]}{'...' if len(labels) > 5 else ''}", flush=True)
 
                 solver_env = {
                     "airports": solver_airports,
@@ -1913,6 +1972,7 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                         and not str(a.get("id", "")).endswith("_START")
                     ]
                     solver_env["valid_end_airports"] = valid_end_airports_for_solver
+                    print(f"   ✈️ [v4] Valid end airports (real only): {valid_end_airports_for_solver}", flush=True)
 
                 # Only set end_airport if fixed end mode
                 if mode == "end" and end_airport:
@@ -1923,6 +1983,7 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                 # Extract the actual end airport from solution (solver may have chosen it)
                 actual_end = solution.get("end_airport", end_airport if not flexible_endpoint else home_airport)
                 if flexible_endpoint or mode == "best_end":
+                    print(f"   🎯 [v4] Solver chose endpoint: {actual_end}", flush=True)
 
                 route = solution.get("route", [start_id])
                 distance = solution.get("distance", 0)
@@ -1988,7 +2049,12 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                                 if wp != best_qual_target:
                                     route.append(wp)
 
+                            print(f"🔄 [ROUTE_OPT] D{did}: Reordered route to start with {best_qual_target} "
+                                  f"(priority={target_priority_map.get(best_qual_target, '?')})", file=sys.stderr)
+                            print(f"   Old: {' → '.join(old_route[:5])}{'...' if len(old_route) > 5 else ''}", file=sys.stderr)
+                            print(f"   New: {' → '.join(route[:5])}{'...' if len(route) > 5 else ''}", file=sys.stderr)
                         elif needs_reorder:
+                            print(f"⚠️ [ROUTE_OPT] D{did}: No qualifying targets for start_with constraint in allocation", file=sys.stderr)
 
                 # Determine frozen segments based on sequencing constraints
                 # If start_with constraint was applied, freeze segment 0 (start -> first target)
@@ -1996,6 +2062,7 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                 if start_with_hint and len(route) > 1:
                     # Freeze segment 0: the trajectory from start to first target
                     frozen_segments = [0]
+                    print(f"🔒 [ROUTE_OPT] D{did}: Freezing segment 0 (start_with constraint)", file=sys.stderr)
 
                 routes[did] = {
                     "route": route,
@@ -2021,6 +2088,7 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                     )
 
             except Exception as e:
+                print(f"⚠️ [ROUTE_OPTIMIZER] Error solving D{did}: {e}", file=sys.stderr)
                 # Fallback route uses start_id (may be synthetic)
                 fallback_end = home_airport if is_synthetic_start else start_id
                 routes[did] = {
@@ -2061,6 +2129,7 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
     solver_runtime_ms = int((_time.time() - solver_start) * 1000)
     solver_type = "orienteering_exact" if solver else "heuristic"
 
+    print(f"📋 [ROUTE_OPTIMIZER] Routes computed for {len(routes)} drones in {solver_runtime_ms}ms", file=sys.stderr)
 
     return {
         "messages": [AIMessage(content=f"[ROUTE_OPTIMIZER]\n{route_analysis}")],
@@ -2100,6 +2169,7 @@ FINAL_VERDICT: [APPROVED|NEEDS_REVISION|REJECTED]
 
 def critic_node(state: MissionState) -> Dict[str, Any]:
     """Critic reviews the solution and suggests improvements."""
+    print("\n🔍 [CRITIC] Reviewing solution...", file=sys.stderr)
     sys.stderr.flush()
 
     set_state(state)
@@ -2134,6 +2204,7 @@ Flag any violations of HARD CONSTRAINTS (e.g., drone assigned targets it cannot 
     response = llm.invoke(messages)
 
     review = response.content
+    print(f"📋 [CRITIC] Review complete", file=sys.stderr)
 
     # Extract suggestions
     suggestions = []
@@ -2193,6 +2264,7 @@ Follow the user's constraints exactly (e.g., "do not recompute routes").
 
 def responder_node(state: MissionState) -> Dict[str, Any]:
     """Responder formulates the final answer."""
+    print("\n📝 [RESPONDER] Formulating response...", file=sys.stderr)
     sys.stderr.flush()
 
     set_state(state)
@@ -2308,6 +2380,7 @@ def handle_solution_response(state: MissionState) -> Dict[str, Any]:
 
 def build_reasoning_workflow():
     """Build the v4 reasoning-based multi-agent workflow with Mission Planner and Optimizer."""
+    print("🔧 [v4] Building reasoning workflow with Mission Planner and Optimizer...", file=sys.stderr)
 
     workflow = StateGraph(MissionState)
 
@@ -2354,6 +2427,7 @@ def build_reasoning_workflow():
     workflow.add_edge("critic", "responder")
     workflow.add_edge("responder", END)
 
+    print("✅ [v4] Workflow built successfully with Mission Planner and Optimizer", file=sys.stderr)
     return workflow.compile()
 
 
@@ -2383,6 +2457,10 @@ def run_multi_agent_v4(
         Result dictionary with response, routes, trajectories, etc.
         Includes trace.env with matrix metadata for reproducibility.
     """
+    print("### V4: run_multi_agent_v4 (isr_agent_multi_v4.py) CALLED ###", flush=True)
+    print(f"\n{'='*60}", file=sys.stderr)
+    print(f"[v4] Processing: {user_message[:80]}...", file=sys.stderr)
+    print(f"{'='*60}", file=sys.stderr)
     sys.stderr.flush()
 
     # ------------------------------------------------------------------
@@ -2393,7 +2471,9 @@ def run_multi_agent_v4(
         try:
             policy_rules = get_active_policy_rules(mode="agentic")
             if policy_rules:
+                print(f"📜 [v4] Loaded {len(policy_rules)} active policy rules", file=sys.stderr)
         except Exception as e:
+            print(f"⚠️ [v4] Failed to load policy rules: {e}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # 1) Normalize inputs
@@ -2483,6 +2563,7 @@ def run_multi_agent_v4(
 
     if sam_matrix and sam_matrix.get("matrix"):
         # Use pre-computed SAM matrix from main.py (preferred path)
+        print("✅ [v4] Using pre-computed SAM matrix from caller", file=sys.stderr)
         labels = sam_matrix.get("labels", [])
         matrix_data = sam_matrix.get("matrix", [])
         dist_matrix = {}
@@ -2500,11 +2581,13 @@ def run_multi_agent_v4(
         excluded_targets = sam_matrix.get("excluded_targets", [])
 
         if excluded_targets:
+            print(f"🚫 [v4] Excluded targets (inside SAM zones): {excluded_targets}", file=sys.stderr)
     else:
         # Fallback: compute matrix locally (for backwards compatibility)
         sams = env.get("sams", [])
         try:
             if sams:
+                print("🎯 [v4] Computing SAM-aware distance matrix (fallback)...", file=sys.stderr)
                 dist_data = calculate_sam_aware_matrix(env)
                 labels = dist_data.get("labels", [])
                 matrix_data = dist_data.get("matrix", [])
@@ -2523,7 +2606,9 @@ def run_multi_agent_v4(
                 excluded_targets = dist_data.get("excluded_targets", [])
 
                 if excluded_targets:
+                    print(f"🚫 [v4] Excluded targets (inside SAM zones): {excluded_targets}", file=sys.stderr)
             else:
+                print("📏 [v4] Computing Euclidean distance matrix...", file=sys.stderr)
                 # Simple Euclidean fallback (no SAMs)
                 waypoints: Dict[str, Tuple[float, float]] = {}
 
@@ -2551,6 +2636,7 @@ def run_multi_agent_v4(
                             dist = math.hypot(x2 - x1, y2 - y1)
                             dist_matrix[from_id][to_id] = float(dist)
         except Exception as e:
+            print(f"⚠️ [v4] Failed to compute distance matrix: {e}", file=sys.stderr)
             dist_matrix = {}
 
     # ------------------------------------------------------------------
@@ -2566,9 +2652,12 @@ def run_multi_agent_v4(
         debug=True,
     )
 
+    print(f"🎯 [v4] Coordinator decision: intent={coordinator_decision.intent}, "
+          f"confidence={coordinator_decision.confidence:.2f}", file=sys.stderr)
 
     # If Coordinator found validation errors, return early
     if not coordinator_decision.is_valid:
+        print(f"❌ [v4] Coordinator validation failed: {coordinator_decision.errors}", file=sys.stderr)
         return {
             "response": f"Validation error: {'; '.join(coordinator_decision.errors)}",
             "routes": {},
@@ -2604,6 +2693,7 @@ def run_multi_agent_v4(
     # ------------------------------------------------------------------
     if coordinator_synthetic_starts:
         env["synthetic_starts"] = coordinator_synthetic_starts
+        print(f"📍 [v4] Populated env.synthetic_starts: {list(coordinator_synthetic_starts.keys())}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # 3c) Parse constraint program from user message (sequencing hints)
@@ -2617,7 +2707,9 @@ def run_multi_agent_v4(
     constraint_program = constraint_parse_result.program.to_dict() if not constraint_parse_result.program.is_empty() or sequencing_hints else None
 
     if sequencing_hints:
+        print(f"🎯 [v4] Parsed sequencing hints: {sequencing_hints}", file=sys.stderr)
     if constraint_parse_result.program.constraints:
+        print(f"📋 [v4] Parsed {len(constraint_parse_result.program.constraints)} constraint operations", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # 4) Build initial mission state for the v4 workflow
@@ -2674,6 +2766,7 @@ def run_multi_agent_v4(
     try:
         final_state = workflow.invoke(initial_state)
     except Exception as e:
+        print(f"❌ [v4] Workflow error: {e}", file=sys.stderr)
         return {
             "response": f"Error processing request: {str(e)}",
             "routes": {},
@@ -2713,6 +2806,7 @@ def run_multi_agent_v4(
                 drone_configs=normalized_configs,
             )
         except Exception as e:
+            print(f"[v4] Error computing mission metrics: {e}", flush=True)
             mission_metrics = {}
 
     # Attach metrics for Strategist / Responder
@@ -2755,6 +2849,7 @@ def run_multi_agent_v4(
                 float(synth_coords.get("x", 0.0)),
                 float(synth_coords.get("y", 0.0)),
             ]
+            print(f"📍 [v4] Added synthetic start to waypoints: {synth_id}", file=sys.stderr)
 
     # Also check routes for synthetic starts that may not be in guardrails
     for did, route_data in routes.items():
@@ -2769,6 +2864,7 @@ def run_multi_agent_v4(
                                 float(wp.get("x", 0.0)),
                                 float(wp.get("y", 0.0)),
                             ]
+                            print(f"📍 [v4] Added synthetic start from sam_matrix: {start_id}", file=sys.stderr)
                             break
 
     sams = env.get("sams", []) or []
@@ -2778,6 +2874,7 @@ def run_multi_agent_v4(
         try:
             trajectory_planner = ISRTrajectoryPlanner(sams)
         except Exception as e:
+            print(f"⚠️ [v4] Failed to initialize ISRTrajectoryPlanner: {e}", file=sys.stderr)
             trajectory_planner = None
 
     # Generate trajectories drone-by-drone
@@ -2810,6 +2907,7 @@ def run_multi_agent_v4(
                     drone_id=str(did),
                 )
             except Exception as e:
+                print(f"⚠️ [v4] Trajectory planner error for D{did}: {e}", file=sys.stderr)
                 traj_pts = _straight_line_traj()
         else:
             traj_pts = _straight_line_traj()

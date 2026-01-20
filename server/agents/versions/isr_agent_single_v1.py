@@ -220,9 +220,11 @@ def _compute_distance_matrix(env: Dict[str, Any]) -> tuple:
                 for j, to_id in enumerate(labels):
                     matrix[from_id][to_id] = round(matrix_data[i][j], 2)
 
+            print(f"✅ Using SAM-aware distance matrix ({len(labels)} waypoints, {len(paths)} SAM-avoiding paths)")
             return matrix, paths
 
         except Exception as e:
+            print(f"⚠️ SAM-aware matrix calculation failed: {e}, falling back to Euclidean")
 
     # Fallback: Simple Euclidean distances
     waypoints = {}
@@ -1583,6 +1585,11 @@ def solve_with_constraints(constraints: str, strategy: str = "efficient") -> str
         matrix_data = {"labels": labels, "matrix": matrix}
 
     # Step 1: Parse constraints
+    print(f"\n{'='*60}", flush=True)
+    print(f"🎯 SOLVING WITH CONSTRAINTS", flush=True)
+    print(f"   Constraints: {constraints}", flush=True)
+    print(f"   Strategy: {strategy}", flush=True)
+    print(f"{'='*60}", flush=True)
 
     priority_filters = parse_priority_constraints(constraints)
 
@@ -1600,14 +1607,17 @@ def solve_with_constraints(constraints: str, strategy: str = "efficient") -> str
     if not constrained_configs:
         return "Error: No enabled drones found in constraints. Make sure drone IDs match (D1, D2, etc.)"
 
+    print(f"📋 Only allocating to constrained drones: {list(constrained_configs.keys())}", flush=True)
 
     allocation = allocate_with_priority_filters(
         env, constrained_configs, priority_filters, strategy, matrix_data
     )
 
+    print(f"\n📊 Allocation complete:", flush=True)
     for did, tids in allocation.items():
         if tids:
             pts = sum(targets[t].get("priority", 5) for t in tids if t in targets)
+            print(f"   D{did}: {len(tids)} targets, {pts} pts → {tids}", flush=True)
 
     # Step 3: Solve all drones IN PARALLEL
     def solve_drone(drone_id: str, allocated_targets: List[str]) -> Dict[str, Any]:
@@ -1656,6 +1666,7 @@ def solve_with_constraints(constraints: str, strategy: str = "efficient") -> str
     results = {}
     enabled_drones = list(constrained_configs.keys())
 
+    print(f"\n⚡ Solving {len(enabled_drones)} constrained drones in PARALLEL...", flush=True)
 
     with ThreadPoolExecutor(max_workers=len(enabled_drones)) as executor:
         futures = {
@@ -1668,10 +1679,13 @@ def solve_with_constraints(constraints: str, strategy: str = "efficient") -> str
             try:
                 result = future.result()
                 results[drone_id] = result
+                print(f"   ✅ D{drone_id}: {len(result['route'])} waypoints, {result['points']} pts", flush=True)
             except Exception as e:
+                print(f"   ❌ D{drone_id}: Error - {e}", flush=True)
                 results[drone_id] = {"drone_id": drone_id, "route": [], "points": 0, "distance": 0}
 
     elapsed = time.time() - start_time
+    print(f"\n⏱️  Total solve time: {elapsed:.2f}s", flush=True)
 
     # Step 4: Format output
     lines = [
@@ -2050,6 +2064,9 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
     final_state = None
     step_count = 0
     tool_call_history = []  # Track tool calls to detect loops
+    print(f"\n{'='*60}", file=sys.stderr)
+    print(f"🤖 AGENT WORKFLOW STARTED", file=sys.stderr)
+    print(f"{'='*60}", file=sys.stderr)
     sys.stderr.flush()
 
     for step in workflow.stream(initial_state, config=config):
@@ -2061,13 +2078,20 @@ def run_isr_agent(env: Dict[str, Any], user_query: str,
                 if msg and hasattr(msg, "tool_calls") and msg.tool_calls:
                     tool_names = [tc["name"] for tc in msg.tool_calls]
                     tool_call_history.append(tool_names)
+                    print(f"[Step {step_count}] 🔧 Agent calling: {tool_names}", file=sys.stderr)
                     sys.stderr.flush()
                 elif msg:
+                    print(f"[Step {step_count}] ✅ Agent response ready (no tool calls)", file=sys.stderr)
                     sys.stderr.flush()
             elif node_name == "tools":
+                print(f"[Step {step_count}] 📦 Tools executed", file=sys.stderr)
                 sys.stderr.flush()
         final_state = step
 
+    print(f"{'='*60}", file=sys.stderr)
+    print(f"🏁 AGENT WORKFLOW COMPLETED after {step_count} steps", file=sys.stderr)
+    print(f"   Tool call history: {tool_call_history}", file=sys.stderr)
+    print(f"{'='*60}\n", file=sys.stderr)
     sys.stderr.flush()
 
     # Extract response

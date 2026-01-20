@@ -20,6 +20,7 @@ class DeliverySolver:
         Args:
             no_fly_zones: List of {'x': float, 'y': float, 'radius': float}
         """
+        print("🚀 Initializing Delivery Solver...")
         self.no_fly_zones = no_fly_zones
 
         # Initialize modular components
@@ -27,6 +28,7 @@ class DeliverySolver:
         self.trajectory_planner = NFZTrajectoryPlanner(no_fly_zones)
         self.orienteering_solver = DeliveryOrienteeringSolver()
 
+        print("✅ Solver components initialized")
 
     def calculate_distance_matrix(self, warehouse: Dict, addresses: List[Dict]) -> Dict:
         """
@@ -59,18 +61,32 @@ class DeliverySolver:
         Returns:
             Dict with route, distance, and trajectory
         """
+        print("\n" + "="*60)
+        print("📍 DELIVERY ROUTE OPTIMIZATION")
+        print("="*60)
 
         # Step 1: Calculate NFZ-aware distance matrix
+        print("\n[1/3] Calculating NFZ-aware distances...")
         distance_matrix = self.calculate_distance_matrix(warehouse, addresses)
 
         # Step 2: Solve orienteering problem for optimal sequence
+        print("\n[2/3] Finding optimal address sequence...")
         route_solution = self.orienteering_solver.solve_delivery_route(
             warehouse, addresses, distance_matrix, fuel_budget
         )
 
         # Step 3: Generate detailed trajectory
+        print("\n[3/3] Generating NFZ-avoiding trajectory...")
         trajectory = self._generate_trajectory(route_solution['route'], warehouse, addresses)
 
+        print("\n" + "="*60)
+        print("✅ ROUTE OPTIMIZATION COMPLETE")
+        print("="*60)
+        print(f"📊 Addresses visited: {route_solution['addresses_visited']}/{len(addresses)}")
+        print(f"📏 Total distance: {route_solution['distance']:.1f} units")
+        print(f"⛽ Fuel budget: {fuel_budget:.1f} units")
+        print(f"💰 Remaining: {fuel_budget - route_solution['distance']:.1f} units")
+        print("="*60 + "\n")
 
         return {
             'route': route_solution['route'],
