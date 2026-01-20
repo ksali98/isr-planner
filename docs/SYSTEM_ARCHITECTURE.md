@@ -285,6 +285,139 @@ A segmented mission can be created through the UI workflow described above (solv
 
 ---
 
+## Rebuild Plan: Segmented Mission System
+
+Both the **generation** (fresh creation/export) and **usage** (import/replay) of segmented missions need to be rebuilt from scratch with a clean, consistent design.
+
+### Goals for Rebuild
+
+1. **Single source of truth** - One place where segment data lives
+2. **Simple data flow** - No splicing/extraction gymnastics
+3. **Predictable behavior** - Same code path for fresh creation and import replay
+4. **Clean separation** - Generation logic separate from playback logic
+
+### Proposed Architecture
+
+#### Data Store: `SegmentedMission` Object
+
+```javascript
+const segmentedMission = {
+  // Base environment (targets, airports, SAMs visible at start)
+  baseEnvironment: { targets, airports, sams, drone_configs },
+
+  // Array of segments, each self-contained
+  segments: [
+    {
+      index: 0,
+      // What the solver returned (raw, unmodified)
+      solution: {
+        routes: { droneId: { route: [...], trajectory: [[x,y],...] } },
+      },
+      // Environment state for THIS segment (targets added/removed)
+      environment: { targets, airports, sams, drone_configs },
+      // Cut info (null for final segment)
+      cut: {
+        positions: { droneId: [x, y] },  // Where each drone was
+        distance: 45.5,                   // Total distance at cut
+      },
+      // Drones lost AT THE END of this segment (disabled at the cut)
+      lostDrones: [],
+      // Drones added AT THE START of this segment
+      addedDrones: [],
+    },
+    // ... more segments
+  ],
+
+  // Computed at load/build time (not stored in JSON)
+  _computed: {
+    combinedTrajectories: { droneId: [[x,y], ...] },  // Full path per drone
+    cutMarkers: [{ label: "C1", position: [x,y], lostDroneId: "1" }, ...],
+    totalDistance: 150.5,
+  }
+};
+```
+
+#### Generation (Fresh Creation) Flow
+
+```
+[Solve Segment 0]
+    → Store raw solver output in segments[0].solution
+    → segments[0].environment = current env state
+
+[User Cuts at position P]
+    → segments[0].cut = { positions: P, distance: D }
+    → Freeze segment 0
+
+[User makes changes, Solves Segment 1]
+    → Store raw solver output in segments[1].solution
+    → segments[1].environment = current env state (may have new targets)
+    → If drones disabled: segments[0].lostDrones = [disabled drone ids]
+    → If drones added: segments[1].addedDrones = [new drone ids]
+
+[Repeat until done]
+
+[Export to JSON]
+    → Write segmentedMission to file (excluding _computed)
+```
+
+#### Usage (Import/Replay) Flow
+
+```
+[Load JSON]
+    → Parse into segmentedMission object
+    → Compute combined trajectories
+    → Compute cut markers
+    → Set UI to "ready to animate"
+
+[Animate]
+    → Use _computed.combinedTrajectories for each drone
+    → Each drone animates along its full trajectory independently
+    → At cut distances, show cut markers
+    → Lost drones stop at their cut position, show red diamond
+    → New drones appear at their segment's start
+
+[Reset]
+    → Clear visited targets
+    → Reset all drone positions to trajectory start
+    → Ready to animate again
+```
+
+#### Key Principle: Same Animation Code for Both Paths
+
+Whether the mission was just created (fresh) or loaded from JSON (import), the animation uses the SAME code:
+
+1. Build combined trajectories from segments (already done at load time for imports)
+2. Each drone animates along its combined trajectory
+3. Cut markers displayed based on segment cut data
+4. Lost/added drones handled based on segment metadata
+
+### What Changes from Current Implementation
+
+| Current | Proposed |
+|---------|----------|
+| Multiple state objects (missionReplay, state.routes, draftSolution, seg0FullSolution, checkpoint.segments) | Single `segmentedMission` object |
+| Splice prefix+suffix at solve, extract at accept | Store raw solver output, concatenate at animation time |
+| Different code paths for fresh vs import | Same code path, just different data source |
+| Complex segment switching during animation | Pre-computed combined trajectories |
+| Global missionDistance syncing all drones | Each drone tracks own progress |
+
+### Files to Rebuild
+
+1. **`webapp/segmented_mission.js`** (NEW)
+   - `SegmentedMission` class
+   - `addSegment()`, `exportToJSON()`, `importFromJSON()`
+   - `computeCombinedTrajectories()`
+
+2. **`webapp/isr.js`** (MODIFY)
+   - Remove: `missionReplay`, `segmentedImport`, `seg0FullSolution`, complex splicing
+   - Add: Use new `SegmentedMission` class
+   - Simplify: Animation to use pre-computed trajectories
+
+3. **`webapp/segment_manager.js`** (POSSIBLY REMOVE or SIMPLIFY)
+   - Current functionality absorbed into `SegmentedMission`
+
+---
+
 ## File References
 
 - Main UI: `webapp/isr.js`
