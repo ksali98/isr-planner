@@ -6335,7 +6335,10 @@ async function runPlanner() {
     }
 
     // If this was a checkpoint replan, splice new trajectories with frozen prefixes
-    if (isCheckpointReplan && state.checkpoint?.segments) {
+    // CRITICAL: Only splice during AUTHORING mode (CHECKPOINT), NOT during replay/reset.
+    // Splicing during replay causes trajectory/route mismatches and phantom drones.
+    const isAuthoringMode = missionState.mode === MissionMode.CHECKPOINT;
+    if (isCheckpointReplan && state.checkpoint?.segments && isAuthoringMode) {
       const newRoutes = data.routes || {};
 
       Object.entries(newRoutes).forEach(([did, routeData]) => {
@@ -6379,6 +6382,9 @@ async function runPlanner() {
       appendDebugLine("📎 Spliced new trajectories with frozen prefixes");
       // NOTE: state.pendingCutDistance was already set in freezeAtCheckpoint()
       appendDebugLine(`📏 Cut distance for this segment: ${state.pendingCutDistance?.toFixed(1) || "null"}`);
+    } else if (isCheckpointReplan && state.checkpoint?.segments && !isAuthoringMode) {
+      // Log when we skip splicing because we're in replay mode
+      appendDebugLine(`⏭️ Skipping trajectory splice (mode=${missionState.mode}, not CHECKPOINT authoring mode)`);
     }
 
     // Store as draft solution (two-phase commit)
@@ -8108,10 +8114,46 @@ function attachMissionControlHandlers() {
       } else if (perms.canResume) {
         resumeAnimation();
       } else if (perms.canAnimate) {
-        // Start animation for all drones that have a valid trajectory
+        // Start animation for drones that meet the ACTIVE DRONE CONTRACT:
+        // 1. Has a valid route (length >= 2 waypoints)
+        // 2. Has a valid trajectory (length >= 2 points)
+        // 3. Is not lost/disabled
+
+        // Collect all lost drones from all segments
+        const allLostDrones = new Set();
+        for (let i = 0; i < missionReplay.getSegmentCount(); i++) {
+          const seg = missionReplay.getSegment(i);
+          if (seg?.lostDrones) {
+            seg.lostDrones.forEach(did => allLostDrones.add(String(did)));
+          }
+        }
+
         const animDrones = Object.keys(state.routes || {})
           .map(String)
-          .filter(did => Array.isArray(state.routes[did]?.trajectory) && state.routes[did].trajectory.length >= 2);
+          .filter(did => {
+            const routeData = state.routes[did];
+            const route = routeData?.route || [];
+            const trajectory = routeData?.trajectory || [];
+            const isLost = allLostDrones.has(did);
+            const isDisabled = state.droneConfigs?.[did]?.enabled === false;
+
+            // Must have valid route AND trajectory AND not be lost/disabled
+            const hasValidRoute = Array.isArray(route) && route.length >= 2;
+            const hasValidTrajectory = Array.isArray(trajectory) && trajectory.length >= 2;
+            const isActive = !isLost && !isDisabled;
+
+            if (!hasValidRoute && hasValidTrajectory) {
+              appendDebugLine(`⚠️ D${did} has trajectory (${trajectory.length}pts) but invalid route (${route.length}wps) - SKIPPING`);
+            }
+            if (isLost) {
+              appendDebugLine(`⚠️ D${did} is lost - SKIPPING`);
+            }
+            if (isDisabled) {
+              appendDebugLine(`⚠️ D${did} is disabled - SKIPPING`);
+            }
+
+            return hasValidRoute && hasValidTrajectory && isActive;
+          });
 
         appendDebugLine(`MC Animate: animDrones=[${animDrones.join(",")}] (routes=${Object.keys(state.routes||{}).join(",")})`);
 
