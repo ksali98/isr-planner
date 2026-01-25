@@ -5951,11 +5951,16 @@ function buildCheckpointEnv() {
     if (hasCheckpointCut) {
       appendDebugLine(`   Using CHECKPOINT cut positions (mid-animation cut)`);
       solverEnv.synthetic_starts = solverEnv.synthetic_starts || {};
+      solverEnv.airports = solverEnv.airports || [];
 
       Object.entries(state.checkpoint.segments).forEach(([did, seg]) => {
         if (!seg?.splitPoint) return;
         const nodeId = `D${did}_START`;
         solverEnv.synthetic_starts[nodeId] = { id: nodeId, x: seg.splitPoint[0], y: seg.splitPoint[1] };
+        // CRITICAL: Add to airports array so backend trajectory planner can find the position
+        if (!solverEnv.airports.some(a => a.id === nodeId)) {
+          solverEnv.airports.push({ id: nodeId, x: seg.splitPoint[0], y: seg.splitPoint[1], is_synthetic: true });
+        }
         // Update ALL start fields to use synthetic start (solver may read any of these)
         if (droneConfigs[did]) {
           droneConfigs[did].start_airport = nodeId;
@@ -5976,8 +5981,15 @@ function buildCheckpointEnv() {
       // We need to copy that to droneConfigs (which was based on state.droneConfigs)
       const cutPos = segmentedImport.getCutPositionForSegment(segIdx);
       if (cutPos) {
+        solverEnv.synthetic_starts = solverEnv.synthetic_starts || {};
+        solverEnv.airports = solverEnv.airports || [];
         Object.entries(cutPos).forEach(([did, pos]) => {
           const nodeId = `D${did}_START`;
+          // Add to synthetic_starts and airports array
+          solverEnv.synthetic_starts[nodeId] = { id: nodeId, x: pos[0], y: pos[1] };
+          if (!solverEnv.airports.some(a => a.id === nodeId)) {
+            solverEnv.airports.push({ id: nodeId, x: pos[0], y: pos[1], is_synthetic: true });
+          }
           // Update ALL start fields to use synthetic start (solver may read any of these)
           if (droneConfigs[did]) {
             droneConfigs[did].start_airport = nodeId;
@@ -6018,6 +6030,7 @@ function buildCheckpointEnv() {
     env2.targets = (env2.targets || []).filter(t => !state.visitedTargets.includes(t.id));
 
     env2.synthetic_starts = env2.synthetic_starts || {};
+    env2.airports = env2.airports || [];
     // Use state.droneConfigs as base to preserve UI-configured values (end_airport, fuel_budget)
     const newDroneConfigs = JSON.parse(JSON.stringify(state.droneConfigs));
 
@@ -6025,6 +6038,10 @@ function buildCheckpointEnv() {
       if (!pos || pos.length !== 2) return;
       const nodeId = `D${did}_START`;
       env2.synthetic_starts[nodeId] = { id: nodeId, x: pos[0], y: pos[1] };
+      // CRITICAL: Add to airports array so backend trajectory planner can find the position
+      if (!env2.airports.some(a => a.id === nodeId)) {
+        env2.airports.push({ id: nodeId, x: pos[0], y: pos[1], is_synthetic: true });
+      }
       // Update ALL start fields to use synthetic start (solver may read any of these)
       if (newDroneConfigs[did]) {
         newDroneConfigs[did].start_airport = nodeId;
@@ -6057,12 +6074,17 @@ function buildCheckpointEnv() {
 
     // Create synthetic starts from the saved cut positions
     env2.synthetic_starts = env2.synthetic_starts || {};
+    env2.airports = env2.airports || [];
     const newDroneConfigs = JSON.parse(JSON.stringify(state.droneConfigs));
 
     Object.entries(liveCurrentSeg.cutPositions).forEach(([did, pos]) => {
       if (!pos || pos.length !== 2) return;
       const nodeId = `D${did}_START`;
       env2.synthetic_starts[nodeId] = { id: nodeId, x: pos[0], y: pos[1] };
+      // CRITICAL: Add to airports array so backend trajectory planner can find the position
+      if (!env2.airports.some(a => a.id === nodeId)) {
+        env2.airports.push({ id: nodeId, x: pos[0], y: pos[1], is_synthetic: true });
+      }
       // Update ALL start fields to use synthetic start (solver may read any of these)
       if (newDroneConfigs[did]) {
         newDroneConfigs[did].start_airport = nodeId;
@@ -6085,6 +6107,7 @@ function buildCheckpointEnv() {
 
   // Add synthetic start nodes for each frozen drone
   env2.synthetic_starts = env2.synthetic_starts || {};
+  env2.airports = env2.airports || [];
 
   // Deep copy drone configs
   const newDroneConfigs = JSON.parse(JSON.stringify(state.droneConfigs));
@@ -6099,6 +6122,10 @@ function buildCheckpointEnv() {
       x: seg.splitPoint[0],
       y: seg.splitPoint[1],
     };
+    // CRITICAL: Add to airports array so backend trajectory planner can find the position
+    if (!env2.airports.some(a => a.id === nodeId)) {
+      env2.airports.push({ id: nodeId, x: seg.splitPoint[0], y: seg.splitPoint[1], is_synthetic: true });
+    }
 
     // Update ALL start fields to use synthetic start (solver may read any of these)
     if (newDroneConfigs[did]) {
