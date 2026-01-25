@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ISR Web Editor + Planner</title>
+  <link rel="stylesheet" href="./isr.css?v=20260103local" />
+</head>
+<body>
+  <div id="app-root">
+    <!-- Top bar -->
+    <header class="top-bar">
+      <div class="top-title">ISR Mission Editor &amp; Planner (Web)</div>
+      <div class="top-env">
+        Env file:
+        <span id="env-filename" class="env-filename">[unsaved]</span>
+      </div>
+    </header>
+
+    <!-- Main 2-column layout -->
+    <main class="main-layout">
+      <!-- LEFT COLUMN: Canvas + sequence + edit toolbar placeholder -->
+      <section class="left-panel">
+        <!-- Canvas / environment -->
+        <div class="canvas-card">
+          <div class="card-header">
+            <span>Mission Map</span>
+            <button id="btn-cancel-solve" class="small-btn" style="background:#dc3545;color:white;display:none;">Cancel Solve</button>
+          </div>
+          <canvas id="env-canvas" width="800" height="800"></canvas>
+        </div>
+
+        <!-- Combined sequence + edit toolbar (single row) -->
+        <div class="unified-toolbar-card">
+          <div class="unified-toolbar">
+            <button id="sequence-apply-btn" class="small-btn secondary-btn">Apply</button>
+            <select id="sequence-drone-select" class="compact-select">
+              <option value="1">D1</option>
+              <option value="2">D2</option>
+              <option value="3">D3</option>
+              <option value="4">D4</option>
+              <option value="5">D5</option>
+            </select>
+            <input id="sequence-input" type="text" placeholder="A1,T1,T2,A1" spellcheck="false" />
+            <span class="toolbar-divider">|</span>
+            <button id="btn-toggle-edit" class="small-btn edit-toggle">Edit</button>
+            <select id="new-target-priority" class="compact-select">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5" selected>5</option>
+              <option value="6">6</option>
+              <option value="7">7</option>
+              <option value="8">8</option>
+              <option value="9">9</option>
+              <option value="10">10</option>
+            </select>
+            <select id="new-target-type" class="compact-select">
+              <option value="a">A</option>
+              <option value="b">B</option>
+              <option value="c">C</option>
+              <option value="d">D</option>
+              <option value="e">E</option>
+            </select>
+            <button id="btn-add-target" class="small-btn add-btn">Target</button>
+            <button id="btn-add-airport" class="small-btn add-btn">Airport</button>
+            <button id="btn-add-sam" class="small-btn add-btn">SAM</button>
+            <select id="new-sam-range" class="compact-select">
+              <option value="5">5</option>
+              <option value="10">10</option>
+              <option value="15" selected>15</option>
+              <option value="20">20</option>
+              <option value="25">25</option>
+              <option value="30">30</option>
+            </select>
+            <button id="btn-delete-selected" class="small-btn danger">Del</button>
+          </div>
+        </div>
+
+        <!-- Mission Control Panel -->
+        <div id="mission-control" class="mission-control-panel">
+          <div class="mc-header">
+            <span class="mc-title">Mission Control</span>
+            <span id="mc-segment-info" class="mc-segment-info">Segment 1</span>
+          </div>
+          <div class="mc-button-row">
+            <!-- Planning/Edit group -->
+            <div class="mc-group mc-group-planning">
+              <button id="mc-run-planner" class="mc-btn mc-btn-primary">Run Planner</button>
+              <button id="mc-edit" class="mc-btn mc-btn-edit">Edit</button>
+              <button id="mc-discard" class="mc-btn mc-btn-danger" disabled>Discard</button>
+            </div>
+            <span class="mc-divider"></span>
+            <!-- Display group -->
+            <div class="mc-group mc-group-display">
+              <button id="mc-display" class="mc-btn mc-btn-display" disabled>Display</button>
+            </div>
+            <span class="mc-divider"></span>
+            <!-- Animation group -->
+            <div class="mc-group mc-group-animation">
+              <button id="mc-animate" class="mc-btn mc-btn-play" disabled>Animate</button>
+              <button id="mc-cut" class="mc-btn mc-btn-cut" disabled>Cut</button>
+              <button id="mc-reset" class="mc-btn mc-btn-reset" disabled>Reset</button>
+            </div>
+          </div>
+          <div class="mc-status">
+            <span id="mc-status-text">Ready - Load an environment to begin</span>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- RIGHT COLUMN: Tabbed interface -->
+      <aside class="right-panel">
+        <!-- Tab buttons -->
+        <div class="tab-bar">
+          <button class="tab-btn active" data-tab="env">Env</button>
+          <button class="tab-btn" data-tab="debug">Debug</button>
+          <button class="tab-btn" data-tab="agents">Agents</button>
+          <button class="tab-btn" data-tab="agents-trace">Trace</button>
+        </div>
+
+        <!-- Tab content container -->
+        <div class="tab-content">
+          <!-- ENV TAB (Combined Stats + Config + Controls) -->
+          <section class="tab-pane active" id="tab-env">
+          <div class="card-header">
+            <span>Mission &amp; Drone Stats</span>
+          </div>
+
+          <div class="stats-grid">
+            <!-- Mission box -->
+            <div class="stat-box" id="stat-mission" style="color: #4ade80;">
+              <div class="stat-title" style="color: #4ade80;">Mission</div>
+              <div class="stat-line" style="color: #4ade80;">
+                Targets / Points:
+                <span id="stat-mission-tp" style="color: #4ade80;">0 / 0</span>
+              </div>
+              <div class="stat-line" style="color: #4ade80;">
+                Fuel / Budget:
+                <span id="stat-mission-fuel" style="color: #4ade80;">0 / 0</span>
+              </div>
+              <div class="stat-line" style="color: #4ade80;">
+                P/F:
+                <span id="stat-mission-pf" style="color: #4ade80;">0.00</span>
+              </div>
+            </div>
+
+            <!-- D1 -->
+            <div class="stat-box" id="stat-d1">
+              <div class="stat-title">D1</div>
+              <div class="stat-line">
+                Targets / Points:
+                <span id="stat-d1-tp">0 / 0</span>
+              </div>
+              <div class="stat-line">
+                Fuel / Budget:
+                <span id="stat-d1-fuel">0 / 0</span>
+              </div>
+              <div class="stat-line">
+                P/F:
+                <span id="stat-d1-pf">0.00</span>
+              </div>
+            </div>
+
+            <!-- D2 -->
+            <div class="stat-box" id="stat-d2">
+              <div class="stat-title">D2</div>
+              <div class="stat-line">
+                Targets / Points:
+                <span id="stat-d2-tp">0 / 0</span>
+              </div>
+              <div class="stat-line">
+                Fuel / Budget:
+                <span id="stat-d2-fuel">0 / 0</span>
+              </div>
+              <div class="stat-line">
+                P/F:
+                <span id="stat-d2-pf">0.00</span>
+              </div>
+            </div>
+
+            <!-- D3 -->
+            <div class="stat-box" id="stat-d3">
+              <div class="stat-title">D3</div>
+              <div class="stat-line">
+                Targets / Points:
+                <span id="stat-d3-tp">0 / 0</span>
+              </div>
+              <div class="stat-line">
+                Fuel / Budget:
+                <span id="stat-d3-fuel">0 / 0</span>
+              </div>
+              <div class="stat-line">
+                P/F:
+                <span id="stat-d3-pf">0.00</span>
+              </div>
+            </div>
+
+            <!-- D4 -->
+            <div class="stat-box" id="stat-d4">
+              <div class="stat-title">D4</div>
+              <div class="stat-line">
+                Targets / Points:
+                <span id="stat-d4-tp">0 / 0</span>
+              </div>
+              <div class="stat-line">
+                Fuel / Budget:
+                <span id="stat-d4-fuel">0 / 0</span>
+              </div>
+              <div class="stat-line">
+                P/F:
+                <span id="stat-d4-pf">0.00</span>
+              </div>
+            </div>
+
+            <!-- D5 -->
+            <div class="stat-box" id="stat-d5">
+              <div class="stat-title">D5</div>
+              <div class="stat-line">
+                Targets / Points:
+                <span id="stat-d5-tp">0 / 0</span>
+              </div>
+              <div class="stat-line">
+                Fuel / Budget:
+                <span id="stat-d5-fuel">0 / 0</span>
+              </div>
+              <div class="stat-line">
+                P/F:
+                <span id="stat-d5-pf">0.00</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Drone Configuration -->
+          <div class="card-header" style="margin-top: 0.5rem;">
+            <span>Drone Configuration</span>
+          </div>
+
+          <div class="config-table">
+            <div class="config-header-row">
+              <div class="config-cell">Drone</div>
+              <div class="config-cell">On</div>
+              <div class="config-cell">Fuel</div>
+              <div class="config-cell">Start</div>
+              <div class="config-cell">End</div>
+              <div class="config-cell config-types">Types</div>
+            </div>
+
+            <!-- Rows D1–D5 -->
+            <div class="config-row" data-drone-id="1">
+              <div class="config-cell label-cell">D1</div>
+              <div class="config-cell">
+                <input type="checkbox" id="cfg-d1-enabled" checked />
+              </div>
+              <div class="config-cell">
+                <input id="cfg-d1-fuel" type="number" min="0" value="150" class="config-input" />
+              </div>
+              <div class="config-cell">
+                <select id="cfg-d1-start" class="config-select"></select>
+              </div>
+              <div class="config-cell">
+                <select id="cfg-d1-end" class="config-select"></select>
+              </div>
+              <div class="config-cell config-types">
+                <label><input id="cfg-d1-type-a" type="checkbox" checked />A</label>
+                <label><input id="cfg-d1-type-b" type="checkbox" checked />B</label>
+                <label><input id="cfg-d1-type-c" type="checkbox" checked />C</label>
+                <label><input id="cfg-d1-type-d" type="checkbox" checked />D</label>
+                <label><input id="cfg-d1-type-e" type="checkbox" checked />E</label>
+              </div>
+            </div>
+
+            <div class="config-row" data-drone-id="2">
+              <div class="config-cell label-cell">D2</div>
+              <div class="config-cell">
+                <input type="checkbox" id="cfg-d2-enabled" checked />
+              </div>
+              <div class="config-cell">
+                <input id="cfg-d2-fuel" type="number" min="0" value="150" class="config-input" />
+              </div>
+              <div class="config-cell">
+                <select id="cfg-d2-start" class="config-select"></select>
+              </div>
+              <div class="config-cell">
+                <select id="cfg-d2-end" class="config-select"></select>
+              </div>
+              <div class="config-cell config-types">
+                <label><input id="cfg-d2-type-a" type="checkbox" checked />A</label>
+                <label><input id="cfg-d2-type-b" type="checkbox" checked />B</label>
+                <label><input id="cfg-d2-type-c" type="checkbox" checked />C</label>
+                <label><input id="cfg-d2-type-d" type="checkbox" checked />D</label>
+                <label><input id="cfg-d2-type-e" type="checkbox" checked />E</label>
+              </div>
+            </div>
+
+            <div class="config-row" data-drone-id="3">
+              <div class="config-cell label-cell">D3</div>
+              <div class="config-cell">
+                <input type="checkbox" id="cfg-d3-enabled" checked />
+              </div>
+              <div class="config-cell">
+                <input id="cfg-d3-fuel" type="number" min="0" value="150" class="config-input" />
+              </div>
+              <div class="config-cell">
+                <select id="cfg-d3-start" class="config-select"></select>
+              </div>
+              <div class="config-cell">
+                <select id="cfg-d3-end" class="config-select"></select>
+              </div>
+              <div class="config-cell config-types">
+                <label><input id="cfg-d3-type-a" type="checkbox" checked />A</label>
+                <label><input id="cfg-d3-type-b" type="checkbox" checked />B</label>
+                <label><input id="cfg-d3-type-c" type="checkbox" checked />C</label>
+                <label><input id="cfg-d3-type-d" type="checkbox" checked />D</label>
+                <label><input id="cfg-d3-type-e" type="checkbox" checked />E</label>
+              </div>
+            </div>
+
+            <div class="config-row" data-drone-id="4">
+              <div class="config-cell label-cell">D4</div>
+              <div class="config-cell">
+                <input type="checkbox" id="cfg-d4-enabled" checked />
+              </div>
+              <div class="config-cell">
+                <input id="cfg-d4-fuel" type="number" min="0" value="150" class="config-input" />
+              </div>
+              <div class="config-cell">
+                <select id="cfg-d4-start" class="config-select"></select>
+              </div>
+              <div class="config-cell">
+                <select id="cfg-d4-end" class="config-select"></select>
+              </div>
+              <div class="config-cell config-types">
+                <label><input id="cfg-d4-type-a" type="checkbox" checked />A</label>
+                <label><input id="cfg-d4-type-b" type="checkbox" checked />B</label>
+                <label><input id="cfg-d4-type-c" type="checkbox" checked />C</label>
+                <label><input id="cfg-d4-type-d" type="checkbox" checked />D</label>
+                <label><input id="cfg-d4-type-e" type="checkbox" checked />E</label>
+              </div>
+            </div>
+
+            <div class="config-row" data-drone-id="5">
+              <div class="config-cell label-cell">D5</div>
+              <div class="config-cell">
+                <input type="checkbox" id="cfg-d5-enabled" checked />
+              </div>
+              <div class="config-cell">
+                <input id="cfg-d5-fuel" type="number" min="0" value="150" class="config-input" />
+              </div>
+              <div class="config-cell">
+                <select id="cfg-d5-start" class="config-select"></select>
+              </div>
+              <div class="config-cell">
+                <select id="cfg-d5-end" class="config-select"></select>
+              </div>
+              <div class="config-cell config-types">
+                <label><input id="cfg-d5-type-a" type="checkbox" checked />A</label>
+                <label><input id="cfg-d5-type-b" type="checkbox" checked />B</label>
+                <label><input id="cfg-d5-type-c" type="checkbox" checked />C</label>
+                <label><input id="cfg-d5-type-d" type="checkbox" checked />D</label>
+                <label><input id="cfg-d5-type-e" type="checkbox" checked />E</label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Allocation Strategy -->
+          <div class="strategy-controls" style="margin-top: 0.5rem; padding: 0.4rem; background: #111827; border-radius: 0.5rem;">
+            <div class="control-label" style="font-size: 0.7rem; color: #9ca3af; margin-bottom: 0.3rem;">Allocation Strategy:</div>
+            <select id="allocation-strategy" class="config-select" style="width: 100%;">
+              <option value="efficient" selected>Efficient (Auction)</option>
+              <option value="greedy">Greedy (Fast)</option>
+              <option value="balanced">Balanced (Equal Load)</option>
+              <option value="geographic">Geographic (Corridor)</option>
+              <option value="exclusive">Exclusive (Unique First)</option>
+              <option value="hungarian" disabled style="color: #6b7280;">Hungarian (Optimal) - Coming Soon</option>
+            </select>
+          </div>
+
+          <!-- Target Allocation Results -->
+          <div class="control-label" style="margin-top: 0.5rem; font-size: 0.7rem; color: #9ca3af;">Target Allocation:</div>
+          <div id="allocation-display" style="font-family: monospace; font-size: 11px; padding: 0.5rem; background: #1a1a2e; border-radius: 4px; max-height: 120px; overflow-y: auto;">
+            <div style="color: #888;">Run planner to see allocation...</div>
+          </div>
+
+          <!-- Trajectory display buttons -->
+          <div class="trajectory-controls">
+            <div class="control-label">Show Trajectories:</div>
+            <div class="traj-btn-row">
+              <button id="traj-d1" class="traj-btn traj-d1">D1</button>
+              <button id="traj-d2" class="traj-btn traj-d2">D2</button>
+              <button id="traj-d3" class="traj-btn traj-d3">D3</button>
+              <button id="traj-d4" class="traj-btn traj-d4">D4</button>
+              <button id="traj-d5" class="traj-btn traj-d5">D5</button>
+              <button id="traj-all" class="traj-btn traj-all">Display All</button>
+            </div>
+          </div>
+
+          <!-- Animation buttons -->
+          <div class="animation-controls">
+            <div class="control-label">Animate:</div>
+            <div class="anim-btn-row">
+              <button id="anim-d1" class="anim-btn anim-d1">D1</button>
+              <button id="anim-d2" class="anim-btn anim-d2">D2</button>
+              <button id="anim-d3" class="anim-btn anim-d3">D3</button>
+              <button id="anim-d4" class="anim-btn anim-d4">D4</button>
+              <button id="anim-d5" class="anim-btn anim-d5">D5</button>
+              <button id="anim-all" class="anim-btn anim-all">Display All</button>
+              <button id="anim-stop" class="anim-btn anim-stop">Stop</button>
+            </div>
+          </div>
+
+          <!-- Optimization buttons -->
+          <div class="optimization-controls" style="margin-top: 0.5rem; padding: 0.4rem; background: #111827; border-radius: 0.5rem;">
+            <div class="control-label" style="font-size: 0.7rem; color: #9ca3af; margin-bottom: 0.3rem;">Post-Optimization:</div>
+            <div style="display: flex; gap: 0.5rem;">
+              <button id="btn-optimize-insert" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Insert unvisited targets into routes with leftover fuel">Insert</button>
+              <button id="btn-optimize-swap-until" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Swap targets between drones for shorter routes">Swap</button>
+              <button id="btn-optimize-cross" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Remove self-crossings from trajectories using 2-opt">No Cross</button>
+            </div>
+            <div style="margin-top:0.4rem; display:flex; align-items:center; gap:0.6rem; font-size:12px; color:#cbd5e1;">
+              <input type="checkbox" id="chk-auto-regen" />
+              <label for="chk-auto-regen" style="margin:0">Auto-regenerate &amp; cascade (one-click)</label>
+            </div>
+          </div>
+
+          <!-- Import/Export buttons -->
+          <div class="io-row" style="margin-top: 0.5rem;">
+            <button id="btn-import" class="primary-btn" style="padding: 8px 16px; font-size: 14px; font-weight: bold;">Import JSON</button>
+            <button id="btn-export" class="primary-btn" style="padding: 8px 16px; font-size: 14px; font-weight: bold; background: #28a745;">Export</button>
+            <input
+              id="file-input"
+              type="file"
+              accept=".json,application/json"
+              style="display:none"
+            />
+          </div>
+          <!-- Export type radio buttons -->
+          <div class="io-row" style="margin-top: 0.3rem; display: flex; gap: 1rem; align-items: center;">
+            <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer;">
+              <input type="radio" name="export-type" id="export-type-mission" value="mission" checked />
+              <span style="font-size: 13px;">Mission</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer;">
+              <input type="radio" name="export-type" id="export-type-env" value="env" />
+              <span style="font-size: 13px;">Environment</span>
+            </label>
+          </div>
+          </section>
+
+          <!-- DEBUG TAB -->
+          <section class="tab-pane" id="tab-debug">
+          <div class="card-header">
+            <span>Debug Output</span>
+          </div>
+
+          <div class="debug-section">
+            <div class="debug-title">Planner response:</div>
+            <pre id="debug-output" class="debug-output">// Waiting for planner...</pre>
+          </div>
+          </section>
+
+          <!-- AGENTS TAB -->
+          <section class="tab-pane" id="tab-agents">
+          <div class="card-header">
+            <span>ISR Mission Planner Agent</span>
+            <div class="agent-header-buttons">
+              <button id="agent-import-btn" class="small-btn">Import</button>
+              <button id="agent-export-btn" class="small-btn">Export</button>
+            </div>
+          </div>
+          <div class="agent-chat-container">
+            <!-- Input area (at top) -->
+            <div class="agent-input-area">
+              <textarea id="agent-input" class="agent-input" placeholder="Type your question and press Enter..." rows="2"></textarea>
+              <button id="btn-send-agent" class="primary-btn">Send</button>
+            </div>
+            <div id="agent-status" class="agent-status" aria-live="polite"></div>
+            <!-- Chat history (scrollable, below input) -->
+            <div id="agent-chat-history" class="agent-chat-history">
+              <div class="agent-message system-message">
+                Ask me to plan routes, like: "Plan a mission for all drones" or "What targets can D2 visit?"
+              </div>
+            </div>
+            <!-- Memory Management Section -->
+            <div class="agent-memory-section">
+              <div class="memory-header">
+                <span class="memory-title">Agent Memory (<span id="memory-count">0</span>)</span>
+                <button id="btn-toggle-memory" class="small-btn">Show</button>
+                <button id="btn-clear-memory" class="small-btn danger-btn">Clear All</button>
+              </div>
+              <div id="memory-panel" class="memory-panel" style="display: none;">
+                <div class="memory-add-form">
+                  <select id="memory-category">
+                    <option value="correction">Correction</option>
+                    <option value="instruction">Instruction</option>
+                    <option value="preference">Preference</option>
+                    <option value="fact">Fact</option>
+                  </select>
+                  <input type="text" id="memory-input" placeholder="Add a memory (e.g., 'Always start routes from A1')">
+                  <button id="btn-add-memory" class="small-btn">Add</button>
+                </div>
+                <div id="memory-list" class="memory-list"></div>
+              </div>
+            </div>
+          </div>
+          </section>
+
+          <!-- AGENTS TRACE TAB -->
+          <section class="tab-pane" id="tab-agents-trace">
+            <div class="card-header">
+              <span>Agent Trace Log</span>
+              <button id="btn-clear-trace" class="small-btn danger-btn">Clear</button>
+            </div>
+            <div id="agents-trace-content" class="trace-container">
+              <div class="trace-empty">No agent runs yet. Send a message in the Agents tab.</div>
+            </div>
+          </section>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="./isr.js?v=20260119-frozen-fix"></script>
+</body>
+</html>

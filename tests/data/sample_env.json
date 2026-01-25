@@ -1,0 +1,35 @@
+{
+  "schema": "isr_env_v2",
+  "airports": [
+    {"id": "A1", "label": "A1", "x": 50, "y": 50},
+    {"id": "A2", "label": "A2", "x": 750, "y": 550}
+  ],
+  "targets": [
+    {"id": "T1", "label": "T1", "x": 150, "y": 120, "priority": 10, "type": "a"},
+    {"id": "T2", "label": "T2", "x": 280, "y": 200, "priority": 8, "type": "b"},
+    {"id": "T3", "label": "T3", "x": 400, "y": 150, "priority": 6, "type": "a"},
+    {"id": "T4", "label": "T4", "x": 520, "y": 300, "priority": 9, "type": "c"},
+    {"id": "T5", "label": "T5", "x": 350, "y": 400, "priority": 7, "type": "b"},
+    {"id": "T6", "label": "T6", "x": 600, "y": 450, "priority": 5, "type": "a"},
+    {"id": "T7", "label": "T7", "x": 200, "y": 350, "priority": 4, "type": "c"},
+    {"id": "T8", "label": "T8", "x": 680, "y": 250, "priority": 10, "type": "b"}
+  ],
+  "sams": [
+    {"pos": [300, 280], "range": 40},
+    {"pos": [500, 180], "range": 35}
+  ],
+  "drone_configs": {
+    "1": {
+      "enabled": true,
+      "fuelBudget": 500,
+      "homeAirport": "A1",
+      "accessibleTargets": []
+    },
+    "2": {
+      "enabled": true,
+      "fuelBudget": 450,
+      "homeAirport": "A2",
+      "accessibleTargets": []
+    }
+  }
+}
