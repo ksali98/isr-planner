@@ -179,28 +179,241 @@ function buildFullTrajectory(droneId) {
 
 ---
 
-## Questions for Clarification
+## Segmented Mission Mechanics (Detailed)
 
-1. **When a cut happens, what exactly gets saved?**
-   - Just the cut positions?
-   - Or the truncated trajectories up to that point?
+### Cut Workflow
 
-2. **Should new drones (added in later segments) animate from when they join?**
-   - Or should they "catch up" somehow?
+**How a Cut is Triggered:**
+1. User clicks the **"Cut"** button (usually during or after animation pause)
+2. System marks current drone positions with **white diamond** markers (C1, C2, etc.)
+3. User can now edit the environment (add/remove targets, disable drones, etc.)
+4. User clicks **Solve** to plan from the cut positions
+5. User clicks **Accept** to freeze the segment
+6. Animation can continue from the cut
 
-3. **For lost drones, should they:**
-   - Disappear after their cut?
-   - Stay visible at cut position with red marker?
-   - Stay visible with trajectory shown up to cut?
+**Future Enhancement:** Automatic cuts triggered by environment changes
 
-4. **What triggers a "cut"?**
-   - User clicks Cut button during animation?
-   - User pauses and makes changes?
-   - Automatic based on events?
+### What Gets Saved at a Cut
 
-5. **When saving a segmented environment:**
-   - Save segment structure for replay?
-   - Or just save final state?
+When a cut occurs, the following data is stored:
+
+1. **Cut Positions**: Exact [x, y] coordinates for each active drone
+2. **Cut Distance**: Total distance traveled when cut occurred (for animation sync)
+3. **Frozen Trajectory**: The complete trajectory up to the cut point (IMMUTABLE forever)
+4. **Environment Snapshot**: All targets, airports, SAMs, and drone configs at this moment
+5. **Lost Drones**: List of drone IDs that were disabled at this cut
+
+**Key Principle:** Everything before a cut is **frozen forever** and NEVER re-solved.
+
+### Frozen Segments Behavior
+
+- **Segment 0** trajectory from airport to Cut 1: FROZEN
+- **Segment 1** trajectory from Cut 1 to Cut 2: FROZEN (after Accept)
+- **Segment N** trajectory from Cut N to airport: Current/editable until Accept
+
+When solving from a cut, the solver receives:
+- Synthetic start nodes at cut positions
+- Current environment state (possibly modified)
+- Remaining fuel budgets
+- Solver returns NEW trajectory from synthetic start to destination
+
+The new trajectory is then stored as Segment N+1.
+
+### New Drones (Added Mid-Mission)
+
+**Behavior:**
+- New drones **DO NOT** start from the cut position
+- They **take off from their home airport** at the cut time
+- Their trajectory is planned from airport → targets → airport
+- During animation, they appear when their segment begins
+- They catch up in real-time (not instant teleportation)
+
+**Example:**
+- Cut 1 happens at distance 50
+- Drone 3 added in Segment 1
+- Drone 3 starts from airport A2, flies its full path
+- Animation shows Drone 3 taking off when Segment 1 starts
+
+### Disabled Drones (Lost Drones)
+
+**Behavior:**
+- Drone is marked as disabled at the cut
+- **RED diamond** marker appears at its final position
+- Full trajectory up to cut point **remains visible** on map
+- Drone does NOT appear in subsequent segments
+- Recorded in `lostDrones` array for that segment
+
+**Visual States:**
+- White diamond (C1, C2...): Active cut position
+- Red diamond: Disabled drone's final position
+
+### Animation Across Segments
+
+**Segment Transitions:**
+1. Animation reaches a `cutDistance` marker
+2. **1-second pause** to show the cut
+3. Visual indicators:
+   - White diamond markers appear
+   - New targets appear (if added)
+   - Disabled targets fade out
+   - Lost drones show red diamond
+4. Animation continues with next segment's trajectories
+
+**Reset Behavior:**
+- Returns to beginning (Segment 0 start)
+- Clears all visited target markers
+- Full mission replays from segment 0 through all segments
+
+### Segmented JSON Export
+
+**What Gets Saved:**
+```json
+{
+  "version": "segmented_v1",
+  "segments": [
+    {
+      "index": 0,
+      "solution": { /* routes, trajectories */ },
+      "cutPositions": { "1": [x,y], "2": [x,y] },
+      "cutDistance": 45.5,
+      "environment": { /* targets, airports, SAMs, drone_configs */ },
+      "lostDrones": [],
+      "visitedTargets": []
+    }
+  ]
+}
+```
+
+**Every segment includes:**
+- Complete environment configuration (targets, airports, SAMs)
+- Full drone configurations (fuel, capabilities)
+- Complete solution (routes, trajectories, sequences)
+- Cut metadata (positions, distance)
+- Lost/added drone tracking
+
+This allows full replay without the original environment file.
+
+---
+
+## Agentic Reasoning and Constraints
+
+### Philosophy: Leverage LLM Reasoning Power
+
+The ISR Planner's Agentic mode is designed to **leverage the full reasoning capabilities of LLMs** rather than constraining them to a fixed set of operations.
+
+**Key Principle:**
+- The LLM is NOT limited to predefined constraint types
+- The LLM can understand ANY mission requirement expressed in natural language
+- The LLM directly manipulates allocations and uses solver tools to find optimal solutions
+- The LLM iterates and reasons about tradeoffs
+
+### How Agentic Mode Works
+
+**1. Natural Language Understanding**
+User expresses constraints in ANY form:
+- "Drone 2 should visit the high-priority targets in the north"
+- "Balance fuel usage across all drones"
+- "Avoid having drones cross paths near the SAM zone"
+- "Prioritize targets near airports for Drone 1"
+- "Make sure all Type A targets are visited before Type B"
+
+**2. LLM Reasoning**
+The LLM:
+- Understands the intent behind the constraint
+- Analyzes the current mission state (targets, drones, fuel, SAMs)
+- Reasons about which allocation changes would satisfy the constraint
+- Considers multiple approaches and tradeoffs
+
+**3. Direct Allocation Editing**
+The LLM can:
+- Assign targets to specific drones
+- Reorder target sequences
+- Move targets between drones
+- Add/remove targets from routes
+- Adjust priorities and preferences
+
+**4. Tool Usage**
+The LLM uses solving tools to:
+- Test proposed allocations
+- Run the solver with different configurations
+- Compare fuel usage and points collected
+- Iterate until finding a satisfactory solution
+
+**5. Explanation**
+The LLM explains its reasoning:
+- "I assigned T5 to Drone 2 because it's closer and Drone 1 is already at max fuel"
+- "I avoided crossing paths by sequencing Drone 1 clockwise and Drone 2 counterclockwise"
+
+### Example Agentic Flow
+
+```
+User: "I want Drone 1 to focus on the eastern targets and Drone 2 on the western ones"
+  ↓
+LLM Reasoning:
+  - Analyzes geographic distribution of targets
+  - Identifies eastern targets: T1, T3, T5
+  - Identifies western targets: T2, T4, T6
+  - Considers fuel budgets for each drone
+  ↓
+LLM Actions:
+  - Allocates {T1, T3, T5} → Drone 1
+  - Allocates {T2, T4, T6} → Drone 2
+  - Calls solver tool to generate optimized routes
+  ↓
+LLM Response:
+  "I've split the targets geographically. Drone 1 will handle T1, T3, T5
+   in the east (35 fuel, 120 points). Drone 2 will handle T2, T4, T6
+   in the west (32 fuel, 110 points). This minimizes total distance
+   and avoids conflicts."
+```
+
+### Constraint Types: Unlimited
+
+Unlike traditional systems with fixed constraint vocabularies, the Agentic mode can handle:
+
+- **Geographic constraints**: "northern targets", "targets near SAM zones"
+- **Fuel constraints**: "under 50 fuel", "balanced fuel usage"
+- **Priority constraints**: "high-priority first", "Type A before Type B"
+- **Operational constraints**: "avoid crossing paths", "minimize total time"
+- **Sequencing constraints**: "visit T1 before T2", "cluster nearby targets"
+- **Capability constraints**: "only drones with long-range capability"
+- **Novel constraints**: ANY requirement the user can express in natural language
+
+### Supporting Tools and Infrastructure
+
+**Constraint Parsing Helper** ([server/memory/constraints.py](server/memory/constraints.py)):
+- Provides structured constraint operations (FORCE_VISIT, MOVE, REMOVE, SWAP, INSERT) as *shortcuts*
+- These are NOT limitations - just convenient building blocks
+- The LLM can use these or bypass them entirely
+- Includes sequencing hints: start_with, end_with, priority_order
+
+**Agent Tools** ([server/agents/tools/](server/agents/tools/)):
+- Allocation editing tools
+- Solver invocation tools
+- Route analysis tools
+- Fuel/distance calculation tools
+
+**LangGraph Multi-Agent System** ([server/agents/isr_agent_multi_v4.py](server/agents/isr_agent_multi_v4.py)):
+- 6 specialized agents collaborate
+- Strategist: Understands high-level intent
+- Mission Planner: Decomposes constraints
+- Allocator: Edits target assignments
+- Route Optimizer: Runs solver tools
+- Critic: Evaluates solutions
+- Responder: Explains decisions
+
+### Heuristic Mode vs Agentic Mode
+
+**Heuristic Mode:**
+- User manually selects allocation strategy (GREEDY, BALANCED, etc.)
+- User manually edits allocations via UI
+- Direct tool invocation, no reasoning layer
+
+**Agentic Mode:**
+- User expresses intent in natural language
+- LLM reasons about how to satisfy intent
+- LLM manipulates allocations and invokes tools
+- Iterative refinement with explanation
 
 ---
 
@@ -420,12 +633,44 @@ Whether the mission was just created (fresh) or loaded from JSON (import), the a
 
 ## File References
 
-- Main UI: `webapp/isr.js`
-- Segment Manager: `webapp/segment_manager.js`
-- Segmented Import Manager: `webapp/isr.js` (segmentedImport object)
-- Server Solver: `server/solver/solver_bridge.py`
-- Distance Matrix: `server/solver/sam_distance_matrix.py`
+### Frontend (Webapp)
+- **Main UI**: [webapp/isr.js](webapp/isr.js) - Monolithic 328KB frontend (canvas, animation, mission control)
+- **Segment Manager**: [webapp/segment_manager.js](webapp/segment_manager.js) - Segment state management
+- **Segmented Mission**: [webapp/segmented_mission.js](webapp/segmented_mission.js) - Alternative segment implementation
+- **Segmented Import**: [webapp/isr.js](webapp/isr.js) (segmentedImport object) - JSON import handler
+
+### Backend - Core Solving
+- **Solver Bridge**: [server/solver/solver_bridge.py](server/solver/solver_bridge.py) - Main orchestration pipeline
+- **Distance Matrix**: [server/solver/sam_distance_matrix.py](server/solver/sam_distance_matrix.py) - SAM-aware distances (ALWAYS used)
+- **Orienteering Solver**: [orienteering_with_matrix.py](orienteering_with_matrix.py) - Held-Karp DP solver (≤12 targets optimal)
+- **Greedy Solver**: [server/solver/greedy_solver.py](server/solver/greedy_solver.py) - Fast suboptimal solver (>12 targets)
+- **Trajectory Planner**: [server/solver/isr_trajectory.py](server/solver/isr_trajectory.py) - SAM-avoiding path generation
+
+### Backend - Allocation & Optimization
+- **Target Allocator**: [server/solver/target_allocator.py](server/solver/target_allocator.py) - 5 allocation strategies
+  - GREEDY, BALANCED, EFFICIENT, GEOGRAPHIC, EXCLUSIVE
+- **Post-Optimizer**: [server/solver/post_optimizer.py](server/solver/post_optimizer.py) - 3 post-optimization algorithms
+  - Insert Missed, Swap Closer (cascade), No-Cross (2-opt)
+
+### Backend - Constraint System (DSL)
+- **Constraints**: [server/memory/constraints.py](server/memory/constraints.py) - Full DSL with compiler
+  - ConstraintProgram, ConstraintCompiler
+  - Operations: FORCE_VISIT, MOVE, REMOVE, SWAP, INSERT
+  - Sequencing hints: start_with, end_with, priority_order
+
+### Backend - Agentic System
+- **Multi-Agent v4**: [server/agents/isr_agent_multi_v4.py](server/agents/isr_agent_multi_v4.py) - LangGraph 6-agent system
+  - Strategist, Mission Planner, Allocator, Route Optimizer, Critic, Responder
+- **Coordinator v4**: [server/agents/coordinator_v4.py](server/agents/coordinator_v4.py) - Deterministic pre-pass
+- **Agent Tools**: [server/agents/tools/](server/agents/tools/) - Tool definitions for LangGraph agents
+- **Supabase Memory**: [server/memory/](server/memory/) - Optional agent memory persistence
+
+### API Entry Point
+- **FastAPI Server**: [server/main.py](server/main.py) - All API endpoints
+  - `/api/solve` - Heuristic solving
+  - `/api/agent/chat` - Agentic mode (LLM-powered)
+  - `/api/insert_missed`, `/api/swap_closer`, `/api/crossing_removal` - Post-optimizers
 
 ---
 
-*This document is a work in progress. Please edit to clarify requirements and intended behavior.*
+*This document reflects the current system architecture as of January 2026. Proposed refactoring plans are detailed in [MODULAR_ARCHITECTURE.md](MODULAR_ARCHITECTURE.md).*
