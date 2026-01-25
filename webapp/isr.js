@@ -459,10 +459,37 @@ class MissionReplay {
         index: s.index,
         isCheckpointReplan: s.isCheckpointReplan,
         hasCheckpoint: s.hasCheckpointBoundary(),
+        cutDistance: s.getCutDistance(),
         envTargets: s.env.targets?.length ?? 0,
-        routeCount: Object.keys(s.solution.routes || {}).length
+        routeCount: Object.keys(s.solution.routes || {}).length,
+        lostDrones: s.lostDrones || [],
+        visitedTargets: s.visited_targets || []
       }))
     };
+  }
+
+  /**
+   * Print segment table to console and debug panel for debugging
+   */
+  printSegmentTable() {
+    const lines = [];
+    lines.push(`=== SEGMENT TABLE (${this._segments.length} segments, current=${this._currentSegmentIndex}) ===`);
+    lines.push(`Idx | cutDist | targets | routes | lostDrones | visited`);
+    lines.push(`----+---------+---------+--------+------------+---------`);
+    this._segments.forEach(s => {
+      const cutDist = s.getCutDistance();
+      const cutStr = cutDist !== null ? cutDist.toFixed(1).padStart(7) : '  null ';
+      const targetsStr = String(s.env?.targets?.length ?? 0).padStart(7);
+      const routesStr = String(Object.keys(s.solution?.routes || {}).length).padStart(6);
+      const lostStr = (s.lostDrones || []).join(',') || '-';
+      const visitedStr = (s.visited_targets || []).join(',') || '-';
+      lines.push(`${String(s.index).padStart(3)} | ${cutStr} | ${targetsStr} | ${routesStr} | ${lostStr.padEnd(10)} | ${visitedStr}`);
+    });
+    lines.push(`===`);
+
+    const table = lines.join('\n');
+    console.log(table);
+    return table;
   }
 }
 
@@ -1473,10 +1500,15 @@ if (!solutionToStore.isCheckpointReplan &&
       });
     });
 
+    // Use cutDistance from draftSolution (captured at solve time) as primary source
+    // Fall back to state.pendingCutDistance for non-checkpoint replans
+    const segmentCutDistance = solutionToStore.cutDistance ?? state.pendingCutDistance ?? null;
+    appendDebugLine(`[ACCEPT] Storing segment with cutDistance=${segmentCutDistance?.toFixed(1) || 'null'} (draft=${solutionToStore.cutDistance?.toFixed(1) || 'null'}, pending=${state.pendingCutDistance?.toFixed(1) || 'null'})`);
+
     segment = missionReplay.addSegment({
       solution: solutionToStore,
       env: envSnapshot,
-      cutDistance: state.pendingCutDistance || null,
+      cutDistance: segmentCutDistance,
       isCheckpointReplan: solutionToStore.isCheckpointReplan || false,
       cutPositions: state.pendingCutPositions
         ? JSON.parse(JSON.stringify(state.pendingCutPositions))
@@ -1488,6 +1520,9 @@ if (!solutionToStore.isCheckpointReplan &&
       visited_targets: [...segmentVisitedTargets],  // Store visited targets for deterministic replay
     });
     missionReplay.setCurrentSegmentIndex(segment.index);
+
+    // DEBUG: Print segment table after adding segment
+    appendDebugLine(missionReplay.printSegmentTable());
   }
 
   // Save cut positions before clearing (needed for fresh segmentation workflow)
@@ -6503,6 +6538,10 @@ async function runPlanner() {
     // IMPORTANT: Deep copy routes to prevent modifications to state.routes from affecting the draft
     // Also save checkpoint state so it can be restored if the draft is discarded
     // CRITICAL: Save drone_configs at Solve time so Accept uses the actual config used for solving
+    // DEBUG: Log cutDistance capture at solve time
+    const solverCutDistance = isCheckpointReplan ? state.pendingCutDistance : null;
+    appendDebugLine(`[SOLVE] Creating draftSolution: isCheckpointReplan=${isCheckpointReplan}, cutDistance=${solverCutDistance?.toFixed(1) || 'null'}, pendingCutDistance=${state.pendingCutDistance?.toFixed(1) || 'null'}`);
+
     missionState.draftSolution = {
       sequences: JSON.parse(JSON.stringify(data.sequences || {})),
       routes: JSON.parse(JSON.stringify(data.routes || {})),
@@ -6512,7 +6551,7 @@ async function runPlanner() {
       distanceMatrix: data.distance_matrix ? JSON.parse(JSON.stringify(data.distance_matrix)) : null,
       isCheckpointReplan: isCheckpointReplan,
       checkpointSegments: isCheckpointReplan ? JSON.parse(JSON.stringify(state.checkpoint.segments)) : null,
-      cutDistance: isCheckpointReplan ? state.pendingCutDistance : null,
+      cutDistance: solverCutDistance,
       // Save cut positions so they can be restored on discard
       pendingCutPositions: state.pendingCutPositions ? JSON.parse(JSON.stringify(state.pendingCutPositions)) : null,
       // Save drone_configs at Solve time - this is what should be saved at Accept, not the UI state at Accept time
@@ -6876,10 +6915,9 @@ function freezeAtCheckpoint() {
   state.pendingCutPositions = {};
 
   // NEW: Capture single cut distance (same for all drones since they fly at same speed)
-  // Use missionDistance from animation state, or calculate from first animating drone
-  const firstDroneState = Object.values(state.animation.drones)[0];
-  state.pendingCutDistance = firstDroneState?.distanceTraveled || 0;
-  appendDebugLine(`✂️ Cut at distance: ${state.pendingCutDistance.toFixed(1)}`);
+  // Use missionDistance from animation state (authoritative source for cumulative distance)
+  state.pendingCutDistance = state.animation.missionDistance || 0;
+  appendDebugLine(`✂️ Cut at distance: ${state.pendingCutDistance.toFixed(1)} (missionDistance=${state.animation.missionDistance?.toFixed(1) || 'null'})`);
 
   // Track which targets are visited in the current (frozen) routes
   const targetsVisitedThisSegment = [];
@@ -7195,8 +7233,14 @@ function startAnimation(droneIds) {
     const dt = deltaTime / 1000; // seconds
     let anyAnimating = false;
 
-    // NEW: Advance single mission distance (same for all drones)
-    state.animation.missionDistance += speedUnitsPerSec * dt;
+    // NEW: Only advance mission distance if at least one drone is still animating
+    // Check FIRST if any drone can advance (has trajectory left to travel)
+    const anyDroneCanAdvance = Object.values(state.animation.drones).some(ds =>
+      ds.animating && ds.distanceTraveled < ds.totalDistance
+    );
+    if (anyDroneCanAdvance) {
+      state.animation.missionDistance += speedUnitsPerSec * dt;
+    }
 
     // LOST DRONES CHECK: Find the cut distance where each drone is lost and stop them there
     // This must happen BEFORE we sync distanceTraveled, so drones stop at their cut markers
@@ -7391,6 +7435,8 @@ function startAnimation(droneIds) {
 
     if (switched && newSegment) {
       appendDebugLine(`🔄 === SEGMENT SWITCH to ${newSegment.index} (via MissionReplay) ===`);
+      // DEBUG: Print segment table at switch to diagnose cutDistance issues
+      appendDebugLine(missionReplay.printSegmentTable());
 
       // Also sync missionState for backward compatibility
       missionState.currentSegmentIndex = newSegment.index;
