@@ -7428,6 +7428,17 @@ function startAnimation(droneIds) {
       const result = missionReplay.checkSegmentBoundary(state.animation.missionDistance);
       switched = result.switched;
       newSegment = result.newSegment;
+
+      // FINAL SEGMENT FIX: If no switch happened via cutDistance boundary,
+      // but all drones finished their current segment AND there's a next segment,
+      // we should switch to it anyway. This handles the final segment case where
+      // cutDistance is 0 or null (no boundary defined for the last segment).
+      if (!switched && !anyAnimating && nextSeg && !nextSeg.hasCheckpointBoundary()) {
+        appendDebugLine(`[SEG CHECK] Final segment switch: all drones finished, switching to segment ${nextSeg.index} (no cutDistance boundary)`);
+        missionReplay._currentSegmentIndex++;
+        switched = true;
+        newSegment = nextSeg;
+      }
     } catch (err) {
       console.error('[SEG CHECK ERROR]', err);
       appendDebugLine(`[SEG CHECK ERROR] ${err.message}`);
