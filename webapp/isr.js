@@ -5956,13 +5956,17 @@ function buildCheckpointEnv() {
         if (!seg?.splitPoint) return;
         const nodeId = `D${did}_START`;
         solverEnv.synthetic_starts[nodeId] = { id: nodeId, x: seg.splitPoint[0], y: seg.splitPoint[1] };
-        // Update start_airport to use synthetic start
+        // Update ALL start fields to use synthetic start (solver may read any of these)
         if (droneConfigs[did]) {
           droneConfigs[did].start_airport = nodeId;
+          droneConfigs[did].start_id = nodeId;
+          droneConfigs[did].home_airport = nodeId;
         }
         // Also update in solverEnv.drone_configs
         if (solverEnv.drone_configs && solverEnv.drone_configs[did]) {
           solverEnv.drone_configs[did].start_airport = nodeId;
+          solverEnv.drone_configs[did].start_id = nodeId;
+          solverEnv.drone_configs[did].home_airport = nodeId;
         }
         appendDebugLine(`   Drone ${did}: start from checkpoint [${seg.splitPoint[0].toFixed(2)}, ${seg.splitPoint[1].toFixed(2)}]`);
       });
@@ -5974,11 +5978,13 @@ function buildCheckpointEnv() {
       if (cutPos) {
         Object.entries(cutPos).forEach(([did, pos]) => {
           const nodeId = `D${did}_START`;
-          // Update droneConfigs to use synthetic start (fixes the bug!)
+          // Update ALL start fields to use synthetic start (solver may read any of these)
           if (droneConfigs[did]) {
             droneConfigs[did].start_airport = nodeId;
+            droneConfigs[did].start_id = nodeId;
+            droneConfigs[did].home_airport = nodeId;
           }
-          appendDebugLine(`   Drone ${did}: start from segment cut [${pos[0].toFixed(2)}, ${pos[1].toFixed(2)}] → start_airport=${nodeId}`);
+          appendDebugLine(`   Drone ${did}: start from segment cut [${pos[0].toFixed(2)}, ${pos[1].toFixed(2)}] → start=${nodeId}`);
         });
       }
     }
@@ -6019,8 +6025,11 @@ function buildCheckpointEnv() {
       if (!pos || pos.length !== 2) return;
       const nodeId = `D${did}_START`;
       env2.synthetic_starts[nodeId] = { id: nodeId, x: pos[0], y: pos[1] };
+      // Update ALL start fields to use synthetic start (solver may read any of these)
       if (newDroneConfigs[did]) {
         newDroneConfigs[did].start_airport = nodeId;
+        newDroneConfigs[did].start_id = nodeId;
+        newDroneConfigs[did].home_airport = nodeId;
       }
     });
 
@@ -6054,8 +6063,11 @@ function buildCheckpointEnv() {
       if (!pos || pos.length !== 2) return;
       const nodeId = `D${did}_START`;
       env2.synthetic_starts[nodeId] = { id: nodeId, x: pos[0], y: pos[1] };
+      // Update ALL start fields to use synthetic start (solver may read any of these)
       if (newDroneConfigs[did]) {
         newDroneConfigs[did].start_airport = nodeId;
+        newDroneConfigs[did].start_id = nodeId;
+        newDroneConfigs[did].home_airport = nodeId;
         appendDebugLine(`   Drone ${did}: start from live cut [${pos[0].toFixed(2)}, ${pos[1].toFixed(2)}]`);
       }
     });
@@ -6088,9 +6100,11 @@ function buildCheckpointEnv() {
       y: seg.splitPoint[1],
     };
 
-    // Update drone config to start from synthetic node
+    // Update ALL start fields to use synthetic start (solver may read any of these)
     if (newDroneConfigs[did]) {
       newDroneConfigs[did].start_airport = nodeId;
+      newDroneConfigs[did].start_id = nodeId;
+      newDroneConfigs[did].home_airport = nodeId;
 
       // Calculate remaining fuel (original budget minus distance traveled)
       const originalBudget = newDroneConfigs[did].fuel_budget || 150;
