@@ -332,9 +332,9 @@ def verify_solution_basic(env: Dict[str, Any], routes: Dict[str, Any], drone_con
 
     if not env.get("airports"):
         errors.append("env.airports missing/empty")
-    if not env.get("targets"):
+    # if not env.get("targets"):
         # Targets can be empty in some edge cases, but treat as warning-level error here.
-        errors.append("env.targets missing/empty")
+        # errors.append("env.targets missing/empty")
 
     if not isinstance(routes, dict):
         errors.append("routes is not a dict")
