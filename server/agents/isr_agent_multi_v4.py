@@ -702,7 +702,7 @@ def strategist_node(state: MissionState) -> Dict[str, Any]:
     print(f"📝 [STRATEGIST] User request: '{user_request}'", file=sys.stderr)
     sys.stderr.flush()
 
-    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
+    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0, model_kwargs={"thinking": {"type": "disabled"}})
 
     mission_context = build_mission_context(state)
     current_solution = build_current_solution_context(state)
@@ -887,7 +887,7 @@ def mission_planner_node(state: MissionState) -> Dict[str, Any]:
             "requires_segmentation": False,
         }
 
-    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
+    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0, model_kwargs={"thinking": {"type": "disabled"}})
 
     mission_context = build_mission_context(state)
 
@@ -1355,7 +1355,7 @@ def optimizer_node(state: MissionState) -> Dict[str, Any]:
             "optimizer_analysis": "No routes available for optimization.",
         }
 
-    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
+    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0, model_kwargs={"thinking": {"type": "disabled"}})
     
     # Bind optimizer tools
     llm_with_tools = llm.bind_tools(OPTIMIZER_TOOLS, tool_choice="auto")
@@ -2174,7 +2174,7 @@ def critic_node(state: MissionState) -> Dict[str, Any]:
 
     set_state(state)
 
-    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
+    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0, model_kwargs={"thinking": {"type": "disabled"}})
 
     mission_context = build_mission_context(state)
     allocation_reasoning = state.get("allocation_reasoning", "")
@@ -2281,7 +2281,7 @@ def responder_node(state: MissionState) -> Dict[str, Any]:
 
 def handle_question_response(state: MissionState) -> Dict[str, Any]:
     """Handle question-type requests."""
-    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0)
+    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0, model_kwargs={"thinking": {"type": "disabled"}})
 
     user_request = state.get("user_request", "")
     mission_context = build_mission_context(state)
