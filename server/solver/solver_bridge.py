@@ -757,8 +757,33 @@ def solve_mission_with_allocation(
 
         if not assigned_target_ids:
             # No targets assigned: trivial route from start to end airport
-            # For flexible endpoint with no targets, just return to start
-            effective_end = start_id if flexible_endpoint else end_id
+            # For flexible endpoint with no targets, return to NEAREST REAL airport
+            # (not the synthetic start - that would be a zero-length route)
+            if flexible_endpoint:
+                # Find nearest real airport for return
+                real_airports = [a for a in airports if not a.get("is_synthetic", False)]
+                if real_airports and start_id:
+                    # Get start position
+                    start_pos = None
+                    for wp in dist_data.get("waypoints", []):
+                        if wp["id"] == start_id:
+                            start_pos = (wp["x"], wp["y"])
+                            break
+                    if start_pos:
+                        # Find nearest real airport
+                        nearest_airport = min(
+                            real_airports,
+                            key=lambda a: math.sqrt((a["x"] - start_pos[0])**2 + (a["y"] - start_pos[1])**2)
+                        )
+                        effective_end = nearest_airport["id"]
+                        print(f"   🔄 D{did}: No targets, flexible endpoint → returning to nearest airport '{effective_end}'", flush=True)
+                    else:
+                        effective_end = real_airports[0]["id"]
+                        print(f"   🔄 D{did}: No targets, using first real airport '{effective_end}' as endpoint", flush=True)
+                else:
+                    effective_end = start_id  # Fallback
+            else:
+                effective_end = end_id
             route_ids = [start_id, effective_end] if start_id and effective_end else []
             seq = ",".join(route_ids)
 

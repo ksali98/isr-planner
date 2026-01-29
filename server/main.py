@@ -66,6 +66,9 @@ from .solver.sam_distance_matrix import calculate_sam_aware_matrix
 import time
 
 _current_env = None
+_current_run_id = None
+_current_env_version_id = None
+_current_plan_id = None
 
 # Import polygon wrapping for visualization (same as delivery planner)
 # Add paths for both local dev and Docker deployment

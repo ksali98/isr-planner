@@ -54,9 +54,11 @@ function validateTrajectory(droneId, traj, config) {
     }
   } else {
     // ENABLED DRONE INVARIANTS
-    if (traj.delta.length < 2) {
-      errors.push(`Enabled drone ${droneId} must have delta.length >= 2`);
-    }
+    // Note: delta.length can be:
+    // - 0: No movement yet (imported segment before Run Planner)
+    // - 1: Drone at final position (e.g., at airport, no further movement)
+    // - >= 2: Normal trajectory with start and end points
+    // All are valid for enabled drones
   }
 
   // No duplicate consecutive points in delta (within epsilon)

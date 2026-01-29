@@ -111,6 +111,102 @@ const state = {
 };
 
 // ----------------------------------------------------
+// Segment Store - Clean segment storage for export
+// ----------------------------------------------------
+/**
+ * segmentStore - Simple array of segments for export
+ *
+ * Each segment contains everything needed to replay/re-solve that segment:
+ * - env: { airports, targets, sams } at this segment
+ * - drone_configs: { "1": { enabled, fuel_capacity, fuel_remaining, ... }, ... }
+ * - routes: { "1": { trajectory, route, fuel_remaining }, ... }
+ * - frozenTargets: ["T1", "T2"] - targets visited BEFORE this segment
+ * - cutPosition: { "1": [x,y], "2": [x,y] } - where cut happened (null for seg 0)
+ */
+const segmentStore = {
+  segments: [],           // Array of segment objects
+  currentSegmentIndex: 0, // Which segment we're building
+
+  // Clear all segments (on new mission or import)
+  clear() {
+    this.segments = [];
+    this.currentSegmentIndex = 0;
+  },
+
+  // Add a new segment
+  addSegment(segment) {
+    segment.index = this.segments.length;
+    this.segments.push(JSON.parse(JSON.stringify(segment)));
+    return segment.index;
+  },
+
+  // Get segment by index
+  getSegment(index) {
+    return this.segments[index] || null;
+  },
+
+  // Get current segment being built
+  getCurrentSegment() {
+    return this.segments[this.currentSegmentIndex] || null;
+  },
+
+  // Update the last segment (e.g., add cut position after cut)
+  updateLastSegment(updates) {
+    if (this.segments.length === 0) return;
+    const last = this.segments[this.segments.length - 1];
+    Object.assign(last, updates);
+  },
+
+  // Get all segments for export
+  getAllSegments() {
+    return this.segments;
+  },
+
+  // Get segment count
+  count() {
+    return this.segments.length;
+  },
+
+  // Export to JSON format
+  toJSON() {
+    return {
+      version: "2.0",
+      exportedAt: Date.now(),
+      segments: this.segments
+    };
+  }
+};
+
+/**
+ * Build a clean segment object for segmentStore
+ * Called from acceptSolution() to save segment data
+ */
+function buildCleanSegment(solutionToStore, droneConfigs, env, frozenTargets, cutPositions) {
+  // Build routes object with just trajectory, route, fuel_remaining
+  const routes = {};
+  Object.entries(solutionToStore.routes || {}).forEach(([droneId, routeData]) => {
+    routes[droneId] = {
+      trajectory: routeData.trajectory ? [...routeData.trajectory] : [],
+      route: routeData.route ? [...routeData.route] : [],
+      fuel_remaining: routeData.fuel_remaining || 0
+    };
+  });
+
+  return {
+    index: segmentStore.count(),
+    env: {
+      airports: JSON.parse(JSON.stringify(env.airports || [])),
+      targets: JSON.parse(JSON.stringify(env.targets || [])),
+      sams: JSON.parse(JSON.stringify(env.sams || []))
+    },
+    drone_configs: JSON.parse(JSON.stringify(droneConfigs)),
+    routes: routes,
+    frozenTargets: frozenTargets ? [...frozenTargets] : [],
+    cutPosition: cutPositions ? JSON.parse(JSON.stringify(cutPositions)) : null
+  };
+}
+
+// ----------------------------------------------------
 // Mission Mode State Machine
 // ----------------------------------------------------
 /**
@@ -1855,6 +1951,19 @@ if (!solutionToStore.isCheckpointReplan &&
     if (v2Segment) {
       appendDebugLine(`[V2] Segment ${v2Segment.index} built: ${Object.keys(v2Segment.trajectories).length} drones`);
     }
+
+    // ========================================
+    // SEGMENT STORE: Save clean segment for export
+    // ========================================
+    const cleanSegment = buildCleanSegment(
+      solutionToStore,
+      segmentDroneConfigs,
+      envSnapshot,
+      [...state.visitedTargets],  // frozenTargets = targets visited BEFORE this segment
+      segment.index === 0 ? null : state.pendingCutPositions
+    );
+    segmentStore.addSegment(cleanSegment);
+    appendDebugLine(`[SegmentStore] Segment ${cleanSegment.index} saved: ${Object.keys(cleanSegment.routes).length} drones`);
   }
 
   // Save cut positions before clearing (needed for fresh segmentation workflow)
@@ -2265,7 +2374,7 @@ function acceptSolutionWithManager() {
       state.pendingCutPositions = null;
     }
 
-    appendDebugLine(`[ACCEPT] Advanced to segment ${newSegIdx}, cutDist=${cutDistance.toFixed(1)}, visited=[${state.visitedTargets.join(",")}]`);
+    appendDebugLine(`[ACCEPT] Advanced to segment ${newSegIdx}, cutDist=${cutDistance?.toFixed(1) || 'null'}, visited=[${state.visitedTargets.join(",")}]`);
 
     // 6. Update MissionReplay index and save cut positions for the NEXT segment
     missionReplay.setCurrentSegmentIndex(newSegIdx);
@@ -4347,6 +4456,51 @@ function deleteSelected() {
 let _exportCounter = 1;
 
 /**
+ * Export mission using segmentStore (clean, simple format)
+ * @returns {boolean} True if export succeeded
+ */
+function exportSegmentStore() {
+  if (segmentStore.count() === 0) {
+    appendDebugLine(`⚠️ [SegmentStore] Cannot export - no segments`);
+    return false;
+  }
+
+  try {
+    const exportData = segmentStore.toJSON();
+
+    // Generate filename
+    const now = new Date();
+    const yy = String(now.getFullYear()).slice(-2);
+    const mo = String(now.getMonth() + 1).padStart(2, "0");
+    const dd = String(now.getDate()).padStart(2, "0");
+    const hh = String(now.getHours()).padStart(2, "0");
+    const mm = String(now.getMinutes()).padStart(2, "0");
+    const segCount = segmentStore.count();
+    const filename = `isr_seg_${yy}${mo}${dd}${hh}${mm}_N${segCount}_${_exportCounter}.json`;
+    _exportCounter++;
+
+    // Download
+    const jsonStr = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    appendDebugLine(`✅ [SegmentStore] Exported ${segCount} segments as ${filename}`);
+    return true;
+  } catch (err) {
+    console.error('[SegmentStore] Export failed:', err);
+    appendDebugLine(`❌ [SegmentStore] Export failed: ${err.message}`);
+    return false;
+  }
+}
+
+/**
  * Export mission in V2 format
  * Uses SegmentIOV2 to create clean v2.0 JSON
  * @param {string} filename - Base filename for export
@@ -4401,6 +4555,14 @@ async function exportEnvironment() {
     const isMissionExport = exportTypeMission && exportTypeMission.checked;
 
     appendDebugLine(`📤 Exporting as ${isMissionExport ? "Mission" : "Environment"}...`);
+
+    // SEGMENT STORE EXPORT: If we have segments in segmentStore, use that (simplest format)
+    if (isMissionExport && segmentStore.count() > 0) {
+      if (exportSegmentStore()) {
+        return;  // SegmentStore export succeeded
+      }
+      appendDebugLine(`⚠️ SegmentStore export failed, trying V2...`);
+    }
 
     // V2 EXPORT: If we have v2 segments and mission export is selected, use v2 format
     if (isMissionExport && missionReplayV2 && missionReplayV2.hasSegments()) {
@@ -5272,6 +5434,7 @@ function loadMissionV2FromJson(data, filename = "") {
     missionReplay.clear();
     clearSegmentSystemV2();
     segmentedImport.clear();
+    segmentStore.clear();
     missionState.committedSegments = [];
     missionState.draftSolution = null;
     state.visitedTargets = [];
@@ -5421,6 +5584,7 @@ function loadSegmentInfoFromJson(data, filename = "") {
   // 3. Reset mission state
   missionReplay.clear();
   clearSegmentSystemV2();  // Clear v2 segment system
+  segmentStore.clear();    // Clear segmentStore for new import
   missionState.committedSegments = [];
   missionState.draftSolution = null;
   state.visitedTargets = [];  // Segment 0 starts with no visited targets
@@ -5533,6 +5697,7 @@ function loadSegmentedMissionFromJson(data, filename = "") {
   // 3. Reset mission state
   missionReplay.clear();
   clearSegmentSystemV2();  // Clear v2 segment system
+  segmentStore.clear();    // Clear segmentStore for new import
   missionState.committedSegments = [];
   missionState.draftSolution = null;
   state.visitedTargets = [];  // Segment 0 starts with no visited targets
@@ -5636,6 +5801,7 @@ function loadFromJson(data, filename = "") {
   missionReplay.clear();
   clearSegmentSystemV2();  // Clear v2 segment system
   segmentedImport.clear();  // CRITICAL: Clear segmented import manager to avoid ghost targets/SAMs
+  segmentStore.clear();    // Clear segmentStore for new mission
   state.wrappedPolygons = [];  // Clear ghost SAM boundaries from previous imports
   missionState.draftSolution = null;
   missionState.checkpointSource = null;
@@ -7984,12 +8150,11 @@ function startAnimation(droneIds) {
       state.animation.missionDistance += speedUnitsPerSec * dt;
     }
 
-    // V2: Sync globalDist and check for segment switch using CROSSING detection
-    // This runs in parallel with the legacy system during Phase 3
-    if (missionReplayV2 && missionReplayV2.hasSegments()) {
-      animationStateV2.globalDist = state.animation.missionDistance;
-      maybeSegmentSwitchV2(prevMissionDist, state.animation.missionDistance);
-    }
+    // V2 DISABLED - Not using V2 segment system
+    // if (missionReplayV2 && missionReplayV2.hasSegments()) {
+    //   animationStateV2.globalDist = state.animation.missionDistance;
+    //   maybeSegmentSwitchV2(prevMissionDist, state.animation.missionDistance);
+    // }
 
     // LOST DRONES CHECK: Find the cut distance where each drone is lost and stop them there
     // This must happen BEFORE we sync distanceTraveled, so drones stop at their cut markers
@@ -8072,85 +8237,65 @@ function startAnimation(droneIds) {
         ? (droneState.distanceTraveled / droneState.totalDistance)
         : 1;
 
-      // 4) Check if drone has passed any target waypoints and mark them as visited
-      const routeInfo = state.routes[did];
-      if (routeInfo && routeInfo.route && routeInfo.trajectory) {
-        const trajectory = routeInfo.trajectory;
-        const route = routeInfo.route;
-        const cumulativeDistances = droneState.cumulativeDistances || [];
-        const currentDistance = droneState.distanceTraveled;
+      // 4) Check if drone's current position matches any unvisited target
+      // Calculate drone position from trajectory using distance traveled
+      const trajectory = state.routes[did]?.trajectory || [];
+      const cumulativeDistances = droneState.cumulativeDistances || [];
 
+      if (trajectory.length < 2 || cumulativeDistances.length !== trajectory.length) return;
 
-        // For each target in the route, check if we've passed its position
-        route.forEach((wp, wpIdx) => {
-          if (!String(wp).startsWith("T")) return;  // Only targets
-          if (state.visitedTargets.includes(wp)) return;  // Already visited
+      // Find current position based on distance traveled (same logic as drawDrone)
+      const targetDistance = droneState.distanceTraveled;
+      let segmentIdx = 0;
+      for (let i = 1; i < cumulativeDistances.length; i++) {
+        if (cumulativeDistances[i] >= targetDistance) {
+          segmentIdx = i - 1;
+          break;
+        }
+        segmentIdx = i - 1;
+      }
 
-          // CRITICAL FIX: Only mark targets in SEQUENTIAL ORDER
-          // Check if all previous targets in the route have been visited
-          // This prevents future targets from being marked prematurely even if geometrically close
-          let canMarkThisTarget = true;
-          for (let i = 0; i < wpIdx; i++) {
-            const prevWp = route[i];
-            if (String(prevWp).startsWith("T") && !state.visitedTargets.includes(prevWp)) {
-              // Previous target not yet visited, can't mark this one
-              canMarkThisTarget = false;
-              break;
-            }
-          }
-          if (!canMarkThisTarget) return;
+      const fromPoint = trajectory[segmentIdx];
+      const toPoint = trajectory[segmentIdx + 1] || fromPoint;
+      const segmentStartDist = cumulativeDistances[segmentIdx];
+      const segmentEndDist = cumulativeDistances[segmentIdx + 1] || segmentStartDist;
+      const segmentLength = segmentEndDist - segmentStartDist;
 
-          // Find the target's position in the environment
-          const target = state.env.targets?.find(t => t.id === wp);
-          if (!target) {
-            // Debug: target not found in env - this target is in a future segment
-            if (!droneState[`_debugNoTarget_${wp}`]) {
-              droneState[`_debugNoTarget_${wp}`] = true;
-            }
-            return;
-          }
+      const segmentProgress = segmentLength > 0
+        ? (targetDistance - segmentStartDist) / segmentLength
+        : 0;
 
-          // Check if we've passed close to this target's position
-          // Find the trajectory point closest to the target
-          let minDist = Infinity;
-          let closestIdx = -1;
-          trajectory.forEach((pt, idx) => {
-            const dist = Math.sqrt(Math.pow(pt[0] - target.x, 2) + Math.pow(pt[1] - target.y, 2));
-            if (dist < minDist) {
-              minDist = dist;
-              closestIdx = idx;
-            }
-          });
+      const droneX = fromPoint[0] + (toPoint[0] - fromPoint[0]) * segmentProgress;
+      const droneY = fromPoint[1] + (toPoint[1] - fromPoint[1]) * segmentProgress;
 
-          // Debug: Log closest distance once per target
-          if (!droneState[`_debugDist_${wp}`]) {
-            droneState[`_debugDist_${wp}`] = true;
-          }
+      const EPS = 0.5;  // Floating-point comparison tolerance
 
-          // If we found a close point and we've traveled past it, mark target as visited
-          // Use threshold of 15.0 - trajectory must pass reasonably close to target
-          // (Was 5.0 but that caused delayed marking when trajectory doesn't pass exactly through target)
-          if (closestIdx >= 0 && minDist < 15.0 && cumulativeDistances[closestIdx] !== undefined) {
-            const targetDistance = cumulativeDistances[closestIdx];
-            if (currentDistance >= targetDistance) {
-              state.visitedTargets.push(wp);
-              appendDebugLine(`🎯 D${did} visited ${wp}`);
-            } else {
-              // Debug: Log why target not yet passed (periodically)
-              const logKey = `_debugNotYet_${wp}`;
-              const lastLog = droneState[logKey] || 0;
-              if (currentDistance - lastLog > 20) {  // Log every 20 units of travel
-                droneState[logKey] = currentDistance;
-              }
-            }
-          } else if (!droneState[`_debugSkip_${wp}`] && closestIdx >= 0) {
-            // Debug: Log why target was skipped (only once)
-            droneState[`_debugSkip_${wp}`] = true;
-            if (minDist >= 20.0) {
-            } else if (cumulativeDistances[closestIdx] === undefined) {
-            }
-          }
-        });
+      // Get targets in this drone's route for the current segment (optimization)
+      // This avoids checking all targets in the environment
+      const currentSegIdx = missionReplay._currentSegmentIndex || 0;
+      const currentSeg = missionReplay.getSegment(currentSegIdx);
+      const routeTargetIds = new Set();
+
+      // Collect target IDs from the current segment's route for this drone
+      const segRoute = currentSeg?.solution?.routes?.[did]?.route || state.routes[did]?.route || [];
+      for (const wp of segRoute) {
+        if (wp && String(wp).startsWith('T')) {
+          routeTargetIds.add(wp);
+        }
+      }
+
+      // Check targets in this drone's route
+      const allTargets = state.env.targets || [];
+      for (const target of allTargets) {
+        if (!target.id) continue;
+        if (!routeTargetIds.has(target.id)) continue;  // Only check targets in route
+        if (state.visitedTargets.includes(target.id)) continue;  // Already visited (stays checked until Reset)
+
+        // Check if drone position equals target position (within epsilon)
+        if (Math.abs(droneX - target.x) < EPS && Math.abs(droneY - target.y) < EPS) {
+          state.visitedTargets.push(target.id);
+          appendDebugLine(`🎯 D${did} visited ${target.id} at (${droneX.toFixed(1)}, ${droneY.toFixed(1)})`);
+        }
       }
     });
 
@@ -8435,9 +8580,48 @@ function startAnimation(droneIds) {
         const cumulativeDistances = droneState.cumulativeDistances || [];
         const currentDistance = droneState.distanceTraveled;
 
+        // Build set of targets that were in THIS drone's route in PREVIOUS segments
+        // AND are still in this drone's route in the CURRENT segment
+        // This prevents marking targets that were:
+        // 1. Newly added to this drone (moved from another drone)
+        // 2. Removed from this drone (reassigned to another drone)
+        const prevSegTargetsForDrone = new Set();
+        for (let segIdx = 0; segIdx < newSegment.index; segIdx++) {
+          const prevSeg = missionReplay.getSegment(segIdx);
+          const prevRoute = prevSeg?.solution?.routes?.[did]?.route || [];
+          prevRoute.forEach(wp => {
+            if (String(wp).startsWith("T")) {
+              prevSegTargetsForDrone.add(wp);
+            }
+          });
+        }
+
+        // Get targets in the CURRENT segment's route for this drone
+        const currentSegTargetsForDrone = new Set();
+        const currentSegRoute = newSegment?.solution?.routes?.[did]?.route || [];
+        currentSegRoute.forEach(wp => {
+          if (String(wp).startsWith("T")) {
+            currentSegTargetsForDrone.add(wp);
+          }
+        });
+
         route.forEach((wp, wpIdx) => {
           if (!String(wp).startsWith("T")) return;
           if (state.visitedTargets.includes(wp)) return;
+
+          // CHECK 1: Target must be in the CURRENT segment's route for this drone
+          // If a target was removed from this drone's route (reassigned to another drone),
+          // this drone should NOT mark it - even if this drone's old trajectory passed near it
+          if (!currentSegTargetsForDrone.has(wp)) {
+            return; // Skip - target no longer assigned to this drone
+          }
+
+          // CHECK 2: Only mark targets that were in previous segments for this drone
+          // If a target was just added to this drone's route (e.g., moved from D1 to D2),
+          // it should NOT be marked at segment switch - only when drone actually reaches it
+          if (!prevSegTargetsForDrone.has(wp)) {
+            return; // Skip - this target is newly assigned to this drone
+          }
 
           // Sequential order check: only mark if all previous targets visited
           // This prevents newly added targets from being marked prematurely
@@ -8451,7 +8635,18 @@ function startAnimation(droneIds) {
           }
           if (!canMark) return;
 
-          const target = state.env.targets?.find(t => t.id === wp);
+          // Find target position - check current env first, then all segments
+          let target = state.env.targets?.find(t => t.id === wp);
+          if (!target) {
+            for (let segIdx = 0; segIdx < missionReplay.getSegmentCount(); segIdx++) {
+              const seg = missionReplay.getSegment(segIdx);
+              const segTarget = seg?.env?.targets?.find(t => t.id === wp);
+              if (segTarget) {
+                target = segTarget;
+                break;
+              }
+            }
+          }
           if (!target) return;
 
           // Find closest trajectory point to this target
@@ -8665,7 +8860,18 @@ function resumeAnimation() {
           if (!String(wp).startsWith("T")) return;
           if (state.visitedTargets.includes(wp)) return;
 
-          const target = state.env.targets?.find(t => t.id === wp);
+          // Find target position - check current env first, then all segments
+          let target = state.env.targets?.find(t => t.id === wp);
+          if (!target) {
+            for (let segIdx = 0; segIdx < missionReplay.getSegmentCount(); segIdx++) {
+              const seg = missionReplay.getSegment(segIdx);
+              const segTarget = seg?.env?.targets?.find(t => t.id === wp);
+              if (segTarget) {
+                target = segTarget;
+                break;
+              }
+            }
+          }
           if (!target) return;
 
           // Find closest trajectory point to this target

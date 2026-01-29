@@ -65,6 +65,64 @@ function exportMissionToString(missionReplay, metadata = {}) {
 }
 
 /**
+ * Sanitize a segment for import - fix common issues that would fail validation
+ *
+ * @param {object} segment - The segment to sanitize (modified in place)
+ */
+function sanitizeSegmentForImport(segment) {
+  // Fix trajectory fields that might be null/missing
+  if (segment.trajectories) {
+    Object.entries(segment.trajectories).forEach(([droneId, traj]) => {
+      // Fix frozenEndIndex: null -> -1
+      if (traj.frozenEndIndex === null || traj.frozenEndIndex === undefined) {
+        traj.frozenEndIndex = -1;
+      }
+
+      // Ensure arrays exist
+      if (!Array.isArray(traj.render_full)) {
+        traj.render_full = [];
+      }
+      if (!Array.isArray(traj.delta)) {
+        traj.delta = [];
+      }
+      if (!Array.isArray(traj.route)) {
+        traj.route = [];
+      }
+
+      // Ensure deltaDistance is a number
+      if (typeof traj.deltaDistance !== 'number') {
+        traj.deltaDistance = 0;
+      }
+
+      // Fix endState
+      if (traj.endState) {
+        if (typeof traj.endState.fuel_remaining !== 'number') {
+          traj.endState.fuel_remaining = 0;
+        }
+      }
+    });
+  }
+
+  // Fix drone_configs
+  if (segment.drone_configs) {
+    Object.entries(segment.drone_configs).forEach(([droneId, config]) => {
+      // Ensure enabled is boolean
+      if (typeof config.enabled !== 'boolean') {
+        config.enabled = true;
+      }
+      // Ensure fuel_capacity exists
+      if (typeof config.fuel_capacity !== 'number') {
+        config.fuel_capacity = 100;
+      }
+      // Ensure fuel_remaining exists
+      if (typeof config.fuel_remaining !== 'number') {
+        config.fuel_remaining = config.fuel_capacity;
+      }
+    });
+  }
+}
+
+/**
  * Import mission from v2.0 JSON format
  *
  * @param {MissionReplay} missionReplay - Target mission replay instance
@@ -79,6 +137,8 @@ function importMissionV2(missionReplay, data) {
   missionReplay.clear();
 
   for (const segment of data.segments) {
+    // Sanitize before validation/append
+    sanitizeSegmentForImport(segment);
     missionReplay.append(segment);
   }
 }
@@ -345,6 +405,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     exportMission,
     exportMissionToString,
+    sanitizeSegmentForImport,
     importMissionV2,
     convertLegacySegment,
     importMissionV1,
@@ -359,6 +420,7 @@ if (typeof window !== 'undefined') {
   window.SegmentIOV2 = {
     exportMission,
     exportMissionToString,
+    sanitizeSegmentForImport,
     importMissionV2,
     convertLegacySegment,
     importMissionV1,
