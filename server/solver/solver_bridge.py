@@ -2,6 +2,7 @@
 
 from typing import Dict, Any, List, Tuple, Optional
 import math
+import re
 import sys
 import time
 from pathlib import Path
@@ -180,7 +181,18 @@ def _parse_env_for_solver(
             airport_entry["is_synthetic"] = True
         airports.append(airport_entry)
 
-    # Add synthetic start nodes (for checkpoint replanning)
+    # Add checkpoints (C1, C2, etc.) for segmented mission replanning
+    # Checkpoints act like airports - drones can start from these positions
+    for checkpoint in env.get("checkpoints", []):
+        airports.append({
+            "id": str(checkpoint["id"]),
+            "x": float(checkpoint["x"]),
+            "y": float(checkpoint["y"]),
+            "is_checkpoint": True,  # Mark as checkpoint for reference
+        })
+        print(f"📍 Added checkpoint: {checkpoint['id']} at ({checkpoint['x']:.1f}, {checkpoint['y']:.1f})", flush=True)
+
+    # Add synthetic start nodes (for checkpoint replanning - legacy support)
     # These act like airports - drones can start from these positions
     for node_id, node_data in env.get("synthetic_starts", {}).items():
         airports.append({
@@ -367,14 +379,17 @@ def solve_mission(
         cfg_start = cfg.get("start_airport")
         print(f"🔍 D{did} DEBUG: cfg.start_airport='{cfg_start}', airport_by_id keys={list(airport_by_id.keys())}", flush=True)
 
-        # Check if cfg_start is a synthetic start (e.g., D1_START for checkpoint replanning)
-        # Synthetic starts should be used directly, not fall back to real airports
+        # Check if cfg_start is a synthetic start (e.g., D1_START) or checkpoint (e.g., C1-1, C2-3)
+        # These should be used directly, not fall back to real airports
+        # Checkpoint format: C{segment}-{drone} (e.g., C1-1 = Checkpoint 1 for Drone 1)
         is_synthetic_start = cfg_start and cfg_start.endswith("_START") and cfg_start not in airport_by_id
+        is_checkpoint_start = cfg_start and bool(re.match(r'^C\d+-\d+$', cfg_start))
 
-        if is_synthetic_start:
-            # Use the synthetic start directly - it's in matrix_labels but not airports
+        if is_synthetic_start or is_checkpoint_start:
+            # Use the synthetic start or checkpoint directly - it's in matrix_labels but not necessarily in airport_by_id
             start_id = cfg_start
-            print(f"🔍 D{did} DEBUG: Using SYNTHETIC start '{start_id}' for checkpoint replanning", flush=True)
+            start_type = "CHECKPOINT" if is_checkpoint_start else "SYNTHETIC"
+            print(f"🔍 D{did} DEBUG: Using {start_type} start '{start_id}' for checkpoint replanning", flush=True)
         else:
             start_id = cfg_start or (
                 default_start if default_start in airport_by_id else airports[0]["id"]
@@ -491,12 +506,14 @@ def solve_mission(
 
         # Build airports list for solver - start with real airports
         solver_airports = list(airports)  # Copy to avoid mutating original
-        # CRITICAL: Real airports are those that are NOT synthetic (no is_synthetic flag AND not ending in _START)
-        # Synthetic starts should NEVER be valid endpoints
+        # CRITICAL: Real airports are those that are NOT synthetic/checkpoint (no is_synthetic/is_checkpoint flag AND not ending in _START or starting with C)
+        # Synthetic starts and checkpoints should NEVER be valid endpoints
         real_airport_ids = [
             a["id"] for a in airports
             if not a.get("is_synthetic", False)
+            and not a.get("is_checkpoint", False)
             and not str(a.get("id", "")).endswith("_START")
+            and not str(a.get("id", "")).startswith("C")  # Exclude C1, C2, etc.
         ]
 
         # CRITICAL FIX: Add ALL synthetic starts that are in the filtered matrix
@@ -549,14 +566,19 @@ def solve_mission(
             real_airports = [
                 a for a in airports
                 if not a.get("is_synthetic", False)
+                and not a.get("is_checkpoint", False)
                 and not str(a.get("id", "")).endswith("_START")
+                and not str(a.get("id", "")).startswith("C")  # Exclude C1, C2, etc.
             ]
-            synthetic_airports = [
+            synthetic_or_checkpoint = [
                 a for a in airports
-                if a.get("is_synthetic", False) or str(a.get("id", "")).endswith("_START")
+                if a.get("is_synthetic", False)
+                or a.get("is_checkpoint", False)
+                or str(a.get("id", "")).endswith("_START")
+                or str(a.get("id", "")).startswith("C")
             ]
-            print(f"   🔍 DEBUG: Real airports (non-synthetic): {[a['id'] for a in real_airports]}", flush=True)
-            print(f"   🔍 DEBUG: Synthetic airports: {[a['id'] for a in synthetic_airports]}", flush=True)
+            print(f"   🔍 DEBUG: Real airports (non-synthetic/checkpoint): {[a['id'] for a in real_airports]}", flush=True)
+            print(f"   🔍 DEBUG: Synthetic/checkpoint: {[a['id'] for a in synthetic_or_checkpoint]}", flush=True)
             if real_airports:
                 env_for_solver["valid_end_airports"] = [a["id"] for a in real_airports]
                 print(f"   ✈️ Valid end airports (excluding synthetic): {env_for_solver['valid_end_airports']}", flush=True)
@@ -602,7 +624,7 @@ def solve_mission(
             "route": route_ids,
             "sequence": seq,
             "points": total_points,
-            "distance": travel_distance,
+            "distance": travel_distance,  # SAM-aware distance from solver
             "fuel_budget": fuel_budget,
             "trajectory": trajectory,  # Full path with SAM avoidance
         }
@@ -729,14 +751,17 @@ def solve_mission_with_allocation(
         default_start = f"A{did_int}"
         cfg_start = cfg.get("start_airport")
 
-        # Check if cfg_start is a synthetic start (e.g., D1_START for checkpoint replanning)
-        # Synthetic starts should be used directly, not fall back to real airports
+        # Check if cfg_start is a synthetic start (e.g., D1_START) or checkpoint (e.g., C1-1, C2-3)
+        # These should be used directly, not fall back to real airports
+        # Checkpoint format: C{segment}-{drone} (e.g., C1-1 = Checkpoint 1 for Drone 1)
         is_synthetic_start = cfg_start and cfg_start.endswith("_START") and cfg_start not in airport_by_id
+        is_checkpoint_start = cfg_start and bool(re.match(r'^C\d+-\d+$', cfg_start))
 
-        if is_synthetic_start:
-            # Use the synthetic start directly - it's in matrix_labels but not airports
+        if is_synthetic_start or is_checkpoint_start:
+            # Use the synthetic start or checkpoint directly - it's in matrix_labels but not necessarily in airport_by_id
             start_id = cfg_start
-            print(f"🔍 [solve_mission_with_allocation] D{did}: Using SYNTHETIC start '{start_id}'", flush=True)
+            start_type = "CHECKPOINT" if is_checkpoint_start else "SYNTHETIC"
+            print(f"🔍 [solve_mission_with_allocation] D{did}: Using {start_type} start '{start_id}'", flush=True)
         else:
             start_id = cfg_start or (
                 default_start if default_start in airport_by_id else airports[0]["id"]
@@ -750,7 +775,7 @@ def solve_mission_with_allocation(
 
         # Debug logging
         print(f"🔍 [Run Planner] D{did} config: {cfg}", flush=True)
-        print(f"🔍 [Run Planner] D{did} start_id={start_id}, raw_end_id={raw_end_id}, flexible={flexible_endpoint}, end_id={end_id}, is_synthetic={is_synthetic_start}", flush=True)
+        print(f"🔍 [Run Planner] D{did} start_id={start_id}, raw_end_id={raw_end_id}, flexible={flexible_endpoint}, end_id={end_id}, is_synthetic={is_synthetic_start}, is_checkpoint={is_checkpoint_start}", flush=True)
 
         # Get this drone's assigned targets
         assigned_target_ids = set(allocations.get(did, []))
@@ -758,10 +783,15 @@ def solve_mission_with_allocation(
         if not assigned_target_ids:
             # No targets assigned: trivial route from start to end airport
             # For flexible endpoint with no targets, return to NEAREST REAL airport
-            # (not the synthetic start - that would be a zero-length route)
+            # (not the synthetic start or checkpoint - that would be a zero-length route)
             if flexible_endpoint:
-                # Find nearest real airport for return
-                real_airports = [a for a in airports if not a.get("is_synthetic", False)]
+                # Find nearest real airport for return (exclude synthetic starts and checkpoints)
+                real_airports = [
+                    a for a in airports
+                    if not a.get("is_synthetic", False)
+                    and not a.get("is_checkpoint", False)
+                    and not str(a.get("id", "")).startswith("C")
+                ]
                 if real_airports and start_id:
                     # Get start position
                     start_pos = None
@@ -795,12 +825,25 @@ def solve_mission_with_allocation(
                 waypoint_positions = {wp["id"]: [wp["x"], wp["y"]] for wp in dist_data.get("waypoints", [])}
                 trajectory = trajectory_planner.generate_trajectory(route_ids, waypoint_positions, drone_id=did)
 
-                # Calculate actual distance from trajectory waypoints
-                if trajectory and len(trajectory) >= 2:
-                    for i in range(len(trajectory) - 1):
-                        dx = trajectory[i+1][0] - trajectory[i][0]
-                        dy = trajectory[i+1][1] - trajectory[i][1]
-                        route_distance += math.sqrt(dx*dx + dy*dy)
+                # Calculate distance from SAM-aware distance matrix
+                orig_labels = dist_data["labels"]
+                orig_matrix = dist_data["matrix"]
+                for i in range(len(route_ids) - 1):
+                    from_id = route_ids[i]
+                    to_id = route_ids[i + 1]
+                    if from_id in orig_labels and to_id in orig_labels:
+                        from_idx = orig_labels.index(from_id)
+                        to_idx = orig_labels.index(to_id)
+                        route_distance += orig_matrix[from_idx][to_idx]
+                    else:
+                        # Fallback for waypoints not in matrix (should not happen)
+                        from_pos = waypoint_positions.get(from_id)
+                        to_pos = waypoint_positions.get(to_id)
+                        if from_pos and to_pos:
+                            dx = to_pos[0] - from_pos[0]
+                            dy = to_pos[1] - from_pos[1]
+                            route_distance += math.sqrt(dx*dx + dy*dy)
+                            print(f"   ⚠️ Fallback Euclidean for {from_id}→{to_id}", flush=True)
 
             sequences[did] = seq
             routes_detail[did] = {
@@ -888,12 +931,14 @@ def solve_mission_with_allocation(
 
         # Build airports list for solver - start with real airports
         solver_airports = list(airports)  # Copy to avoid mutating original
-        # CRITICAL: Real airports are those that are NOT synthetic (no is_synthetic flag AND not ending in _START)
-        # Synthetic starts should NEVER be valid endpoints
+        # CRITICAL: Real airports are those that are NOT synthetic/checkpoint (no is_synthetic/is_checkpoint flag AND not ending in _START or starting with C)
+        # Synthetic starts and checkpoints should NEVER be valid endpoints
         real_airport_ids = [
             a["id"] for a in airports
             if not a.get("is_synthetic", False)
+            and not a.get("is_checkpoint", False)
             and not str(a.get("id", "")).endswith("_START")
+            and not str(a.get("id", "")).startswith("C")  # Exclude C1, C2, etc.
         ]
 
         # CRITICAL FIX: Add ALL synthetic starts that are in the filtered matrix
@@ -1017,7 +1062,7 @@ def solve_mission_with_allocation(
             "route": route_ids,
             "sequence": seq,
             "points": total_points,
-            "distance": travel_distance,
+            "distance": travel_distance,  # SAM-aware distance from solver
             "fuel_budget": fuel_budget,
             "trajectory": trajectory,  # Full path with SAM avoidance
         }
