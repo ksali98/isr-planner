@@ -325,6 +325,11 @@ def _known_waypoint_ids(env: Dict[str, Any]) -> set:
     # Synthetic starts can behave like airports/waypoints
     for sid in (env.get("synthetic_starts") or {}).keys():
         ids.add(str(sid))
+    # Checkpoints (C1-1, C1-2, etc.) are valid waypoints for segmented missions
+    for cp in env.get("checkpoints", []):
+        cpid = cp.get("id")
+        if cpid:
+            ids.add(str(cpid))
     return ids
 
 
@@ -1458,6 +1463,7 @@ def api_apply_sequence(req: ApplySequenceRequest):
         sams = env.get("sams", [])
         airports = env.get("airports", [])
         targets = env.get("targets", [])
+        checkpoints = env.get("checkpoints", [])
 
         # Build waypoint position lookup
         waypoint_positions: Dict[str, List[float]] = {}
@@ -1467,6 +1473,10 @@ def api_apply_sequence(req: ApplySequenceRequest):
         for t in targets:
             tid = str(t.get("id", ""))
             waypoint_positions[tid] = [float(t["x"]), float(t["y"])]
+        # Add checkpoints (C1-1, C1-2, etc.) for segmented missions
+        for cp in checkpoints:
+            cpid = str(cp.get("id", ""))
+            waypoint_positions[cpid] = [float(cp["x"]), float(cp["y"])]
 
         # Validate all waypoints exist
         for wp_id in route_ids:
