@@ -1490,9 +1490,13 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
     policy = state.get("policy") or {}
     # Check both keys for backward compatibility (coordinator uses force_allocation)
     force_algo = bool(policy.get("force_allocation", policy.get("force_algorithmic_allocation", False)))
-    policy_strategy = policy.get("allocation_strategy", "efficient")
+    policy_strategy = policy.get("allocation_strategy", "geographic")
     use_existing = bool(policy.get("use_existing_allocation", False))
     allocation_mods = policy.get("allocation_modifications", [])
+    required_targets = policy.get("required_targets", [])  # User-requested targets to include
+
+    if required_targets:
+        print(f"🎯 [ALLOCATOR] Required targets from user: {required_targets}", file=sys.stderr)
 
     print(f"🎯 [ALLOCATOR] Policy: force_algo={force_algo}, strategy={policy_strategy}", file=sys.stderr)
 
@@ -1573,11 +1577,71 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
     strategy_used = policy_strategy
     excluded_targets: List[Dict[str, Any]] = []
 
-    reasoning = (
-        f"[Algorithmic allocation]\n"
-        f"Strategy: {strategy_used}\n"
-        f"Allocation: {allocation}"
-    )
+    # =========================================================================
+    # ENFORCE REQUIRED TARGETS: If user requested specific targets to be included,
+    # make sure they appear in the allocation. Add them to the closest drone.
+    # =========================================================================
+    forced_additions = []
+    if required_targets:
+        # Find all currently allocated targets
+        all_allocated = set()
+        for drone_id, targets in allocation.items():
+            all_allocated.update(targets)
+
+        # Find required targets that are missing
+        missing_required = [t for t in required_targets if t not in all_allocated]
+
+        if missing_required:
+            print(f"⚠️ [ALLOCATOR] Missing required targets: {missing_required}", file=sys.stderr)
+
+            # Get target positions
+            targets_data = {t.get("id", t.get("label")): t for t in env.get("targets", [])}
+
+            # For each missing target, assign to the best drone
+            for target_id in missing_required:
+                target_data = targets_data.get(target_id)
+                if not target_data:
+                    print(f"   ⚠️ Target {target_id} not found in environment", file=sys.stderr)
+                    continue
+
+                # Find the drone with most remaining fuel capacity that can reach this target
+                best_drone = None
+                best_score = -1
+
+                for drone_id, drone_cfg in configs.items():
+                    if not drone_cfg.get("enabled", True):
+                        continue
+
+                    # Check if drone has fuel budget (higher = better)
+                    fuel_budget = drone_cfg.get("fuelBudget", drone_cfg.get("fuel_budget", 200))
+                    current_allocated = len(allocation.get(drone_id, []))
+
+                    # Simple heuristic: prefer drones with fewer targets and more fuel
+                    score = fuel_budget - (current_allocated * 20)
+
+                    if score > best_score:
+                        best_score = score
+                        best_drone = drone_id
+
+                if best_drone:
+                    if best_drone not in allocation:
+                        allocation[best_drone] = []
+                    allocation[best_drone].append(target_id)
+                    forced_additions.append(f"{target_id} → D{best_drone}")
+                    print(f"   ✅ Forced {target_id} into D{best_drone} allocation", file=sys.stderr)
+                else:
+                    print(f"   ❌ Could not find drone for required target {target_id}", file=sys.stderr)
+
+    reasoning_parts = [
+        f"[Algorithmic allocation]",
+        f"Strategy: {strategy_used}",
+    ]
+    if required_targets:
+        reasoning_parts.append(f"Required targets (user request): {required_targets}")
+    if forced_additions:
+        reasoning_parts.append(f"Forced additions: {', '.join(forced_additions)}")
+    reasoning_parts.append(f"Final allocation: {allocation}")
+    reasoning = "\n".join(reasoning_parts)
 
     print(f"📋 [ALLOCATOR] Algorithmic allocation complete: {allocation}", file=sys.stderr)
 
@@ -1933,10 +1997,20 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
                 ]
 
                 # Filter targets to only those allocated (env target dicts)
-                targets = [
-                    t for t in env.get("targets", [])
-                    if str(t.get("id", t.get("label"))) in target_ids
-                ]
+                # Also boost priority of required targets to ensure solver includes them
+                required_targets = policy.get("required_targets", [])
+                targets = []
+                for t in env.get("targets", []):
+                    tid = str(t.get("id", t.get("label")))
+                    if tid in target_ids:
+                        # Make a copy to avoid mutating original
+                        target_copy = dict(t)
+                        # Boost priority of required targets to 1000 so solver always picks them
+                        if tid in required_targets:
+                            original_priority = target_copy.get("priority", 5)
+                            target_copy["priority"] = 1000  # Very high priority forces inclusion
+                            print(f"   🎯 [ROUTE_OPTIMIZER] Boosted {tid} priority: {original_priority} → 1000 (required)", file=sys.stderr)
+                        targets.append(target_copy)
 
                 # Build airports list - include synthetic starts as airports
                 solver_airports = list(env.get("airports", []))
@@ -2684,6 +2758,7 @@ def run_multi_agent_v4(
     coordinator_guardrails = coordinator_decision.guardrails
     coordinator_drone_contracts = coordinator_decision.drone_contracts
     coordinator_synthetic_starts = coordinator_decision.synthetic_starts
+    coordinator_constraints = coordinator_decision.constraints  # includes required_targets
 
     # ------------------------------------------------------------------
     # 3b) Populate env.synthetic_starts from decision (authoritative data)
@@ -2725,7 +2800,7 @@ def run_multi_agent_v4(
         "commands": None,
         # Coordinator v4 injected fields
         "intent": coordinator_decision.intent,
-        "policy": coordinator_policy,
+        "policy": {**coordinator_policy, "required_targets": coordinator_constraints.get("required_targets", [])},
         "guardrails": coordinator_guardrails,
         "drone_contracts": coordinator_drone_contracts,  # Per-drone start/home/endpoint contracts
         "allocation_strategy": coordinator_policy.get("allocation_strategy", "efficient"),

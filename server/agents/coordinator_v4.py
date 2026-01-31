@@ -45,6 +45,13 @@ ALLOCATION_MOD_TOKENS = (
     "give", "take", "from d", "to d", "from drone", "to drone",
 )
 
+# Include/force visit tokens - user wants specific targets included
+INCLUDE_TOKENS = (
+    "include", "must visit", "must include", "force visit", "make sure",
+    "need to visit", "have to visit", "should visit", "ensure", "require",
+    "add t", "visit t", "cover t",
+)
+
 import re
 
 def parse_allocation_modifications(user_message: str) -> List[Dict[str, Any]]:
@@ -101,6 +108,64 @@ def parse_allocation_modifications(user_message: str) -> List[Dict[str, Any]]:
             })
 
     return modifications
+
+
+def parse_required_targets(user_message: str) -> List[str]:
+    """
+    Parse target inclusion requests from user message.
+
+    Detects patterns like:
+    - "include T2 and T3"
+    - "must visit T5, T6, T7"
+    - "make sure T2 is visited"
+    - "you have to include T2 and T3 in your solution"
+    - "ensure T8 and T10 are covered"
+
+    Returns:
+        List of target IDs: ["T2", "T3", "T5"]
+    """
+    required = []
+    msg = user_message.upper()
+
+    # Pattern 1: "include/must visit/ensure T<id> [and T<id>...]"
+    # Matches: "include T2 and T3", "must visit T5, T6"
+    pattern1 = r'(?:INCLUDE|MUST\s+VISIT|MUST\s+INCLUDE|ENSURE|MAKE\s+SURE|NEED\s+TO\s+VISIT|HAVE\s+TO\s+(?:VISIT|INCLUDE)|SHOULD\s+VISIT|REQUIRE|FORCE\s+VISIT|ADD|COVER)\s+(T\d+(?:\s*(?:,|AND)\s*T\d+)*)'
+    matches1 = re.findall(pattern1, msg)
+    for targets_str in matches1:
+        target_ids = re.findall(r'T(\d+)', targets_str)
+        for tid in target_ids:
+            target_id = f"T{tid}"
+            if target_id not in required:
+                required.append(target_id)
+
+    # Pattern 2: "T<id> [and T<id>...] must be visited/included"
+    # Matches: "T2 and T3 must be visited", "T5, T6 should be included"
+    pattern2 = r'(T\d+(?:\s*(?:,|AND)\s*T\d+)*)\s+(?:MUST|SHOULD|HAVE\s+TO|NEED\s+TO)\s+BE\s+(?:VISITED|INCLUDED|COVERED|IN)'
+    matches2 = re.findall(pattern2, msg)
+    for targets_str in matches2:
+        target_ids = re.findall(r'T(\d+)', targets_str)
+        for tid in target_ids:
+            target_id = f"T{tid}"
+            if target_id not in required:
+                required.append(target_id)
+
+    # Pattern 3: "visit T<id>" or "cover T<id>" anywhere in message
+    # Matches: "please visit T2", "make sure to cover T5"
+    pattern3 = r'(?:VISIT|COVER|HIT)\s+(T\d+)'
+    matches3 = re.findall(pattern3, msg)
+    for tid in matches3:
+        if tid not in required:
+            required.append(tid)
+
+    # Pattern 4: General "T<id> in your/the solution"
+    # Matches: "include T2 in your solution", "T3 in the mission"
+    pattern4 = r'(T\d+)\s+IN\s+(?:YOUR|THE|THIS)\s+(?:SOLUTION|MISSION|PLAN|ROUTE)'
+    matches4 = re.findall(pattern4, msg)
+    for tid in matches4:
+        if tid not in required:
+            required.append(tid)
+
+    return required
 
 
 @dataclass
@@ -406,7 +471,7 @@ class CoordinatorV4:
         # Base policy
         policy: Dict[str, Any] = {
             # Allocation control
-            "allocation_strategy": prefs.get("allocation_strategy", "efficient"),
+            "allocation_strategy": prefs.get("allocation_strategy", "geographic"),
             "force_algorithmic_allocation": True,  # v4 agentic: tool-driven allocation
 
             # Solver control
@@ -559,16 +624,21 @@ class CoordinatorV4:
         # Extract moves from user message (e.g., "move T5 from D2 to D1")
         moves = parse_allocation_modifications(user_message) if user_message else []
 
+        # Extract required targets from user message (e.g., "include T2 and T3")
+        required_targets = parse_required_targets(user_message) if user_message else []
+
         # Build constraints dict (canonical structure)
         constraints: Dict[str, Any] = {
             "moves": moves,
-            "required_targets": [],   # TODO: parse from user message
-            "forbidden_targets": [],  # TODO: parse from user message
+            "required_targets": required_targets,
+            "forbidden_targets": [],  # TODO: parse from user message if needed
             "fixed_endpoints": {},    # Populated from drone_contracts below
         }
-        self._te(trace_events, "constraints", "moves_extracted",
+        self._te(trace_events, "constraints", "constraints_extracted",
                  moves=moves,
-                 num_moves=len(moves))
+                 num_moves=len(moves),
+                 required_targets=required_targets,
+                 num_required=len(required_targets))
 
         # ===================================================================
         # EVENT 4: Policy Selection

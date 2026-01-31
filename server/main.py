@@ -82,7 +82,7 @@ from path_planning_core.sam_wrapping import wrap_sams
 class SolveRequest(BaseModel):
     env: Dict[str, Any]
     drone_configs: Dict[str, Any]
-    allocation_strategy: str = "efficient"
+    allocation_strategy: str = "geographic"
     mission_id: Optional[str] = None  # optional continuity handle
 
 
@@ -1168,7 +1168,7 @@ def solve(req: SolveRequest):
 class SolveWithAllocationRequest(BaseModel):
     env: Dict[str, Any]
     drone_configs: Dict[str, Any]
-    allocation_strategy: str = "efficient"
+    allocation_strategy: str = "geographic"
     use_sam_aware_distances: bool = False  # Disabled for speed - SAM avoidance happens at trajectory time
     post_optimize: bool = True
     visited_targets: List[str] = []  # Targets already visited (for checkpoint replanning)

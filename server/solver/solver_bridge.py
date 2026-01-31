@@ -639,7 +639,7 @@ def solve_mission(
 def solve_mission_with_allocation(
     env: Dict[str, Any],
     drone_configs: Dict[str, Any],
-    allocation_strategy: str = "efficient",
+    allocation_strategy: str = "geographic",
     use_sam_aware_distances: bool = False,  # Default False for speed - SAM avoidance at trajectory time
     post_optimize: bool = True,
 ) -> Dict[str, Any]:

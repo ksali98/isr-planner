@@ -589,7 +589,7 @@ _allocator = TargetAllocator()
 def allocate_targets(
     env: Dict[str, Any],
     drone_configs: Dict[str, Dict[str, Any]],
-    strategy: str = "efficient",
+    strategy: str = "geographic",
     distance_matrix: Optional[Dict[str, Any]] = None
 ) -> Dict[str, List[str]]:
     """
@@ -753,7 +753,7 @@ def allocate_with_priority_filters(
     env: Dict[str, Any],
     drone_configs: Dict[str, Dict[str, Any]],
     priority_filters: Dict[str, Callable[[int], bool]],
-    strategy: str = "efficient",
+    strategy: str = "geographic",
     distance_matrix: Optional[Dict[str, Any]] = None
 ) -> Dict[str, List[str]]:
     """
@@ -908,7 +908,7 @@ TARGET_ALLOCATOR_TOOL = {
                 "type": "string",
                 "description": "Allocation strategy to use",
                 "enum": ["greedy", "balanced", "efficient", "geographic", "exclusive"],
-                "default": "efficient"
+                "default": "geographic"
             },
             "distance_matrix": {
                 "type": "object",
