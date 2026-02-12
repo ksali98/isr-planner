@@ -14,7 +14,59 @@
         Env file:
         <span id="env-filename" class="env-filename">[unsaved]</span>
       </div>
+      <button id="btn-settings" class="settings-btn" title="AI Settings">&#9881;</button>
     </header>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal-overlay" style="display: none;">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>AI Configuration</h3>
+          <button id="btn-close-settings" class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="settings-info">
+            Your API key is stored only in your browser (localStorage).
+          </div>
+
+          <div class="settings-form">
+            <div class="form-group">
+              <label for="llm-provider">Provider</label>
+              <select id="llm-provider" class="settings-select">
+                <option value="">Loading...</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label for="llm-model">Model</label>
+              <select id="llm-model" class="settings-select">
+                <option value="">Select a provider first</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label for="llm-api-key">API Key</label>
+              <div class="api-key-row">
+                <input type="password" id="llm-api-key" class="settings-input" placeholder="Enter your API key" />
+                <button id="btn-toggle-key" class="small-btn">Show</button>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <button id="btn-test-connection" class="primary-btn">Test Connection</button>
+              <span id="connection-status" class="connection-status"></span>
+            </div>
+          </div>
+
+          <div id="provider-status" class="provider-status">
+            <!-- Will be populated dynamically -->
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="btn-save-settings" class="primary-btn">Save Settings</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Main 2-column layout -->
     <main class="main-layout">
@@ -124,6 +176,9 @@
         <div class="tab-content">
           <!-- ENV TAB (Combined Stats + Config + Controls) -->
           <section class="tab-pane active" id="tab-env">
+
+          <!-- Section 1: Mission & Drone Stats -->
+          <div class="section-box">
           <div class="card-header">
             <span>Mission &amp; Drone Stats</span>
           </div>
@@ -231,9 +286,11 @@
               </div>
             </div>
           </div>
+          </div>
 
-          <!-- Drone Configuration -->
-          <div class="card-header" style="margin-top: 0.5rem;">
+          <!-- Section 2: Drone Configuration -->
+          <div class="section-box">
+          <div class="card-header">
             <span>Drone Configuration</span>
           </div>
 
@@ -363,10 +420,15 @@
               </div>
             </div>
           </div>
+          </div>
 
-          <!-- Allocation Strategy -->
-          <div class="strategy-controls" style="margin-top: 0.5rem; padding: 0.4rem; background: #111827; border-radius: 0.5rem;">
-            <div class="control-label" style="font-size: 0.7rem; color: #9ca3af; margin-bottom: 0.3rem;">Allocation Strategy:</div>
+          <!-- Section 3: Allocation -->
+          <div class="section-box">
+          <div class="card-header">
+            <span>Allocation</span>
+          </div>
+          <div class="strategy-controls">
+            <div class="control-label" style="font-size: 0.7rem; color: #9ca3af; margin-bottom: 0.3rem;">Strategy:</div>
             <select id="allocation-strategy" class="config-select" style="width: 100%;">
               <option value="efficient" selected>Efficient (Auction)</option>
               <option value="greedy">Greedy (Fast)</option>
@@ -378,12 +440,17 @@
           </div>
 
           <!-- Target Allocation Results -->
-          <div class="control-label" style="margin-top: 0.5rem; font-size: 0.7rem; color: #9ca3af;">Target Allocation:</div>
+          <div class="control-label" style="margin-top: 0.5rem; font-size: 0.7rem; color: #9ca3af;">Results:</div>
           <div id="allocation-display" style="font-family: monospace; font-size: 11px; padding: 0.5rem; background: #1a1a2e; border-radius: 4px; max-height: 120px; overflow-y: auto;">
             <div style="color: #888;">Run planner to see allocation...</div>
           </div>
+          </div>
 
-          <!-- Trajectory display buttons -->
+          <!-- Section 4: Trajectory & Animation -->
+          <div class="section-box">
+          <div class="card-header">
+            <span>Display &amp; Animation</span>
+          </div>
           <div class="trajectory-controls">
             <div class="control-label">Show Trajectories:</div>
             <div class="traj-btn-row">
@@ -409,10 +476,14 @@
               <button id="anim-stop" class="anim-btn anim-stop">Stop</button>
             </div>
           </div>
+          </div>
 
-          <!-- Optimization buttons -->
-          <div class="optimization-controls" style="margin-top: 0.5rem; padding: 0.4rem; background: #111827; border-radius: 0.5rem;">
-            <div class="control-label" style="font-size: 0.7rem; color: #9ca3af; margin-bottom: 0.3rem;">Post-Optimization:</div>
+          <!-- Section 5: Optimization -->
+          <div class="section-box">
+          <div class="card-header">
+            <span>Post-Optimization</span>
+          </div>
+          <div class="optimization-controls">
             <div style="display: flex; gap: 0.5rem;">
               <button id="btn-optimize-insert" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Insert unvisited targets into routes with leftover fuel">Insert</button>
               <button id="btn-optimize-swap-until" class="secondary-btn" style="flex: 1; padding: 6px 10px; font-size: 12px;" title="Swap targets between drones for shorter routes">Swap</button>
@@ -423,9 +494,14 @@
               <label for="chk-auto-regen" style="margin:0">Auto-regenerate &amp; cascade (one-click)</label>
             </div>
           </div>
+          </div>
 
-          <!-- Import/Export buttons -->
-          <div class="io-row" style="margin-top: 0.5rem;">
+          <!-- Section 6: Import/Export -->
+          <div class="section-box">
+          <div class="card-header">
+            <span>Import / Export</span>
+          </div>
+          <div class="io-row">
             <button id="btn-import" class="primary-btn" style="padding: 8px 16px; font-size: 14px; font-weight: bold;">Import JSON</button>
             <button id="btn-export" class="primary-btn" style="padding: 8px 16px; font-size: 14px; font-weight: bold; background: #28a745;">Export</button>
             <input
@@ -446,6 +522,8 @@
               <span style="font-size: 13px;">Environment</span>
             </label>
           </div>
+          </div>
+
           </section>
 
           <!-- DEBUG TAB -->
