@@ -1059,12 +1059,13 @@ def plan_path(
     goal: Tuple[float, float],
     sams: List[Dict[str, Any]] = None,
     debug: bool = False,
+    polygons: List[Polygon] = None,
 ) -> Tuple[List[Tuple[float, float]], float, str]:
     """
     Plan a path from start to goal avoiding SAM zones.
 
     Uses tangent-arc-tangent algorithm:
-    1. Convert SAMs to convex polygons via wrap_sams
+    1. Convert SAMs to convex polygons via wrap_sams (unless polygons provided)
     2. Check if direct path is clear
     3. If blocked, navigate around polygons using tangent-arc-tangent
     4. Try both directions, return shorter valid path
@@ -1074,6 +1075,9 @@ def plan_path(
         goal: (x, y) goal position
         sams: List of SAM dicts with 'pos'/'x','y' and 'range'/'radius'
         debug: Enable debug output
+        polygons: Optional pre-wrapped polygons (list of vertex lists).
+                  If provided, sams parameter is ignored and these polygons
+                  are used directly for path planning.
 
     Returns:
         (path, distance, method) where:
@@ -1084,32 +1088,39 @@ def plan_path(
     start_pt: Point = (float(start[0]), float(start[1]))
     goal_pt: Point = (float(goal[0]), float(goal[1]))
 
-    # No SAMs = direct path
-    if not sams:
-        dist = _distance(start_pt, goal_pt)
-        return [start_pt, goal_pt], dist, "direct (no SAMs)"
+    # If pre-wrapped polygons provided, use them directly
+    if polygons is not None:
+        if not polygons:
+            dist = _distance(start_pt, goal_pt)
+            return [start_pt, goal_pt], dist, "direct (no polygons)"
+        # Skip SAM processing, use polygons directly (handled below)
+    else:
+        # No SAMs = direct path
+        if not sams:
+            dist = _distance(start_pt, goal_pt)
+            return [start_pt, goal_pt], dist, "direct (no SAMs)"
 
-    # Normalize SAM format for wrap_sams (needs 'x', 'y', 'range')
-    normalized_sams = []
-    for sam in sams:
-        pos = sam.get("pos") or sam.get("position")
-        if pos is None and "x" in sam and "y" in sam:
-            pos = [sam["x"], sam["y"]]
-        if pos is None:
-            continue
+        # Normalize SAM format for wrap_sams (needs 'x', 'y', 'range')
+        normalized_sams = []
+        for sam in sams:
+            pos = sam.get("pos") or sam.get("position")
+            if pos is None and "x" in sam and "y" in sam:
+                pos = [sam["x"], sam["y"]]
+            if pos is None:
+                continue
 
-        normalized_sams.append({
-            'x': float(pos[0]) if isinstance(pos, (list, tuple)) else float(pos),
-            'y': float(pos[1]) if isinstance(pos, (list, tuple)) else float(pos),
-            'range': float(sam.get("range", sam.get("radius", 15)))
-        })
+            normalized_sams.append({
+                'x': float(pos[0]) if isinstance(pos, (list, tuple)) else float(pos),
+                'y': float(pos[1]) if isinstance(pos, (list, tuple)) else float(pos),
+                'range': float(sam.get("range", sam.get("radius", 15)))
+            })
 
-    if not normalized_sams:
-        dist = _distance(start_pt, goal_pt)
-        return [start_pt, goal_pt], dist, "direct (no valid SAMs)"
+        if not normalized_sams:
+            dist = _distance(start_pt, goal_pt)
+            return [start_pt, goal_pt], dist, "direct (no valid SAMs)"
 
-    # Convert SAMs to convex polygons
-    polygons, _ = wrap_sams(normalized_sams, min_seg=2.0)
+        # Convert SAMs to convex polygons
+        polygons, _ = wrap_sams(normalized_sams, min_seg=2.0)
 
     if not polygons:
         dist = _distance(start_pt, goal_pt)

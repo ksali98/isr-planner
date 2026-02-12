@@ -77,7 +77,7 @@ class ISRTrajectoryPlanner:
                 print(f"🟢 [SEGMENT] No polygons, direct {start} → {end}, d={d:.2f}", flush=True)
             return [list(start), list(end)], d
 
-        path, d, method = boundary_plan_path(list(start), list(end), self.polygons, debug=debug)
+        path, d, method = boundary_plan_path(list(start), list(end), polygons=self.polygons, debug=debug)
 
         if method.startswith("INVALID"):
             if debug:

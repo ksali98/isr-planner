@@ -24,6 +24,11 @@ from .constraints import (
     SwapConstraint,
     InsertConstraint,
 )
+from .algorithm_registry import (
+    resolve_algorithm_alias,
+    get_algorithm_command_patterns,
+    AlgorithmCommandType,
+)
 
 
 # =============================================================================
@@ -340,6 +345,94 @@ def regex_fallback_parse(
 
 
 # =============================================================================
+# Algorithm Command Parsing
+# =============================================================================
+
+def parse_algorithm_commands(user_message: str) -> Dict[str, Any]:
+    """
+    Parse user message for explicit algorithm commands.
+
+    Detects commands like:
+    - "use the greedy allocation strategy"
+    - "only run swap optimization"
+    - "skip crossing removal"
+    - "use the held-karp solver"
+
+    Returns:
+        Dict with keys:
+        - allocation_strategy: str (canonical algorithm ID)
+        - optimizer_include: List[str] (only run these optimizers)
+        - optimizer_exclude: List[str] (skip these optimizers)
+        - solver_algorithm: str (canonical algorithm ID)
+    """
+    commands: Dict[str, Any] = {}
+
+    patterns = get_algorithm_command_patterns()
+
+    for pattern, command_type in patterns:
+        match = pattern.search(user_message)
+        if match:
+            value = match.group(1).lower()
+
+            # Resolve alias to canonical algorithm ID
+            if command_type == AlgorithmCommandType.ALLOCATION_STRATEGY:
+                canonical = resolve_algorithm_alias(value, "allocation")
+                if canonical:
+                    commands["allocation_strategy"] = canonical
+
+            elif command_type == AlgorithmCommandType.OPTIMIZER_INCLUDE:
+                canonical = resolve_algorithm_alias(value, "optimizer")
+                if canonical:
+                    if "optimizer_include" not in commands:
+                        commands["optimizer_include"] = []
+                    if canonical not in commands["optimizer_include"]:
+                        commands["optimizer_include"].append(canonical)
+
+            elif command_type == AlgorithmCommandType.OPTIMIZER_EXCLUDE:
+                canonical = resolve_algorithm_alias(value, "optimizer")
+                if canonical:
+                    if "optimizer_exclude" not in commands:
+                        commands["optimizer_exclude"] = []
+                    if canonical not in commands["optimizer_exclude"]:
+                        commands["optimizer_exclude"].append(canonical)
+
+            elif command_type == AlgorithmCommandType.SOLVER_ALGORITHM:
+                canonical = resolve_algorithm_alias(value, "solver")
+                if canonical:
+                    commands["solver_algorithm"] = canonical
+
+    return commands
+
+
+def should_include_algorithm_explanation(user_message: str) -> bool:
+    """
+    Check if user is asking about algorithms used.
+
+    Returns True if the message contains patterns like:
+    - "what algorithm did you use"
+    - "how did you solve this"
+    - "explain the algorithm"
+    """
+    msg_lower = user_message.lower()
+
+    patterns = [
+        r"what\s+algorithm",
+        r"which\s+algorithm",
+        r"how\s+did\s+you\s+(?:solve|optimize|allocate|plan)",
+        r"what\s+(?:method|approach|strategy)\s+did\s+you\s+use",
+        r"explain\s+(?:the\s+)?algorithm",
+        r"what\s+optimizer",
+        r"what\s+solver",
+    ]
+
+    for pattern in patterns:
+        if re.search(pattern, msg_lower):
+            return True
+
+    return False
+
+
+# =============================================================================
 # Parser Result
 # =============================================================================
 
@@ -351,6 +444,8 @@ class ParseResult:
     ambiguities: List[str]
     used_llm: bool
     raw_extraction: Optional[Dict[str, Any]] = None
+    algorithm_commands: Optional[Dict[str, Any]] = None  # Explicit algorithm choices
+    asks_about_algorithms: bool = False  # User wants algorithm explanation
 
 
 # =============================================================================
@@ -531,6 +626,10 @@ class ConstraintParser:
         confidence = 0.5
         ambiguities: List[str] = []
 
+        # Parse algorithm commands (always use regex for this)
+        algorithm_commands = parse_algorithm_commands(user_message)
+        asks_about_algorithms = should_include_algorithm_explanation(user_message)
+
         # Try LLM parsing first
         if self.use_llm:
             llm_result = self._llm_parse(user_message, context)
@@ -552,6 +651,8 @@ class ConstraintParser:
                     ambiguities=ambiguities,
                     used_llm=True,
                     raw_extraction=raw_extraction,
+                    algorithm_commands=algorithm_commands if algorithm_commands else None,
+                    asks_about_algorithms=asks_about_algorithms,
                 )
 
         # Fall back to regex parsing
@@ -577,6 +678,8 @@ class ConstraintParser:
             ambiguities=ambiguities,
             used_llm=False,
             raw_extraction=None,
+            algorithm_commands=algorithm_commands if algorithm_commands else None,
+            asks_about_algorithms=asks_about_algorithms,
         )
 
 

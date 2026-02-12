@@ -435,11 +435,19 @@ class PostOptimizer:
         )
 
         # Calculate remaining fuel for each drone
+        # Include ALL drones from drone_configs, not just those with existing routes
         drone_remaining_fuel: Dict[str, float] = {}
-        for did, route_data in solution.get("routes", {}).items():
-            fuel_budget = route_data.get("fuel_budget", 0)
-            distance_used = route_data.get("distance", 0)
-            drone_remaining_fuel[did] = fuel_budget - distance_used
+        for did, cfg in drone_configs.items():
+            route_data = solution.get("routes", {}).get(did, {})
+            if route_data:
+                # Drone has an existing route - use its fuel budget and distance
+                fuel_budget = route_data.get("fuel_budget", 0) or cfg.get("fuel_budget", 0)
+                distance_used = route_data.get("distance", 0)
+                drone_remaining_fuel[did] = fuel_budget - distance_used
+            else:
+                # Drone has no route yet - full fuel budget available
+                fuel_budget = cfg.get("fuel_budget", 0)
+                drone_remaining_fuel[did] = fuel_budget
 
         # DEBUG: Log state before insertion attempts
         print(f"\n🔍 INSERT MISSED OPTIMIZER DEBUG:", flush=True)
@@ -485,8 +493,32 @@ class PostOptimizer:
                 route_data = optimized_routes.get(did, {})
                 route = route_data.get("route", [])
 
+                # Handle drones with no route (still at home airport)
                 if not route:
-                    skip_reasons[did] = "empty route"
+                    # Get start and end airports from drone config
+                    start_airport = cfg.get("start_airport", f"A{did}")
+                    end_airport = cfg.get("end_airport", start_airport)
+
+                    # Calculate insertion cost: start -> target -> end
+                    d_start_to_target = self._get_distance(start_airport, tid)
+                    d_target_to_end = self._get_distance(tid, end_airport)
+
+                    if math.isinf(d_start_to_target) or math.isinf(d_target_to_end):
+                        skip_reasons[did] = f"no path from {start_airport} to {tid} or {tid} to {end_airport}"
+                        continue
+
+                    # Total route distance for new route
+                    insertion_cost = d_start_to_target + d_target_to_end
+
+                    # Check if drone can afford this route
+                    if insertion_cost > remaining_fuel:
+                        skip_reasons[did] = f"new route cost {insertion_cost:.1f} > fuel budget {remaining_fuel:.1f}"
+                        continue
+
+                    # Mark with special insertion index -1 to indicate "create new route"
+                    # Store (start_airport, end_airport) for later route creation
+                    viable_options.append((did, -1, insertion_cost, start_airport, end_airport))
+                    print(f"      🆕 D{did}: New route {start_airport}→{tid}→{end_airport}, cost={insertion_cost:.1f}", flush=True)
                     continue
 
                 # Get frozen segments for this drone (indices where route[i]->route[i+1] is frozen)
@@ -556,7 +588,7 @@ class PostOptimizer:
                     skip_reasons[did] = f"insertion_cost {insertion_cost:.1f} > remaining_fuel {remaining_fuel:.1f}"
                     continue
 
-                # Add this as a viable option
+                # Add this as a viable option (route_idx >= 0 means insert into existing route)
                 viable_options.append((did, route_idx, insertion_cost))
 
             # If no drone can take this target, log why
@@ -570,22 +602,39 @@ class PostOptimizer:
 
             # Among viable options, pick the drone with LOWEST insertion cost
             # This minimizes fuel usage when multiple drones can service the target
-            best_drone, best_insertion, best_cost = min(viable_options, key=lambda x: x[2])
+            best_option = min(viable_options, key=lambda x: x[2])
+            best_drone = best_option[0]
+            best_insertion = best_option[1]
+            best_cost = best_option[2]
 
             # Apply the insertion
-            route = list(optimized_routes[best_drone].get("route", []))
-            route.insert(best_insertion, tid)
+            if best_insertion == -1:
+                # New route case: create route [start_airport, target, end_airport]
+                start_airport = best_option[3]
+                end_airport = best_option[4]
+                route = [start_airport, tid, end_airport]
+                print(f"      🚀 Creating new route for D{best_drone}: {start_airport}→{tid}→{end_airport}", flush=True)
+            else:
+                # Existing route case: insert target at specified position
+                route = list(optimized_routes[best_drone].get("route", []))
+                route.insert(best_insertion, tid)
 
             # Recalculate route metrics
             new_distance = self._calculate_route_distance(route)
             new_points = self._calculate_route_points(route, target_by_id)
+
+            # Get fuel budget - from existing route data or from drone_configs
+            existing_route_data = optimized_routes.get(best_drone, {})
+            fuel_budget = existing_route_data.get("fuel_budget", 0)
+            if not fuel_budget:
+                fuel_budget = drone_configs.get(best_drone, {}).get("fuel_budget", 0)
 
             optimized_routes[best_drone] = {
                 "route": route,
                 "sequence": ",".join(route),
                 "points": new_points,
                 "distance": new_distance,
-                "fuel_budget": optimized_routes[best_drone].get("fuel_budget", 0)
+                "fuel_budget": fuel_budget
             }
 
             # Update remaining fuel for this drone
@@ -2076,3 +2125,534 @@ def crossing_removal_optimize(
         _crossing_optimizer.set_distance_matrix(distance_matrix)
 
     return _crossing_optimizer.optimize(solution, env, drone_configs)
+
+
+# ============================================================================
+# Unified Optimizer: Interleaved Insert + Swap
+# ============================================================================
+
+class UnifiedOptimizer:
+    """
+    Unified optimizer that interleaves Insert and Swap operations.
+
+    Unlike the fixed-order approach (Insert → Swap → Crossing Removal),
+    this optimizer evaluates ALL possible operations at each iteration
+    and executes the single best one. This allows:
+
+    1. A swap to free up fuel capacity, enabling a later insert
+    2. An insert to create a better swap opportunity
+    3. The optimization landscape to adapt after each operation
+
+    Crossing removal runs only after Insert/Swap convergence.
+
+    Scoring Strategy (Hybrid):
+    - Insert score: priority * 10 / max(cost, 1)  [maximize priority per fuel]
+    - Swap score: gain (= removal_delta - insertion_cost) [maximize fuel savings]
+    """
+
+    def __init__(self):
+        self._distance_matrix: Optional[Dict[str, Any]] = None
+        self._env: Optional[Dict[str, Any]] = None
+        self._waypoint_positions: Optional[Dict[str, List[float]]] = None
+        self._target_by_id: Dict[str, Dict[str, Any]] = {}
+
+    def set_distance_matrix(self, matrix_data: Dict[str, Any]):
+        """Set the pre-calculated distance matrix."""
+        self._distance_matrix = matrix_data
+
+    def set_environment(self, env: Dict[str, Any]):
+        """Set environment data for waypoint positions and target lookup."""
+        self._env = env
+
+        # Build waypoint position lookup
+        waypoint_positions = {}
+        airports = env.get("airports", [])
+        targets = env.get("targets", [])
+
+        for a in airports:
+            waypoint_positions[str(a["id"])] = [float(a["x"]), float(a["y"])]
+        for t in targets:
+            waypoint_positions[str(t["id"])] = [float(t["x"]), float(t["y"])]
+            self._target_by_id[str(t["id"])] = t
+
+        self._waypoint_positions = waypoint_positions
+
+    def _get_distance(self, from_id: str, to_id: str) -> float:
+        """Get SAM-aware distance from distance matrix."""
+        if self._distance_matrix:
+            labels = self._distance_matrix.get("labels", [])
+            matrix = self._distance_matrix.get("matrix", [])
+
+            try:
+                i = labels.index(from_id)
+                j = labels.index(to_id)
+                return matrix[i][j]
+            except (ValueError, IndexError):
+                pass
+
+        # Fallback to Euclidean if matrix lookup fails
+        if self._waypoint_positions:
+            if from_id in self._waypoint_positions and to_id in self._waypoint_positions:
+                p1 = self._waypoint_positions[from_id]
+                p2 = self._waypoint_positions[to_id]
+                return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+
+        return 99999.0
+
+    def _calculate_insertion_cost(self, prev_wp: str, target_id: str, next_wp: str) -> float:
+        """
+        Calculate cost to insert target between two waypoints.
+
+        insertion_cost = d(A, X) + d(X, B) - d(A, B)
+
+        Where A=prev_wp, X=target, B=next_wp
+        """
+        d_ax = self._get_distance(prev_wp, target_id)
+        d_xb = self._get_distance(target_id, next_wp)
+        d_ab = self._get_distance(prev_wp, next_wp)
+        return d_ax + d_xb - d_ab
+
+    def _calculate_route_distance(self, route: List[str]) -> float:
+        """Calculate total distance of a route."""
+        if len(route) < 2:
+            return 0.0
+        total = 0.0
+        for i in range(len(route) - 1):
+            total += self._get_distance(route[i], route[i + 1])
+        return total
+
+    def _get_remaining_fuel(
+        self,
+        route_data: Dict[str, Any],
+        drone_config: Dict[str, Any]
+    ) -> float:
+        """Calculate remaining fuel for a drone after its current route."""
+        fuel_budget = float(drone_config.get("fuel_capacity", 100))
+        distance_used = route_data.get("distance", 0.0)
+        return max(0.0, fuel_budget - distance_used)
+
+    def _deep_copy_solution(self, solution: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a deep copy of solution to avoid mutation issues."""
+        import copy
+        return copy.deepcopy(solution)
+
+    def optimize(
+        self,
+        solution: Dict[str, Any],
+        env: Dict[str, Any],
+        drone_configs: Dict[str, Dict[str, Any]],
+        priority_constraints: Optional[str] = None,
+        max_iterations: int = 100,
+        run_crossing_removal: bool = True,
+        debug: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Main entry point for unified optimization.
+
+        Args:
+            solution: Current solution with routes for each drone
+            env: Environment dict with targets, airports, sams
+            drone_configs: Drone configurations with fuel budgets
+            priority_constraints: Optional priority constraints string
+            max_iterations: Maximum iterations before stopping
+            run_crossing_removal: If True, run 2-opt after convergence
+            debug: Enable verbose logging
+
+        Returns:
+            Optimized solution with improved routes
+        """
+        print(f"\n🔀 [UnifiedOptimizer] Starting interleaved Insert+Swap optimization", flush=True)
+        print(f"   max_iterations={max_iterations}, run_crossing_removal={run_crossing_removal}", flush=True)
+
+        # Set up environment
+        self.set_environment(env)
+
+        # Parse priority constraints
+        priority_filters = parse_priority_constraint(priority_constraints) if priority_constraints else {}
+
+        # Work on a copy to avoid mutating original
+        current_solution = self._deep_copy_solution(solution)
+
+        # Track operations performed
+        operations_log = []
+        total_inserts = 0
+        total_swaps = 0
+
+        for iteration in range(1, max_iterations + 1):
+            # Evaluate all candidates
+            insert_candidates = self._evaluate_insert_candidates(
+                current_solution, env, drone_configs, priority_filters
+            )
+            swap_candidates = self._evaluate_swap_candidates(
+                current_solution, env, drone_configs, priority_filters
+            )
+
+            all_candidates = insert_candidates + swap_candidates
+
+            if not all_candidates:
+                print(f"   ✅ Converged at iteration {iteration} - no more beneficial operations", flush=True)
+                break
+
+            # Pick best operation (highest score)
+            best = max(all_candidates, key=lambda c: c["score"])
+
+            if debug:
+                print(f"   Iteration {iteration}: {len(insert_candidates)} insert candidates, "
+                      f"{len(swap_candidates)} swap candidates", flush=True)
+                print(f"   Best: {best['type']} {best.get('target', 'N/A')} "
+                      f"score={best['score']:.3f}", flush=True)
+
+            # Execute the operation
+            if best["type"] == "insert":
+                self._execute_insert(current_solution, best, drone_configs)
+                total_inserts += 1
+                op_desc = f"Insert {best['target']} into D{best['drone']} at pos {best['position']} (cost={best['cost']:.2f}, priority={best['priority']})"
+            else:  # swap
+                self._execute_swap(current_solution, best, drone_configs)
+                total_swaps += 1
+                op_desc = f"Swap {best['target']} from D{best['from_drone']} to D{best['to_drone']} (gain={best['gain']:.2f})"
+
+            operations_log.append({
+                "iteration": iteration,
+                "type": best["type"],
+                "description": op_desc
+            })
+
+            if debug or iteration <= 5 or iteration % 10 == 0:
+                print(f"   [{iteration}] {op_desc}", flush=True)
+
+        print(f"\n   📊 Unified optimization complete: {total_inserts} inserts, {total_swaps} swaps "
+              f"in {len(operations_log)} iterations", flush=True)
+
+        # Run crossing removal as final cleanup
+        if run_crossing_removal:
+            print(f"   Running crossing removal as final cleanup...", flush=True)
+            current_solution = crossing_removal_optimize(
+                current_solution, env, drone_configs, self._distance_matrix
+            )
+
+        # Add operation log to solution metadata
+        if "metadata" not in current_solution:
+            current_solution["metadata"] = {}
+        current_solution["metadata"]["unified_optimizer"] = {
+            "total_iterations": len(operations_log),
+            "total_inserts": total_inserts,
+            "total_swaps": total_swaps,
+            "operations": operations_log
+        }
+
+        return current_solution
+
+    def _evaluate_insert_candidates(
+        self,
+        solution: Dict[str, Any],
+        env: Dict[str, Any],
+        drone_configs: Dict[str, Dict[str, Any]],
+        priority_filters: Dict[str, Callable[[int], bool]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Find all viable insert operations for unvisited targets.
+
+        Returns list of candidates with:
+        - type: "insert"
+        - target: target ID
+        - drone: drone ID to insert into
+        - position: index in route to insert
+        - cost: insertion cost (fuel)
+        - priority: target priority
+        - score: priority * 10 / max(cost, 1)
+        """
+        candidates = []
+        targets = env.get("targets", [])
+
+        # Find visited targets
+        visited = set()
+        for did, route_data in solution.get("routes", {}).items():
+            for wp in route_data.get("route", []):
+                if str(wp).startswith("T"):
+                    visited.add(str(wp))
+
+        # Find unvisited targets
+        unvisited = [t for t in targets if str(t["id"]) not in visited]
+
+        for target in unvisited:
+            target_id = str(target["id"])
+            target_priority = int(target.get("priority", 5))
+
+            for drone_id, cfg in drone_configs.items():
+                # Check if drone is enabled and can access this target
+                if not target_allowed_for_drone(target, drone_id, cfg, priority_filters):
+                    continue
+
+                route_data = solution.get("routes", {}).get(drone_id, {})
+                route = route_data.get("route", [])
+                frozen_segments = set(route_data.get("frozen_segments", []))
+                remaining_fuel = self._get_remaining_fuel(route_data, cfg)
+
+                if remaining_fuel <= 0 or len(route) < 2:
+                    continue
+
+                # Find best insertion position
+                best_cost = float('inf')
+                best_position = None
+
+                for i in range(1, len(route)):
+                    # Skip if this segment is frozen
+                    if (i - 1) in frozen_segments:
+                        continue
+
+                    prev_wp = str(route[i - 1])
+                    next_wp = str(route[i])
+
+                    cost = self._calculate_insertion_cost(prev_wp, target_id, next_wp)
+
+                    if cost < best_cost and cost <= remaining_fuel:
+                        best_cost = cost
+                        best_position = i
+
+                if best_position is not None and best_cost < float('inf'):
+                    # Hybrid scoring: prioritize high-priority targets
+                    score = target_priority * 10 / max(best_cost, 1.0)
+
+                    candidates.append({
+                        "type": "insert",
+                        "target": target_id,
+                        "drone": drone_id,
+                        "position": best_position,
+                        "cost": best_cost,
+                        "priority": target_priority,
+                        "score": score
+                    })
+
+        return candidates
+
+    def _evaluate_swap_candidates(
+        self,
+        solution: Dict[str, Any],
+        env: Dict[str, Any],
+        drone_configs: Dict[str, Dict[str, Any]],
+        priority_filters: Dict[str, Callable[[int], bool]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Find all viable swap operations for visited targets.
+
+        A swap moves a target from one route position to another (same or different drone).
+        Gain = removal_delta - insertion_cost
+
+        Returns list of candidates with:
+        - type: "swap"
+        - target: target ID
+        - from_drone: source drone ID
+        - to_drone: destination drone ID
+        - from_idx: index in source route
+        - to_position: insertion index in destination route
+        - removal_delta: fuel saved by removing from source
+        - insertion_cost: fuel spent inserting at destination
+        - gain: net fuel savings (removal_delta - insertion_cost)
+        - score: gain (direct fuel savings)
+        """
+        candidates = []
+
+        for drone_id, route_data in solution.get("routes", {}).items():
+            route = route_data.get("route", [])
+            frozen_segments = set(route_data.get("frozen_segments", []))
+
+            for i, wp_id in enumerate(route):
+                wp_id = str(wp_id)
+
+                # Only process targets (not airports)
+                if not wp_id.startswith("T"):
+                    continue
+
+                # Can't remove first or last waypoint (airports)
+                if i <= 0 or i >= len(route) - 1:
+                    continue
+
+                # Check if target is in a frozen segment
+                if (i - 1) in frozen_segments or i in frozen_segments:
+                    continue
+
+                prev_wp = str(route[i - 1])
+                next_wp = str(route[i + 1])
+
+                # Calculate removal delta (what we save by removing this target)
+                removal_delta = self._calculate_insertion_cost(prev_wp, wp_id, next_wp)
+
+                if removal_delta <= 0:
+                    # No benefit to moving this target
+                    continue
+
+                # Get target info
+                target = self._target_by_id.get(wp_id)
+                if not target:
+                    continue
+
+                # Search for better positions across all drones
+                for other_drone_id, other_route_data in solution.get("routes", {}).items():
+                    other_route = other_route_data.get("route", [])
+                    other_frozen = set(other_route_data.get("frozen_segments", []))
+                    other_cfg = drone_configs.get(other_drone_id, {})
+
+                    # Check capability for cross-drone swaps
+                    if other_drone_id != drone_id:
+                        if not target_allowed_for_drone(target, other_drone_id, other_cfg, priority_filters):
+                            continue
+
+                    for j in range(1, len(other_route)):
+                        # Skip frozen segments
+                        if (j - 1) in other_frozen:
+                            continue
+
+                        # Skip adjacent positions (same drone) - no net change
+                        if other_drone_id == drone_id:
+                            if j == i or j == i + 1:
+                                continue
+
+                        seg_start = str(other_route[j - 1])
+                        seg_end = str(other_route[j])
+
+                        insertion_cost = self._calculate_insertion_cost(seg_start, wp_id, seg_end)
+
+                        # For cross-drone swaps, check fuel budget
+                        if other_drone_id != drone_id:
+                            other_remaining = self._get_remaining_fuel(other_route_data, other_cfg)
+                            if insertion_cost > other_remaining:
+                                continue
+
+                        gain = removal_delta - insertion_cost
+
+                        if gain > 0:
+                            candidates.append({
+                                "type": "swap",
+                                "target": wp_id,
+                                "from_drone": drone_id,
+                                "to_drone": other_drone_id,
+                                "from_idx": i,
+                                "to_position": j,
+                                "removal_delta": removal_delta,
+                                "insertion_cost": insertion_cost,
+                                "gain": gain,
+                                "score": gain  # Direct fuel savings as score
+                            })
+
+        return candidates
+
+    def _execute_insert(
+        self,
+        solution: Dict[str, Any],
+        candidate: Dict[str, Any],
+        drone_configs: Dict[str, Dict[str, Any]]
+    ):
+        """Apply an insert operation to the solution."""
+        drone_id = candidate["drone"]
+        target_id = candidate["target"]
+        position = candidate["position"]
+        cost = candidate["cost"]
+
+        route_data = solution["routes"][drone_id]
+        route = route_data["route"]
+
+        # Insert target at position
+        route.insert(position, target_id)
+
+        # Update distance
+        new_distance = self._calculate_route_distance(route)
+        route_data["distance"] = new_distance
+
+        # Update points
+        target = self._target_by_id.get(target_id, {})
+        current_points = route_data.get("points", 0)
+        route_data["points"] = current_points + int(target.get("priority", 5))
+
+    def _execute_swap(
+        self,
+        solution: Dict[str, Any],
+        candidate: Dict[str, Any],
+        drone_configs: Dict[str, Dict[str, Any]]
+    ):
+        """Apply a swap operation to the solution."""
+        target_id = candidate["target"]
+        from_drone = candidate["from_drone"]
+        to_drone = candidate["to_drone"]
+        from_idx = candidate["from_idx"]
+        to_position = candidate["to_position"]
+
+        from_route_data = solution["routes"][from_drone]
+        from_route = from_route_data["route"]
+
+        # Remove from source
+        from_route.pop(from_idx)
+
+        # Adjust to_position if same drone and after removal point
+        if to_drone == from_drone and to_position > from_idx:
+            to_position -= 1
+
+        to_route_data = solution["routes"][to_drone]
+        to_route = to_route_data["route"]
+
+        # Insert at destination
+        to_route.insert(to_position, target_id)
+
+        # Update distances
+        from_route_data["distance"] = self._calculate_route_distance(from_route)
+        to_route_data["distance"] = self._calculate_route_distance(to_route)
+
+        # Update points if cross-drone swap
+        if from_drone != to_drone:
+            target = self._target_by_id.get(target_id, {})
+            priority = int(target.get("priority", 5))
+            from_route_data["points"] = from_route_data.get("points", 0) - priority
+            to_route_data["points"] = to_route_data.get("points", 0) + priority
+
+
+# Singleton instance
+_unified_optimizer = UnifiedOptimizer()
+
+
+def unified_optimize(
+    solution: Dict[str, Any],
+    env: Dict[str, Any],
+    drone_configs: Dict[str, Dict[str, Any]],
+    distance_matrix: Optional[Dict[str, Any]] = None,
+    priority_constraints: Optional[str] = None,
+    max_iterations: int = 100,
+    run_crossing_removal: bool = True,
+    debug: bool = False
+) -> Dict[str, Any]:
+    """
+    Unified optimization with interleaved Insert+Swap operations.
+
+    This optimizer evaluates ALL possible insert and swap operations at each
+    iteration and executes the single best one, allowing the optimization
+    landscape to adapt. Crossing removal runs as final cleanup.
+
+    Args:
+        solution: Current solution with drone routes
+        env: Environment data with targets, airports
+        drone_configs: Drone configurations with fuel budgets
+        distance_matrix: Pre-calculated SAM-aware distance matrix
+        priority_constraints: Optional priority constraints string
+        max_iterations: Maximum iterations before stopping (default 100)
+        run_crossing_removal: If True, run 2-opt after convergence (default True)
+        debug: Enable verbose logging
+
+    Returns:
+        Optimized solution with improved routes
+
+    Example:
+        result = unified_optimize(
+            solution, env, drone_configs,
+            distance_matrix=matrix_data,
+            max_iterations=50
+        )
+    """
+    if distance_matrix:
+        _unified_optimizer.set_distance_matrix(distance_matrix)
+
+    return _unified_optimizer.optimize(
+        solution, env, drone_configs,
+        priority_constraints=priority_constraints,
+        max_iterations=max_iterations,
+        run_crossing_removal=run_crossing_removal,
+        debug=debug
+    )

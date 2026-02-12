@@ -15,6 +15,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+# Import algorithm command parsing
+from ..memory.constraint_parser import (
+    parse_algorithm_commands,
+    should_include_algorithm_explanation,
+)
+
 # Intent classification tokens
 INTENTS = ("plan", "replan", "explain", "what_if", "debug", "unknown")
 
@@ -624,8 +630,12 @@ class CoordinatorV4:
         # Extract moves from user message (e.g., "move T5 from D2 to D1")
         moves = parse_allocation_modifications(user_message) if user_message else []
 
-        # Extract required targets from user message (e.g., "include T2 and T3")
+# Extract required targets from user message (e.g., "include T2 and T3")
         required_targets = parse_required_targets(user_message) if user_message else []
+
+        # Parse algorithm commands from user message (e.g., "use greedy allocation", "skip crossing removal")
+        algorithm_commands = parse_algorithm_commands(user_message) if user_message else {}
+        asks_about_algorithms = should_include_algorithm_explanation(user_message) if user_message else False
 
         # Build constraints dict (canonical structure)
         constraints: Dict[str, Any] = {
@@ -637,8 +647,9 @@ class CoordinatorV4:
         self._te(trace_events, "constraints", "constraints_extracted",
                  moves=moves,
                  num_moves=len(moves),
-                 required_targets=required_targets,
-                 num_required=len(required_targets))
+required_targets=required_targets,
+                 num_required=len(required_targets),
+                 algorithm_commands=algorithm_commands)
 
         # ===================================================================
         # EVENT 4: Policy Selection
@@ -648,16 +659,24 @@ class CoordinatorV4:
             intent, drone_configs, environment, preferences, ui_state, user_message
         )
 
+        # Override allocation strategy if user explicitly requested one
+        effective_allocation_strategy = raw_policy.get("allocation_strategy")
+        if algorithm_commands.get("allocation_strategy"):
+            effective_allocation_strategy = algorithm_commands["allocation_strategy"]
+
         # Build canonical policy structure
         policy: Dict[str, Any] = {
             "allow_solver": not raw_policy.get("skip_solver", False),
             "force_allocation": raw_policy.get("force_algorithmic_allocation", True),
-            "allocation_strategy": raw_policy.get("allocation_strategy"),
+            "allocation_strategy": effective_allocation_strategy,
             "post_opt": raw_policy.get("post_opt", {
                 "crossing_removal": True,
                 "trajectory_swap": True,
                 "insert_unvisited": True,
             }),
+            # Algorithm overrides from user commands
+            "algorithm_overrides": algorithm_commands if algorithm_commands else None,
+            "asks_about_algorithms": asks_about_algorithms,
             # Keep legacy keys for backward compatibility
             "solver_mode": raw_policy.get("solver_mode"),
             "skip_allocation": raw_policy.get("skip_allocation", False),
