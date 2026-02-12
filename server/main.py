@@ -106,6 +106,7 @@ class AgentChatRequest(BaseModel):
     drone_configs: Optional[Dict[str, Any]] = None
     mission_id: Optional[str] = None  # Existing mission to continue chatting about
     existing_solution: Optional[Dict[str, Any]] = None  # Previous routes/allocation from frontend
+    llm_config: Optional[Dict[str, Any]] = None  # LLM provider configuration (provider, model, api_key)
 
 
 from typing import Any, Dict, List, Optional
@@ -735,6 +736,68 @@ def plan_for_drone(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# =============================================================================
+# LLM Provider Management
+# =============================================================================
+
+from .agents.llm_factory import (
+    get_available_providers,
+    test_connection as test_llm_connection,
+    validate_provider_model,
+    get_configured_providers,
+)
+
+
+class LLMTestRequest(BaseModel):
+    provider: str
+    model: str
+    api_key: str
+
+
+class LLMTestResponse(BaseModel):
+    success: bool
+    message: str
+
+
+@app.get("/api/llm/providers")
+def get_llm_providers():
+    """
+    Get list of available LLM providers and their models.
+    Also indicates which providers have API keys configured in environment.
+    """
+    providers = get_available_providers()
+    configured = get_configured_providers()
+
+    # Add 'configured' flag to each provider
+    for p in providers:
+        p["configured"] = p["id"] in configured
+
+    return {
+        "providers": providers,
+        "configured_providers": configured
+    }
+
+
+@app.post("/api/llm/test", response_model=LLMTestResponse)
+def test_llm_provider(request: LLMTestRequest):
+    """
+    Test connection to an LLM provider with given credentials.
+    """
+    # Validate inputs
+    is_valid, error = validate_provider_model(request.provider, request.model)
+    if not is_valid:
+        return LLMTestResponse(success=False, message=error)
+
+    # Test the connection
+    success, message = test_llm_connection(
+        provider=request.provider,
+        model=request.model,
+        api_key=request.api_key
+    )
+
+    return LLMTestResponse(success=success, message=message)
 
 
 @app.post("/api/environment")
@@ -1875,6 +1938,7 @@ async def agent_chat_v4(req: AgentChatRequest):
             drone_configs=drone_configs,
             sam_matrix=sam_matrix,  # Pass pre-computed matrix with metadata
             existing_solution=existing_solution,
+            llm_config=req.llm_config,  # Pass LLM provider configuration
         )
 
         if not isinstance(result, dict):

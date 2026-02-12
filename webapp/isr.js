@@ -10141,6 +10141,9 @@ async function sendAgentMessage() {
       appendDebugLine(`📦 Agent context: ${Object.keys(existingSolution.routes).length} drone routes`);
     }
 
+    // Get LLM settings from localStorage
+    const llmSettings = LLMSettings.getCurrentSettings();
+
     const response = await fetch("/api/agents/chat-v4", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -10150,6 +10153,7 @@ async function sendAgentMessage() {
         drone_configs: state.droneConfigs,
         mission_id: state.missionId || null,
         existing_solution: Object.keys(existingSolution).length > 0 ? existingSolution : null,
+        llm_config: llmSettings,  // Include LLM provider configuration
       }),
     });
 
@@ -10554,4 +10558,335 @@ function buildTrajectoryFromRoute(route) {
   }
 
   return trajectory;
+}
+
+// =============================================================================
+// AI Settings Modal
+// =============================================================================
+
+const LLMSettings = {
+  providers: [],
+  currentProvider: null,
+  currentModel: null,
+
+  // LocalStorage keys
+  STORAGE_KEYS: {
+    PROVIDER: "isr_llm_provider",
+    MODEL: "isr_llm_model",
+    API_KEY_PREFIX: "isr_llm_key_",
+  },
+
+  // Initialize settings
+  async init() {
+    await this.loadProviders();
+    this.setupEventListeners();
+    this.loadSavedSettings();
+  },
+
+  // Fetch available providers from API
+  async loadProviders() {
+    try {
+      const response = await fetch("/api/llm/providers");
+      const data = await response.json();
+      this.providers = data.providers || [];
+      this.populateProviderDropdown();
+      this.updateProviderStatus();
+    } catch (error) {
+      console.error("Failed to load LLM providers:", error);
+      this.providers = [];
+    }
+  },
+
+  // Populate provider dropdown
+  populateProviderDropdown() {
+    const select = document.getElementById("llm-provider");
+    if (!select) return;
+
+    select.innerHTML = this.providers
+      .map(
+        (p) =>
+          `<option value="${p.id}">${p.name}${
+            p.configured ? " (configured)" : ""
+          }</option>`
+      )
+      .join("");
+
+    // Trigger model update
+    this.onProviderChange();
+  },
+
+  // Update model dropdown when provider changes
+  onProviderChange() {
+    const providerSelect = document.getElementById("llm-provider");
+    const modelSelect = document.getElementById("llm-model");
+    const apiKeyInput = document.getElementById("llm-api-key");
+
+    if (!providerSelect || !modelSelect) return;
+
+    const providerId = providerSelect.value;
+    const provider = this.providers.find((p) => p.id === providerId);
+
+    if (!provider) {
+      modelSelect.innerHTML = '<option value="">Select a provider first</option>';
+      return;
+    }
+
+    // Populate models
+    modelSelect.innerHTML = provider.models
+      .map((m) => `<option value="${m.id}" title="${m.description}">${m.name}</option>`)
+      .join("");
+
+    // Load saved API key for this provider
+    const savedKey = this.getApiKey(providerId);
+    if (apiKeyInput) {
+      apiKeyInput.value = savedKey || "";
+    }
+
+    // Load saved model for this provider
+    const savedModel = localStorage.getItem(
+      this.STORAGE_KEYS.MODEL + "_" + providerId
+    );
+    if (savedModel && provider.models.some((m) => m.id === savedModel)) {
+      modelSelect.value = savedModel;
+    }
+
+    this.clearConnectionStatus();
+  },
+
+  // Get API key for a provider from localStorage
+  getApiKey(providerId) {
+    return localStorage.getItem(this.STORAGE_KEYS.API_KEY_PREFIX + providerId) || "";
+  },
+
+  // Save API key for a provider to localStorage
+  saveApiKey(providerId, apiKey) {
+    if (apiKey) {
+      localStorage.setItem(this.STORAGE_KEYS.API_KEY_PREFIX + providerId, apiKey);
+    } else {
+      localStorage.removeItem(this.STORAGE_KEYS.API_KEY_PREFIX + providerId);
+    }
+  },
+
+  // Load saved settings
+  loadSavedSettings() {
+    const savedProvider = localStorage.getItem(this.STORAGE_KEYS.PROVIDER);
+    const providerSelect = document.getElementById("llm-provider");
+
+    if (savedProvider && providerSelect) {
+      const providerExists = this.providers.some((p) => p.id === savedProvider);
+      if (providerExists) {
+        providerSelect.value = savedProvider;
+        this.onProviderChange();
+      }
+    }
+  },
+
+  // Save current settings
+  saveSettings() {
+    const providerSelect = document.getElementById("llm-provider");
+    const modelSelect = document.getElementById("llm-model");
+    const apiKeyInput = document.getElementById("llm-api-key");
+
+    if (!providerSelect || !modelSelect) return;
+
+    const providerId = providerSelect.value;
+    const modelId = modelSelect.value;
+    const apiKey = apiKeyInput?.value?.trim() || "";
+
+    // Save to localStorage
+    localStorage.setItem(this.STORAGE_KEYS.PROVIDER, providerId);
+    localStorage.setItem(this.STORAGE_KEYS.MODEL + "_" + providerId, modelId);
+    this.saveApiKey(providerId, apiKey);
+
+    this.currentProvider = providerId;
+    this.currentModel = modelId;
+
+    this.updateProviderStatus();
+    this.closeModal();
+
+    appendDebugLine(`AI Settings saved: ${providerId} / ${modelId}`);
+  },
+
+  // Test connection
+  async testConnection() {
+    const providerSelect = document.getElementById("llm-provider");
+    const modelSelect = document.getElementById("llm-model");
+    const apiKeyInput = document.getElementById("llm-api-key");
+    const statusEl = document.getElementById("connection-status");
+
+    if (!providerSelect || !modelSelect || !apiKeyInput || !statusEl) return;
+
+    const providerId = providerSelect.value;
+    const modelId = modelSelect.value;
+    const apiKey = apiKeyInput.value.trim();
+
+    if (!apiKey) {
+      statusEl.textContent = "Please enter an API key";
+      statusEl.className = "connection-status error";
+      return;
+    }
+
+    statusEl.textContent = "Testing...";
+    statusEl.className = "connection-status testing";
+
+    try {
+      const response = await fetch("/api/llm/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: providerId,
+          model: modelId,
+          api_key: apiKey,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        statusEl.textContent = data.message;
+        statusEl.className = "connection-status success";
+      } else {
+        statusEl.textContent = data.message;
+        statusEl.className = "connection-status error";
+      }
+    } catch (error) {
+      statusEl.textContent = "Connection failed: " + error.message;
+      statusEl.className = "connection-status error";
+    }
+  },
+
+  // Clear connection status
+  clearConnectionStatus() {
+    const statusEl = document.getElementById("connection-status");
+    if (statusEl) {
+      statusEl.textContent = "";
+      statusEl.className = "connection-status";
+    }
+  },
+
+  // Update provider status display
+  updateProviderStatus() {
+    const container = document.getElementById("provider-status");
+    if (!container) return;
+
+    const providerItems = this.providers
+      .map((p) => {
+        const hasKey = !!this.getApiKey(p.id);
+        const statusClass = hasKey ? "configured" : "not-configured";
+        const statusIcon = hasKey ? "&#10003; Key saved" : "&#x2717; No key";
+        return `
+          <div class="provider-item">
+            <span class="provider-name">${p.name}</span>
+            <span class="provider-status-icon ${statusClass}">${statusIcon}</span>
+          </div>
+        `;
+      })
+      .join("");
+
+    container.innerHTML = `
+      <h4>Provider Status</h4>
+      <div class="provider-list">
+        ${providerItems}
+      </div>
+    `;
+  },
+
+  // Open modal
+  openModal() {
+    const modal = document.getElementById("settings-modal");
+    if (modal) {
+      modal.style.display = "flex";
+      this.updateProviderStatus();
+    }
+  },
+
+  // Close modal
+  closeModal() {
+    const modal = document.getElementById("settings-modal");
+    if (modal) {
+      modal.style.display = "none";
+    }
+  },
+
+  // Toggle API key visibility
+  toggleKeyVisibility() {
+    const input = document.getElementById("llm-api-key");
+    const btn = document.getElementById("btn-toggle-key");
+    if (!input || !btn) return;
+
+    if (input.type === "password") {
+      input.type = "text";
+      btn.textContent = "Hide";
+    } else {
+      input.type = "password";
+      btn.textContent = "Show";
+    }
+  },
+
+  // Setup event listeners
+  setupEventListeners() {
+    // Settings button
+    const btnSettings = document.getElementById("btn-settings");
+    if (btnSettings) {
+      btnSettings.addEventListener("click", () => this.openModal());
+    }
+
+    // Close button
+    const btnClose = document.getElementById("btn-close-settings");
+    if (btnClose) {
+      btnClose.addEventListener("click", () => this.closeModal());
+    }
+
+    // Click outside to close
+    const modal = document.getElementById("settings-modal");
+    if (modal) {
+      modal.addEventListener("click", (e) => {
+        if (e.target === modal) this.closeModal();
+      });
+    }
+
+    // Provider change
+    const providerSelect = document.getElementById("llm-provider");
+    if (providerSelect) {
+      providerSelect.addEventListener("change", () => this.onProviderChange());
+    }
+
+    // Test connection
+    const btnTest = document.getElementById("btn-test-connection");
+    if (btnTest) {
+      btnTest.addEventListener("click", () => this.testConnection());
+    }
+
+    // Save settings
+    const btnSave = document.getElementById("btn-save-settings");
+    if (btnSave) {
+      btnSave.addEventListener("click", () => this.saveSettings());
+    }
+
+    // Toggle key visibility
+    const btnToggle = document.getElementById("btn-toggle-key");
+    if (btnToggle) {
+      btnToggle.addEventListener("click", () => this.toggleKeyVisibility());
+    }
+  },
+
+  // Get current LLM settings (for API calls)
+  getCurrentSettings() {
+    const provider = localStorage.getItem(this.STORAGE_KEYS.PROVIDER);
+    if (!provider) return null;
+
+    const model = localStorage.getItem(this.STORAGE_KEYS.MODEL + "_" + provider);
+    const apiKey = this.getApiKey(provider);
+
+    if (!apiKey) return null;
+
+    return { provider, model, api_key: apiKey };
+  },
+};
+
+// Initialize LLM Settings when DOM is ready
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", () => LLMSettings.init());
+} else {
+  LLMSettings.init();
 }

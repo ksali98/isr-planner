@@ -34,8 +34,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from dotenv import load_dotenv
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage, ToolMessage
+
+# LLM Factory for provider-agnostic model selection
+from .llm_factory import get_llm
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
@@ -82,6 +84,14 @@ from ..solver.post_optimizer import (
     post_optimize_solution,
     trajectory_swap_optimize,
     crossing_removal_optimize,
+    unified_optimize,
+)
+
+# Import algorithm registry for algorithm awareness
+from ..memory.algorithm_registry import (
+    AlgorithmExecution,
+    generate_algorithm_summary,
+    get_algorithm_info,
 )
 from ..solver.trajectory_planner import ISRTrajectoryPlanner
 
@@ -185,6 +195,14 @@ class MissionState(TypedDict):
     solver_type: Optional[str]
     solver_runtime_ms: Optional[int]
 
+    # Algorithm tracking (for Algorithm Awareness)
+    algorithms_used: Optional[List[Dict[str, Any]]]  # List of AlgorithmExecution records
+    algorithm_overrides: Optional[Dict[str, Any]]  # User-specified algorithm choices
+    asks_about_algorithms: Optional[bool]  # User wants algorithm explanation
+
+    # LLM Configuration (provider-agnostic)
+    llm_config: Optional[Dict[str, Any]]  # provider, model, api_key
+
     # Policy rules (Learning v1)
     policy_rules: Optional[List[Dict[str, Any]]]
 
@@ -208,6 +226,29 @@ def get_state() -> MissionState:
 def set_state(state: MissionState):
     global _current_state
     _current_state = state
+
+
+def get_llm_for_state(state: MissionState):
+    """
+    Get LLM instance based on state's llm_config.
+    Falls back to Anthropic Claude if no config provided.
+    """
+    llm_config = state.get("llm_config")
+
+    if llm_config and llm_config.get("provider") and llm_config.get("api_key"):
+        return get_llm(
+            provider=llm_config["provider"],
+            model=llm_config.get("model"),
+            api_key=llm_config["api_key"],
+            temperature=0,
+        )
+    else:
+        # Fall back to Anthropic from environment
+        return get_llm(
+            provider="anthropic",
+            model="claude-sonnet-4-20250514",
+            temperature=0,
+        )
 
 
 # ============================================================================
@@ -702,7 +743,7 @@ def strategist_node(state: MissionState) -> Dict[str, Any]:
     print(f"📝 [STRATEGIST] User request: '{user_request}'", file=sys.stderr)
     sys.stderr.flush()
 
-    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0, model_kwargs={"thinking": {"type": "disabled"}})
+    llm = get_llm_for_state(state)
 
     mission_context = build_mission_context(state)
     current_solution = build_current_solution_context(state)
@@ -887,7 +928,7 @@ def mission_planner_node(state: MissionState) -> Dict[str, Any]:
             "requires_segmentation": False,
         }
 
-    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0, model_kwargs={"thinking": {"type": "disabled"}})
+    llm = get_llm_for_state(state)
 
     mission_context = build_mission_context(state)
 
@@ -1355,7 +1396,7 @@ def optimizer_node(state: MissionState) -> Dict[str, Any]:
             "optimizer_analysis": "No routes available for optimization.",
         }
 
-    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0, model_kwargs={"thinking": {"type": "disabled"}})
+    llm = get_llm_for_state(state)
     
     # Bind optimizer tools
     llm_with_tools = llm.bind_tools(OPTIMIZER_TOOLS, tool_choice="auto")
@@ -1381,6 +1422,9 @@ Analyze this solution and decide which optimization tools to apply.
 
     messages = [HumanMessage(content=optimizer_prompt)]
 
+    # Track which optimizer algorithms were used
+    optimizer_algorithms_used = []
+
     try:
         print("🌐 [OPTIMIZER] Calling Anthropic API with tools...", file=sys.stderr)
         response = llm_with_tools.invoke(messages)
@@ -1389,13 +1433,13 @@ Analyze this solution and decide which optimization tools to apply.
         # Check if tools were called
         if hasattr(response, 'tool_calls') and response.tool_calls:
             print(f"🔧 [OPTIMIZER] {len(response.tool_calls)} tool(s) called", file=sys.stderr)
-            
+
             # Execute each tool call
             tool_results = []
             for tool_call in response.tool_calls:
                 tool_name = tool_call.get('name', 'unknown')
                 print(f"   → Executing {tool_name}...", file=sys.stderr)
-                
+
                 # Find and execute the tool
                 for tool in OPTIMIZER_TOOLS:
                     if tool.name == tool_name:
@@ -1403,12 +1447,30 @@ Analyze this solution and decide which optimization tools to apply.
                             result = tool.invoke({})
                             tool_results.append(f"\n{tool_name} result:\n{result}")
                             print(f"   ✓ {tool_name} completed", file=sys.stderr)
+
+                            # Map tool name to algorithm ID
+                            tool_to_algorithm = {
+                                "insert_missed_targets": "insert_missed",
+                                "swap_closer_targets": "swap_closer",
+                                "remove_crossings": "crossing_removal",
+                                "unified_optimize": "unified",
+                            }
+                            alg_id = tool_to_algorithm.get(tool_name, tool_name)
+                            alg_info = get_algorithm_info(alg_id)
+
+                            optimizer_algorithms_used.append(AlgorithmExecution(
+                                algorithm_id=alg_id,
+                                algorithm_name=alg_info["name"] if alg_info else tool_name,
+                                agent="Optimizer",
+                                result_summary=f"Executed via {tool_name}"
+                            ).to_dict())
+
                         except Exception as e:
                             error_msg = f"Error in {tool_name}: {e}"
                             tool_results.append(error_msg)
                             print(f"   ✗ {tool_name} failed: {e}", file=sys.stderr)
                         break
-            
+
             analysis = response.content + "\n\n" + "\n".join(tool_results)
         else:
             print("ℹ️  [OPTIMIZER] No tools called - keeping solution as is", file=sys.stderr)
@@ -1418,9 +1480,14 @@ Analyze this solution and decide which optimization tools to apply.
         print(f"❌ [OPTIMIZER] API call failed: {e}", file=sys.stderr)
         analysis = f"Optimizer error: {e}\n\nSolution preserved without optimization."
 
+    # Get existing algorithms_used from state and append optimizer algorithms
+    existing_algorithms = state.get("algorithms_used") or []
+    updated_algorithms = existing_algorithms + optimizer_algorithms_used
+
     return {
         "messages": [AIMessage(content=f"[OPTIMIZER]\n{analysis}")],
         "optimizer_analysis": analysis,
+        "algorithms_used": updated_algorithms,
     }
 
 
@@ -1549,12 +1616,22 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
 
             print(f"📋 [ALLOCATOR] Modified allocation: {new_allocation}", file=sys.stderr)
 
+            # Track algorithm used
+            alloc_execution = AlgorithmExecution(
+                algorithm_id="user_modified",
+                algorithm_name="User-Modified Allocation",
+                agent="Allocator",
+                operations_performed=len(mods_applied),
+                result_summary=f"Applied {len(mods_applied)} modifications to existing allocation"
+            )
+
             return {
                 "messages": [AIMessage(content=f"[ALLOCATOR]\n{reasoning}")],
                 "allocation_reasoning": reasoning,
                 "allocation": new_allocation,
                 "allocation_strategy": "user_modified",
                 "excluded_by_allocator": [],
+                "algorithms_used": [alloc_execution.to_dict()],
             }
 
     # ALWAYS use algorithmic allocation - LLM's job is reasoning (in Strategist),
@@ -1577,7 +1654,7 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
     strategy_used = policy_strategy
     excluded_targets: List[Dict[str, Any]] = []
 
-    # =========================================================================
+# =========================================================================
     # ENFORCE REQUIRED TARGETS: If user requested specific targets to be included,
     # make sure they appear in the allocation. Add them to the closest drone.
     # =========================================================================
@@ -1632,6 +1709,10 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
                 else:
                     print(f"   ❌ Could not find drone for required target {target_id}", file=sys.stderr)
 
+    # Count allocated targets (needed for algorithm tracking)
+    total_allocated = sum(len(targets) for targets in allocation.values())
+    num_drones = len([d for d in allocation if allocation[d]])
+
     reasoning_parts = [
         f"[Algorithmic allocation]",
         f"Strategy: {strategy_used}",
@@ -1645,12 +1726,25 @@ def allocator_node(state: MissionState) -> Dict[str, Any]:
 
     print(f"📋 [ALLOCATOR] Algorithmic allocation complete: {allocation}", file=sys.stderr)
 
+    # Track algorithm used
+    strategy_info = get_algorithm_info(strategy_used)
+    strategy_name = strategy_info["name"] if strategy_info else strategy_used.title()
+
+    alloc_execution = AlgorithmExecution(
+        algorithm_id=strategy_used,
+        algorithm_name=strategy_name,
+        agent="Allocator",
+        operations_performed=total_allocated,
+        result_summary=f"Assigned {total_allocated} targets across {num_drones} drones"
+    )
+
     return {
         "messages": [AIMessage(content=f"[ALLOCATOR]\n{reasoning}")],
         "allocation_reasoning": reasoning,
         "allocation": allocation,
         "allocation_strategy": strategy_used,
         "excluded_by_allocator": excluded_targets,
+        "algorithms_used": [alloc_execution.to_dict()],
     }
 
 
@@ -2205,12 +2299,33 @@ def route_optimizer_node(state: MissionState) -> Dict[str, Any]:
 
     print(f"📋 [ROUTE_OPTIMIZER] Routes computed for {len(routes)} drones in {solver_runtime_ms}ms", file=sys.stderr)
 
+    # Track solver algorithm used
+    total_targets_visited = sum(len(r.get("visited_targets", [])) for r in routes.values())
+    solver_algorithm_id = "held_karp" if solver else "greedy_tsp"
+    solver_info = get_algorithm_info(solver_algorithm_id)
+    solver_name = solver_info["name"] if solver_info else "Orienteering Solver"
+
+    solver_execution = AlgorithmExecution(
+        algorithm_id=solver_algorithm_id,
+        algorithm_name=solver_name,
+        agent="Route Optimizer",
+        iterations=len(routes),  # One solve per drone
+        operations_performed=total_targets_visited,
+        result_summary=f"Computed routes for {len(routes)} drones, {total_targets_visited} targets visited",
+        duration_ms=float(solver_runtime_ms)
+    )
+
+    # Get existing algorithms_used from state and append
+    existing_algorithms = state.get("algorithms_used") or []
+    updated_algorithms = existing_algorithms + [solver_execution.to_dict()]
+
     return {
         "messages": [AIMessage(content=f"[ROUTE_OPTIMIZER]\n{route_analysis}")],
         "route_analysis": route_analysis,
         "routes": routes,
         "solver_type": solver_type,
         "solver_runtime_ms": solver_runtime_ms,
+        "algorithms_used": updated_algorithms,
     }
 
 
@@ -2248,7 +2363,7 @@ def critic_node(state: MissionState) -> Dict[str, Any]:
 
     set_state(state)
 
-    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0, model_kwargs={"thinking": {"type": "disabled"}})
+    llm = get_llm_for_state(state)
 
     mission_context = build_mission_context(state)
     allocation_reasoning = state.get("allocation_reasoning", "")
@@ -2355,11 +2470,35 @@ def responder_node(state: MissionState) -> Dict[str, Any]:
 
 def handle_question_response(state: MissionState) -> Dict[str, Any]:
     """Handle question-type requests."""
-    llm = ChatAnthropic(model="claude-sonnet-4-20250514", temperature=0, model_kwargs={"thinking": {"type": "disabled"}})
+    llm = get_llm_for_state(state)
 
     user_request = state.get("user_request", "")
     mission_context = build_mission_context(state)
     current_solution = build_current_solution_context(state)
+
+    # Check if user is asking about algorithms
+    algorithm_context = ""
+    asks_about_algorithms = state.get("asks_about_algorithms", False)
+    algorithms_used = state.get("algorithms_used", [])
+
+    if asks_about_algorithms and algorithms_used:
+        # Convert dicts back to AlgorithmExecution objects if needed
+        executions = []
+        for alg in algorithms_used:
+            if isinstance(alg, dict):
+                executions.append(AlgorithmExecution.from_dict(alg))
+            else:
+                executions.append(alg)
+
+        algorithm_summary = generate_algorithm_summary(executions)
+        algorithm_context = f"""
+
+## ALGORITHMS USED
+
+{algorithm_summary}
+
+When answering the user's question about algorithms, use this information to provide a detailed explanation.
+"""
 
     prompt = f"""
 {HARD_CONSTRAINTS}
@@ -2369,7 +2508,7 @@ def handle_question_response(state: MissionState) -> Dict[str, Any]:
 {mission_context}
 
 {current_solution}
-
+{algorithm_context}
 USER QUESTION: "{user_request}"
 
 Provide a clear, direct answer to this question.
@@ -2439,6 +2578,26 @@ def handle_solution_response(state: MissionState) -> Dict[str, Any]:
         lines.append("SUGGESTIONS:")
         for s in suggestions[:3]:  # Top 3 suggestions
             lines.append(f"  • {s}")
+
+    # Add algorithm summary if user asked about algorithms
+    asks_about_algorithms = state.get("asks_about_algorithms", False)
+    algorithms_used = state.get("algorithms_used", [])
+
+    if asks_about_algorithms and algorithms_used:
+        lines.append("")
+        lines.append("ALGORITHMS USED:")
+        for i, alg in enumerate(algorithms_used, 1):
+            if isinstance(alg, dict):
+                name = alg.get("algorithm_name", alg.get("algorithm_id", "Unknown"))
+                summary = alg.get("result_summary", "")
+            else:
+                name = alg.algorithm_name
+                summary = alg.result_summary
+
+            line = f"  {i}. {name}"
+            if summary:
+                line += f" - {summary}"
+            lines.append(line)
 
     response_text = "\n".join(lines)
 
@@ -2515,6 +2674,7 @@ def run_multi_agent_v4(
     drone_configs: Dict[str, Any],
     sam_matrix: Optional[Dict[str, Any]] = None,
     existing_solution: Optional[Dict[str, Any]] = None,
+    llm_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Run the v4 reasoning-based multi-agent system.
@@ -2526,6 +2686,8 @@ def run_multi_agent_v4(
         sam_matrix: Pre-computed SAM-aware distance matrix with metadata
                    (env_hash, routing_model_hash, distance_matrix_id)
         existing_solution: Previous routes/allocation for continuation
+        llm_config: LLM configuration dict with provider, model, api_key
+                   If not provided, falls back to Anthropic from environment
 
     Returns:
         Result dictionary with response, routes, trajectories, etc.
@@ -2817,6 +2979,12 @@ def run_multi_agent_v4(
         "routes": None,
         "solver_type": None,
         "solver_runtime_ms": None,
+        # Algorithm tracking (Algorithm Awareness)
+        "algorithms_used": [],  # Will be populated by agents
+        "algorithm_overrides": coordinator_policy.get("algorithm_overrides"),
+        "asks_about_algorithms": coordinator_policy.get("asks_about_algorithms", False),
+        # LLM configuration (provider-agnostic)
+        "llm_config": llm_config,
         "policy_rules": policy_rules,  # Learning v1: loaded rules for enforcement
         "final_response": None,
         "error": None,
