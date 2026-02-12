@@ -714,7 +714,7 @@ class PostOptimizer:
         return 99999.0
 
     def _calculate_route_distance(self, route: List[str]) -> float:
-        """Calculate total distance of a route."""
+        """Calculate total distance of a route using SAM-aware distance matrix."""
         if len(route) < 2:
             return 0.0
 

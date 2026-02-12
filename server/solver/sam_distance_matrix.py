@@ -500,7 +500,18 @@ def calculate_sam_aware_matrix(
     targets = env.get("targets", [])
     sams = env.get("sams", [])
 
-    # Add synthetic start nodes (for checkpoint replanning)
+    # Add checkpoints (C1, C2, etc.) for segmented mission replanning
+    # Checkpoints act like airports for distance calculations
+    for checkpoint in env.get("checkpoints", []):
+        airports.append({
+            "id": str(checkpoint["id"]),
+            "x": float(checkpoint["x"]),
+            "y": float(checkpoint["y"]),
+            "is_checkpoint": True,
+        })
+        print(f"📍 [SAM Matrix] Added checkpoint: {checkpoint['id']} at ({checkpoint['x']:.1f}, {checkpoint['y']:.1f})", flush=True)
+
+    # Add synthetic start nodes (for checkpoint replanning - legacy support)
     # These act like airports for distance calculations
     for node_id, node_data in env.get("synthetic_starts", {}).items():
         airports.append({

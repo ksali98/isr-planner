@@ -66,6 +66,9 @@ from .solver.sam_distance_matrix import calculate_sam_aware_matrix
 import time
 
 _current_env = None
+_current_run_id = None
+_current_env_version_id = None
+_current_plan_id = None
 
 # Import polygon wrapping for visualization (same as delivery planner)
 # Add paths for both local dev and Docker deployment
@@ -103,6 +106,7 @@ class AgentChatRequest(BaseModel):
     drone_configs: Optional[Dict[str, Any]] = None
     mission_id: Optional[str] = None  # Existing mission to continue chatting about
     existing_solution: Optional[Dict[str, Any]] = None  # Previous routes/allocation from frontend
+    llm_config: Optional[Dict[str, Any]] = None  # LLM provider configuration (provider, model, api_key)
 
 
 from typing import Any, Dict, List, Optional
@@ -727,6 +731,68 @@ def plan_for_drone(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# =============================================================================
+# LLM Provider Management
+# =============================================================================
+
+from .agents.llm_factory import (
+    get_available_providers,
+    test_connection as test_llm_connection,
+    validate_provider_model,
+    get_configured_providers,
+)
+
+
+class LLMTestRequest(BaseModel):
+    provider: str
+    model: str
+    api_key: str
+
+
+class LLMTestResponse(BaseModel):
+    success: bool
+    message: str
+
+
+@app.get("/api/llm/providers")
+def get_llm_providers():
+    """
+    Get list of available LLM providers and their models.
+    Also indicates which providers have API keys configured in environment.
+    """
+    providers = get_available_providers()
+    configured = get_configured_providers()
+
+    # Add 'configured' flag to each provider
+    for p in providers:
+        p["configured"] = p["id"] in configured
+
+    return {
+        "providers": providers,
+        "configured_providers": configured
+    }
+
+
+@app.post("/api/llm/test", response_model=LLMTestResponse)
+def test_llm_provider(request: LLMTestRequest):
+    """
+    Test connection to an LLM provider with given credentials.
+    """
+    # Validate inputs
+    is_valid, error = validate_provider_model(request.provider, request.model)
+    if not is_valid:
+        return LLMTestResponse(success=False, message=error)
+
+    # Test the connection
+    success, message = test_llm_connection(
+        provider=request.provider,
+        model=request.model,
+        api_key=request.api_key
+    )
+
+    return LLMTestResponse(success=success, message=message)
 
 
 @app.post("/api/environment")
@@ -1481,12 +1547,51 @@ def api_apply_sequence(req: ApplySequenceRequest):
         trajectory_planner = ISRTrajectoryPlanner(sams)
         trajectory = trajectory_planner.generate_trajectory(route_ids, waypoint_positions)
 
-        # Calculate total distance from trajectory
+        # Calculate total distance using SAM-aware distance matrix
         total_distance = 0.0
-        for i in range(1, len(trajectory)):
-            dx = trajectory[i][0] - trajectory[i-1][0]
-            dy = trajectory[i][1] - trajectory[i-1][1]
-            total_distance += math.hypot(dx, dy)
+        distance_matrix = get_current_matrix()
+        if distance_matrix:
+            labels = distance_matrix.get("labels", [])
+            matrix = distance_matrix.get("matrix", [])
+            label_to_idx = {str(lbl): i for i, lbl in enumerate(labels)}
+
+            print(f"[apply_sequence] D{req.drone_id}: Computing distance for route {route_ids}", flush=True)
+            print(f"[apply_sequence] Matrix has {len(labels)} labels: {labels[:20]}{'...' if len(labels) > 20 else ''}", flush=True)
+            # Check which route waypoints are missing from matrix
+            missing = [wp for wp in route_ids if wp not in label_to_idx]
+            if missing:
+                print(f"[apply_sequence] ⚠️ MISSING from matrix: {missing}", flush=True)
+
+            for i in range(len(route_ids) - 1):
+                from_id = route_ids[i]
+                to_id = route_ids[i + 1]
+                from_idx = label_to_idx.get(from_id)
+                to_idx = label_to_idx.get(to_id)
+                if from_idx is not None and to_idx is not None:
+                    seg_dist = matrix[from_idx][to_idx]
+                    total_distance += seg_dist
+                    print(f"   {from_id}→{to_id}: {seg_dist:.1f} (matrix) → cumulative: {total_distance:.1f}", flush=True)
+                else:
+                    # Fallback to Euclidean for unknown waypoints (e.g., synthetic starts)
+                    from_pos = waypoint_positions.get(from_id)
+                    to_pos = waypoint_positions.get(to_id)
+                    if from_pos and to_pos:
+                        dx = to_pos[0] - from_pos[0]
+                        dy = to_pos[1] - from_pos[1]
+                        seg_dist = math.hypot(dx, dy)
+                        total_distance += seg_dist
+                        print(f"   {from_id}→{to_id}: {seg_dist:.1f} (EUCLIDEAN fallback) → cumulative: {total_distance:.1f}", flush=True)
+                    else:
+                        print(f"   {from_id}→{to_id}: SKIPPED - missing position data!", flush=True)
+        else:
+            # Fallback: calculate from trajectory if no matrix available
+            print(f"[apply_sequence] D{req.drone_id}: NO MATRIX - using trajectory distance", flush=True)
+            for i in range(1, len(trajectory)):
+                dx = trajectory[i][0] - trajectory[i-1][0]
+                dy = trajectory[i][1] - trajectory[i-1][1]
+                total_distance += math.hypot(dx, dy)
+
+        print(f"[apply_sequence] D{req.drone_id}: FINAL distance={total_distance:.1f}", flush=True)
 
         # Calculate points from visited targets
         total_points = 0
@@ -1823,6 +1928,7 @@ async def agent_chat_v4(req: AgentChatRequest):
             drone_configs=drone_configs,
             sam_matrix=sam_matrix,  # Pass pre-computed matrix with metadata
             existing_solution=existing_solution,
+            llm_config=req.llm_config,  # Pass LLM provider configuration
         )
 
         if not isinstance(result, dict):

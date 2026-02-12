@@ -613,7 +613,17 @@ def allocate_targets(
     targets = env.get("targets", [])
     airports = list(env.get("airports", []))  # Make a copy to avoid modifying original
 
-    # Add synthetic start nodes (for checkpoint replanning)
+    # Add checkpoints (C1, C2, etc.) for segmented mission replanning
+    # Checkpoints act like airports - drones can start from these positions
+    for checkpoint in env.get("checkpoints", []):
+        airports.append({
+            "id": str(checkpoint["id"]),
+            "x": float(checkpoint["x"]),
+            "y": float(checkpoint["y"]),
+            "is_checkpoint": True,
+        })
+
+    # Add synthetic start nodes (for checkpoint replanning - legacy support)
     # These act like airports - drones can start from these positions
     for node_id, node_data in env.get("synthetic_starts", {}).items():
         airports.append({
