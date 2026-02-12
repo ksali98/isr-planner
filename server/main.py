@@ -326,11 +326,11 @@ def _known_waypoint_ids(env: Dict[str, Any]) -> set:
     # Synthetic starts can behave like airports/waypoints
     for sid in (env.get("synthetic_starts") or {}).keys():
         ids.add(str(sid))
-    # Checkpoints (C1-1, C1-2, etc.) are valid waypoints for segmented missions
-    for cp in env.get("checkpoints", []):
-        cpid = cp.get("id")
-        if cpid:
-            ids.add(str(cpid))
+# Checkpoints are valid waypoints in segmented missions
+    for c in env.get("checkpoints", []):
+        cid = c.get("id") or c.get("label")
+        if cid:
+            ids.add(str(cid))
     return ids
 
 
@@ -377,7 +377,10 @@ def verify_solution_basic(env: Dict[str, Any], routes: Dict[str, Any], drone_con
         dist = r.get("distance")
         budget = r.get("fuel_budget")
         if isinstance(dist, (int, float)) and isinstance(budget, (int, float)):
-            if dist > budget + 1e-6:
+            # Check for blocked path (99999 sentinel)
+            if dist >= 99999:
+                errors.append(f"route[{drone_id}] has blocked path (SAM obstruction between waypoints)")
+            elif dist > budget + 1e-6:
                 errors.append(f"route[{drone_id}] exceeds fuel budget: {dist:.2f} > {budget:.2f}")
 
     return errors
@@ -1334,6 +1337,14 @@ def solve_with_allocation(req: SolveWithAllocationRequest):
         print(f"🔄 {label}: Filtered {len(visited_set)} visited targets, {len(env_to_solve['targets'])} remaining", flush=True)
         print(f"   Visited: {req.visited_targets}", flush=True)
         print(f"   Synthetic starts: {list(env_to_solve.get('synthetic_starts', {}).keys())}", flush=True)
+        print(f"   Checkpoints: {[c.get('id') for c in env_to_solve.get('checkpoints', [])]}", flush=True)
+
+    # Debug: Always log checkpoints
+    checkpoints_in_env = env_to_solve.get('checkpoints', [])
+    if checkpoints_in_env:
+        print(f"📍 Checkpoints in request: {[c.get('id') for c in checkpoints_in_env]}", flush=True)
+    else:
+        print(f"⚠️ No checkpoints in request env", flush=True)
 
     result = solve_mission_with_allocation(
         env=env_to_solve,

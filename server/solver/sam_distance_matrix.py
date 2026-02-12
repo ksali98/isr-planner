@@ -194,6 +194,9 @@ class SAMDistanceMatrixCalculator:
                     if path is None or distance == float('inf'):
                         # No valid SAM-safe path for this pair → mark as very large
                         matrix[i][j] = 99999.0
+                        # Log blocked paths involving checkpoints (C prefix) for debugging
+                        if labels[i].startswith('C') or labels[j].startswith('C'):
+                            print(f"   ⚠️ [SAM Matrix] Blocked path: {labels[i]} → {labels[j]} (SAM obstruction)", flush=True)
                     else:
                         matrix[i][j] = distance
                         # Store the path for later visualization

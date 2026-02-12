@@ -281,12 +281,15 @@ def solve_mission(
     print(f"   🔍 Real airports: {real_airports}", flush=True)
     print(f"   🔍 Synthetic airports: {synthetic_airports}", flush=True)
 
-    if not airports or not targets:
-        print("⚠️ No airports or targets, returning empty", flush=True)
+    if not airports:
+        print("⚠️ No airports, returning empty", flush=True)
         return {
             "sequences": {},
             "routes": {},
         }
+
+    # Note: We continue even if targets is empty - drones still need
+    # routes to return from checkpoints to airports when all targets are visited
 
     # Build a global distance matrix; we'll reuse it per drone
     # ALWAYS use SAM-aware distances for consistency and exclusion detection
@@ -516,11 +519,12 @@ def solve_mission(
             and not str(a.get("id", "")).startswith("C")  # Exclude C1, C2, etc.
         ]
 
-        # CRITICAL FIX: Add ALL synthetic starts that are in the filtered matrix
+        # CRITICAL FIX: Add ALL synthetic starts and checkpoints that are in the filtered matrix
         # This ensures every node in matrix_labels is classified as either airport or target
-        # Without this, the solver guard will reject unknown labels like D1_START, D2_START
+        # Without this, the solver guard will reject unknown labels like D1_START, D2_START, C1-1, C1-2
         waypoint_positions_for_synthetic = {wp["id"]: wp for wp in dist_data.get("waypoints", [])}
         for fid in filtered_ids:
+            # Check for synthetic starts (D1_START, D2_START, etc.)
             if fid.endswith("_START") and fid not in real_airport_ids:
                 # This is a synthetic start - add it as an airport
                 if fid in waypoint_positions_for_synthetic:
@@ -535,6 +539,21 @@ def solve_mission(
                     print(f"   ✅ Added synthetic start '{fid}' to airports: ({wp['x']:.1f}, {wp['y']:.1f})", flush=True)
                 else:
                     print(f"   ⚠️ WARNING: Synthetic start '{fid}' not found in waypoints!", flush=True)
+            # Check for checkpoints (C1-1, C1-2, C2-1, etc.)
+            elif re.match(r'^C\d+-\d+$', fid) and fid not in [a["id"] for a in solver_airports]:
+                # This is a checkpoint - add it as an airport
+                if fid in waypoint_positions_for_synthetic:
+                    wp = waypoint_positions_for_synthetic[fid]
+                    checkpoint_airport = {
+                        "id": fid,
+                        "x": wp["x"],
+                        "y": wp["y"],
+                        "is_checkpoint": True,  # Mark so we can filter for endpoints
+                    }
+                    solver_airports.append(checkpoint_airport)
+                    print(f"   ✅ Added checkpoint '{fid}' to airports: ({wp['x']:.1f}, {wp['y']:.1f})", flush=True)
+                else:
+                    print(f"   ⚠️ WARNING: Checkpoint '{fid}' not found in waypoints!", flush=True)
 
         print(f"   🔍 DEBUG: solver_airports: {[a['id'] for a in solver_airports]}", flush=True)
 
@@ -602,6 +621,10 @@ def solve_mission(
         # Fallback if solver didn't return route
         if not route_ids:
             route_ids = [start_id] + visited_targets + [end_id]
+        elif len(route_ids) == 1 and end_id and route_ids[-1] != end_id:
+            # Solver returned only start (no targets fit), add the end airport
+            route_ids = route_ids + [end_id]
+            print(f"   📍 Added end airport {end_id} to single-waypoint route", flush=True)
 
         # Calculate total points from visited targets
         target_priorities = {t["id"]: int(t.get("priority", 1)) for t in candidate_targets}
@@ -614,7 +637,13 @@ def solve_mission(
 
         # Generate trajectory using clean ISRTrajectoryPlanner (like Delivery Planner)
         trajectory_planner = ISRTrajectoryPlanner(sams)
+        # Build waypoint positions from dist_data AND airports (for checkpoints)
         waypoint_positions = {wp["id"]: [wp["x"], wp["y"]] for wp in dist_data.get("waypoints", [])}
+        # Also add airports (including checkpoints) that might not be in waypoints
+        for a in airports:
+            aid = str(a.get("id", ""))
+            if aid and aid not in waypoint_positions:
+                waypoint_positions[aid] = [float(a["x"]), float(a["y"])]
         trajectory = trajectory_planner.generate_trajectory(route_ids, waypoint_positions)
 
         print(f"   🛫 Generated trajectory: {len(trajectory)} points for route {route_ids}", flush=True)
@@ -668,11 +697,14 @@ def solve_mission_with_allocation(
 
     airports, targets, sams = _parse_env_for_solver(env)
 
-    if not airports or not targets:
+    if not airports:
         return {
             "sequences": {},
             "routes": {},
         }
+
+    # Note: We don't return early if targets is empty - drones still need
+    # routes to return from checkpoints to airports when all targets are visited
 
     # Step 1: Get distance matrix
     # ALWAYS use SAM-aware matrix calculator for consistency
@@ -683,6 +715,12 @@ def solve_mission_with_allocation(
     # Always clear and recalculate to ensure fresh exclusion detection
     sam_count = len(sams) if sams else 0
     print(f"🎯 Calculating fresh distance matrix ({sam_count} SAMs)...", flush=True)
+    # Debug: Check if checkpoints are in env before matrix calculation
+    checkpoints_in_env = env.get("checkpoints", [])
+    if checkpoints_in_env:
+        print(f"📍 [MATRIX] Checkpoints in env: {[c.get('id') for c in checkpoints_in_env]}", flush=True)
+    else:
+        print(f"⚠️ [MATRIX] No checkpoints in env!", flush=True)
     clear_matrix_cache()
     clear_allocator_matrix()  # Also clear allocator's cached matrix
     dist_data = calculate_sam_aware_matrix(env)
@@ -822,28 +860,55 @@ def solve_mission_with_allocation(
             route_distance = 0.0
             if route_ids and len(route_ids) >= 2:
                 trajectory_planner = ISRTrajectoryPlanner(sams)
+                # Build waypoint positions from dist_data AND airports (for checkpoints)
                 waypoint_positions = {wp["id"]: [wp["x"], wp["y"]] for wp in dist_data.get("waypoints", [])}
+                # Also add airports (including checkpoints) that might not be in waypoints
+                for a in airports:
+                    aid = str(a.get("id", ""))
+                    if aid and aid not in waypoint_positions:
+                        waypoint_positions[aid] = [float(a["x"]), float(a["y"])]
+                        print(f"   📍 Added checkpoint/airport position: {aid} at ({a['x']:.1f}, {a['y']:.1f})", flush=True)
                 trajectory = trajectory_planner.generate_trajectory(route_ids, waypoint_positions, drone_id=did)
 
-                # Calculate distance from SAM-aware distance matrix
-                orig_labels = dist_data["labels"]
-                orig_matrix = dist_data["matrix"]
+                # Calculate distance - prefer trajectory distance over matrix when path is blocked
+                orig_labels = dist_data.get("labels", [])
+                orig_matrix = dist_data.get("matrix", [])
+
                 for i in range(len(route_ids) - 1):
                     from_id = route_ids[i]
                     to_id = route_ids[i + 1]
+                    segment_dist = None
+
+                    # Try to get distance from matrix
                     if from_id in orig_labels and to_id in orig_labels:
                         from_idx = orig_labels.index(from_id)
                         to_idx = orig_labels.index(to_id)
-                        route_distance += orig_matrix[from_idx][to_idx]
+                        segment_dist = orig_matrix[from_idx][to_idx]
+
+                    # If matrix says blocked (99999) or not in matrix, calculate from trajectory
+                    if segment_dist is None or segment_dist >= 99999:
+                        if trajectory and len(trajectory) >= 2:
+                            # Calculate actual distance from trajectory points
+                            traj_dist = 0.0
+                            for j in range(len(trajectory) - 1):
+                                p1 = trajectory[j]
+                                p2 = trajectory[j + 1]
+                                dx = p2[0] - p1[0]
+                                dy = p2[1] - p1[1]
+                                traj_dist += math.sqrt(dx*dx + dy*dy)
+                            route_distance = traj_dist  # Use trajectory distance for entire route
+                            print(f"   🔄 D{did}: Using trajectory distance ({traj_dist:.1f}) for {from_id}→{to_id} (matrix was blocked)", flush=True)
+                        else:
+                            # Fallback to Euclidean if no trajectory
+                            from_pos = waypoint_positions.get(from_id)
+                            to_pos = waypoint_positions.get(to_id)
+                            if from_pos and to_pos:
+                                dx = to_pos[0] - from_pos[0]
+                                dy = to_pos[1] - from_pos[1]
+                                route_distance += math.sqrt(dx*dx + dy*dy)
+                                print(f"   ⚠️ D{did}: Fallback Euclidean for {from_id}→{to_id}", flush=True)
                     else:
-                        # Fallback for waypoints not in matrix (should not happen)
-                        from_pos = waypoint_positions.get(from_id)
-                        to_pos = waypoint_positions.get(to_id)
-                        if from_pos and to_pos:
-                            dx = to_pos[0] - from_pos[0]
-                            dy = to_pos[1] - from_pos[1]
-                            route_distance += math.sqrt(dx*dx + dy*dy)
-                            print(f"   ⚠️ Fallback Euclidean for {from_id}→{to_id}", flush=True)
+                        route_distance += segment_dist
 
             sequences[did] = seq
             routes_detail[did] = {
@@ -941,11 +1006,12 @@ def solve_mission_with_allocation(
             and not str(a.get("id", "")).startswith("C")  # Exclude C1, C2, etc.
         ]
 
-        # CRITICAL FIX: Add ALL synthetic starts that are in the filtered matrix
+        # CRITICAL FIX: Add ALL synthetic starts and checkpoints that are in the filtered matrix
         # This ensures every node in matrix_labels is classified as either airport or target
-        # Without this, the solver guard will reject unknown labels like D1_START, D2_START
+        # Without this, the solver guard will reject unknown labels like D1_START, D2_START, C1-1, C1-2
         waypoint_positions_for_synthetic = {wp["id"]: wp for wp in dist_data.get("waypoints", [])}
         for fid in filtered_ids:
+            # Check for synthetic starts (D1_START, D2_START, etc.)
             if fid.endswith("_START") and fid not in real_airport_ids:
                 # This is a synthetic start - add it as an airport
                 if fid in waypoint_positions_for_synthetic:
@@ -960,6 +1026,21 @@ def solve_mission_with_allocation(
                     print(f"   ✅ Added synthetic start '{fid}' to airports: ({wp['x']:.1f}, {wp['y']:.1f})", flush=True)
                 else:
                     print(f"   ⚠️ WARNING: Synthetic start '{fid}' not found in waypoints!", flush=True)
+            # Check for checkpoints (C1-1, C1-2, C2-1, etc.)
+            elif re.match(r'^C\d+-\d+$', fid) and fid not in [a["id"] for a in solver_airports]:
+                # This is a checkpoint - add it as an airport
+                if fid in waypoint_positions_for_synthetic:
+                    wp = waypoint_positions_for_synthetic[fid]
+                    checkpoint_airport = {
+                        "id": fid,
+                        "x": wp["x"],
+                        "y": wp["y"],
+                        "is_checkpoint": True,  # Mark so we can filter for endpoints
+                    }
+                    solver_airports.append(checkpoint_airport)
+                    print(f"   ✅ Added checkpoint '{fid}' to airports: ({wp['x']:.1f}, {wp['y']:.1f})", flush=True)
+                else:
+                    print(f"   ⚠️ WARNING: Checkpoint '{fid}' not found in waypoints!", flush=True)
 
         print(f"   🔍 DEBUG: solver_airports: {[a['id'] for a in solver_airports]}", flush=True)
 
@@ -1015,6 +1096,10 @@ def solve_mission_with_allocation(
         if not route_ids:
             # Fallback if solver didn't return route
             route_ids = [start_id] + visited_targets + [end_id]
+        elif len(route_ids) == 1 and end_id and route_ids[-1] != end_id:
+            # Solver returned only start (no targets fit), add the end airport
+            route_ids = route_ids + [end_id]
+            print(f"   📍 Added end airport {end_id} to single-waypoint route", flush=True)
 
         # Calculate total points from visited targets
         target_priorities = {t["id"]: int(t.get("priority", 1)) for t in candidate_targets}
@@ -1039,7 +1124,13 @@ def solve_mission_with_allocation(
 
         # Generate SAM-avoiding trajectory using ISRTrajectoryPlanner
         trajectory_planner = ISRTrajectoryPlanner(sams)
+        # Build waypoint positions from dist_data AND airports (for checkpoints)
         waypoint_positions = {wp["id"]: [wp["x"], wp["y"]] for wp in dist_data.get("waypoints", [])}
+        # Also add airports (including checkpoints) that might not be in waypoints
+        for a in airports:
+            aid = str(a.get("id", ""))
+            if aid and aid not in waypoint_positions:
+                waypoint_positions[aid] = [float(a["x"]), float(a["y"])]
         trajectory = trajectory_planner.generate_trajectory(route_ids, waypoint_positions, drone_id=did)
 
         # DEBUG: Log trajectory endpoints vs expected airport position

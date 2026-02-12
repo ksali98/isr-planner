@@ -198,6 +198,8 @@ def solve_orienteering_with_matrix(env, start_id=None, mode=None, fuel_cap=None,
 
     # Validate basic fields
     if start_id not in labels:
+        print(f"❌ ERROR: Start airport '{start_id}' not in matrix_labels", flush=True)
+        print(f"   Available labels ({len(labels)}): {labels[:20]}{'...' if len(labels) > 20 else ''}", flush=True)
         raise ValueError(f"Start airport '{start_id}' not found in matrix_labels.")
     start_idx = labels.index(start_id)
 
@@ -321,16 +323,27 @@ def solve_orienteering_with_matrix(env, start_id=None, mode=None, fuel_cap=None,
                     })
             # Removed verbose rejected logging - only show feasible solutions
 
-    # Nothing fit: return start-only (0 points)
+    # Nothing fit: return start->end route (0 points, no targets)
     if best["points"] < 0:
+        actual_end = start_id if mode=="return" else (end_id if end_id else start_id)
+        # Route must always have at least [start, end] for trajectory generation
+        if actual_end and actual_end != start_id:
+            route_for_no_targets = [start_id, actual_end]
+            # Calculate the direct distance for start->end
+            start_idx_for_dist = labels.index(start_id)
+            end_idx_for_dist = labels.index(actual_end) if actual_end in labels else start_idx_for_dist
+            direct_dist = D_full[start_idx_for_dist][end_idx_for_dist] if end_idx_for_dist != start_idx_for_dist else 0.0
+        else:
+            route_for_no_targets = [start_id]
+            direct_dist = 0.0
         return {
-            "sequence": start_id,
-            "route": [start_id],
-            "distance": 0.0,
+            "sequence": " ".join(route_for_no_targets),
+            "route": route_for_no_targets,
+            "distance": direct_dist,
             "total_points": 0,
             "visited_targets": [],
             "start_airport": start_id,
-            "end_airport": start_id if mode=="return" else (end_id if end_id else start_id),
+            "end_airport": actual_end,
         }
 
     final_solution = {
